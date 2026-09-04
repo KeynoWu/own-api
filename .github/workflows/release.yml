@@ -88,3 +88,29 @@ jobs:
             artifacts/**/*.exe
           generate_release_notes: true
           draft: false
+      # ↓↓↓ 公开发版：同事免登录下载，源码仍私有。需 secret RELEASES_TOKEN（对 own-api-releases 有写权限）
+      - uses: actions/checkout@v4
+      - name: 从 CHANGELOG.md 提取当前版本更新说明
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          awk -v head="## ${GITHUB_REF_NAME}" '
+            index($0, head) == 1 {
+              rest = substr($0, length(head) + 1)
+              if (rest == "" || rest ~ /^ / || rest ~ /^（/) { flag = 1; next }
+            }
+            /^## / && flag { exit }
+            flag { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "::error::CHANGELOG.md 缺 ${GITHUB_REF_NAME} 段落"; exit 1; }
+      - name: 同步安装包+说明到公开下载仓库（KeynoWu/own-api-releases）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: KeynoWu/own-api-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          draft: false
