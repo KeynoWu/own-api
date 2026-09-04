@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'" />
+<title>llm-manager · 模型管理与统一代理</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c2230; --line: #262d3a;
+    --fg: #e6edf3; --dim: #8b98a9; --dimmer: #5d6b7c;
+    --accent: #4c8dff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft Yahei", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 20; }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button { background: none; border: 1px solid transparent; color: var(--dim); padding: 6px 12px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  nav button:hover { color: var(--fg); background: var(--panel-2); }
+  nav button.on { color: var(--fg); background: var(--panel-2); border-color: var(--line); }
+  main { padding: 20px 22px 60px; max-width: 1400px; margin: 0 auto; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim); margin: 26px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .grid { display: grid; gap: 12px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card .k { color: var(--dim); font-size: 12px; }
+  .card .v { font-size: 22px; font-weight: 600; font-family: var(--mono); margin-top: 4px; }
+  .card .v small { font-size: 12px; color: var(--dim); font-weight: 400; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dimmer); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 9px 10px; border-bottom: 1px solid rgba(38,45,58,.6); vertical-align: middle; }
+  tr:hover td { background: rgba(76,141,255,.05); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); background: var(--panel-2); color: var(--dim); }
+  .pill.ok { color: var(--ok); border-color: rgba(63,185,80,.4); }
+  .pill.err { color: var(--err); border-color: rgba(248,81,73,.4); }
+  .pill.warn { color: var(--warn); border-color: rgba(210,153,34,.4); }
+  .pill.oai { color: #79c0ff; } .pill.ant { color: #ffa657; }
+  button.btn, input, select, textarea { font-family: inherit; font-size: 13px; }
+  .btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); padding: 6px 12px; border-radius: 7px; cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.sm { padding: 3px 8px; font-size: 12px; }
+  .btn.danger:hover { border-color: var(--err); color: var(--err); }
+  input, select, textarea { background: #0b0f14; color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; outline: none; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { width: 100%; min-height: 78px; font-family: var(--mono); font-size: 12px; resize: vertical; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
+  .form .full { grid-column: 1 / -1; }
+  .muted { color: var(--dim); }
+  .err-text { color: var(--err); font-size: 12px; }
+  .bar { height: 6px; border-radius: 4px; background: var(--panel-2); overflow: hidden; display: flex; min-width: 90px; }
+  .bar i { display: block; height: 100%; background: var(--ok); }
+  .bar i.e { background: var(--err); }
+  pre.code { background: #0b0f14; border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; overflow: auto; font-family: var(--mono); font-size: 12px; margin: 0; white-space: pre-wrap; word-break: break-all; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; width: min(720px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 6px; font-size: 15px; }
+  #toast { position: fixed; right: 18px; bottom: 18px; display: flex; gap: 8px; flex-direction: column; z-index: 50; }
+  #toast div { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 8px; font-size: 13px; max-width: 420px; }
+  #toast div.err { border-left-color: var(--err); }
+  #gate { max-width: 420px; margin: 12vh auto; }
+  .split { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+  details summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  .log-line { font-family: var(--mono); font-size: 11.5px; padding: 5px 8px; border-bottom: 1px solid rgba(38,45,58,.5); display: flex; gap: 10px; }
+  .log-line:hover { background: rgba(76,141,255,.06); }
+  .log-line .c { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>llm-manager</h1>
+  <span class="sub" id="hdr-sub">统一模型代理网关</span>
+  <nav id="nav" hidden>
+    <button data-v="overview">概览</button>
+    <button data-v="models">模型路由</button>
+    <button data-v="auto">自动路由</button>
+    <button data-v="channels">渠道与号池</button>
+    <button data-v="vkeys">对外 Key</button>
+    <button data-v="connect">接入方式</button>
+    <button data-v="logs">请求日志</button>
+    <button data-v="settings">设置</button>
+  </nav>
+</header>
+<main id="main">
+  <div id="gate">
+    <div class="card">
+      <div class="k">管理令牌</div>
+      <p class="muted" style="margin:8px 0 14px">启动日志里的 <span class="mono">管理令牌</span>，填入后进入管理台。</p>
+      <div class="row"><input id="token" type="password" placeholder="admin-..." style="flex:1" /><button class="btn primary" id="go">进入</button></div>
+    </div>
+  </div>
+  <div id="app" hidden></div>
+</main>
+<div id="toast"></div>
+<dialog id="dlg"></dialog>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'html') n.innerHTML = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) n.append(k.nodeType ? k : document.createTextNode(k));
+  return n;
+};
+// 管理令牌只从本地存储取：不走 URL，避免令牌进地址栏 / 浏览历史 / 任何访问日志
+let TOKEN = localStorage.getItem('lm_token') || '';
+const api = async (path, opt = {}) => {
+  const res = await fetch(path, { ...opt, headers: { 'content-type': 'application/json', 'x-admin-token': TOKEN, ...(opt.headers || {}) } });
+  if (res.status === 401) { throw new Error('管理令牌无效，请重新输入'); }
+  const txt = await res.text();
+  let body; try { body = txt ? JSON.parse(txt) : {}; } catch { body = { raw: txt }; }
+  if (!res.ok) throw new Error(body?.error?.message || body?.error || `HTTP ${res.status}`);
+  return body;
+};
+const toast = (msg, bad) => {
+  const n = el('div', { class: bad ? 'err' : '' }, String(msg));
+  $('#toast').append(n);
+  setTimeout(() => n.remove(), bad ? 6000 : 2600);
+};
+const copy = (t) => navigator.clipboard.writeText(t).then(() => toast('已复制'), () => toast('复制失败', true));
+const num = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n || 0));
+const money = (n) => '$' + (Number(n) || 0).toFixed(4);
+const ago = (t) => {
+  if (!t) return '-';
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return s + 's 前';
+  if (s < 3600) return Math.floor(s / 60) + 'm 前';
+  if (s < 86400) return Math.floor(s / 3600) + 'h 前';
+  return Math.floor(s / 86400) + 'd 前';
+};
+const clock = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false });
+const proto = (p) => el('span', { class: 'pill ' + (p === 'anthropic' ? 'ant' : 'oai') }, p === 'anthropic' ? 'Anthropic' : 'OpenAI');
+
+// ---------------- 弹窗表单 ----------------
+function form(title, fields, onSubmit) {
+  const dlg = $('#dlg');
+  const inputs = {};
+  const body = el('div');
+  for (const f of fields) {
+    body.append(el('label', {}, f.label));
+    let node;
+    if (f.type === 'select') {
+      node = el('select', {}, ...(f.options || []).map((o) => el('option', { value: o.value, ...(f.value === o.value ? { selected: '' } : {}) }, o.label)));
+    } else if (f.type === 'textarea') {
+      node = el('textarea', { placeholder: f.ph || '' }, f.value || '');
+    } else if (f.type === 'check') {
+      node = el('input', { type: 'checkbox', ...(f.value ? { checked: '' } : {}) });
+    } else {
+      node = el('input', { type: f.type || 'text', value: f.value ?? '', placeholder: f.ph || '', step: f.step });
+    }
+    node.style.width = '100%';
+    inputs[f.name] = node;
+    body.append(el('div', { class: f.full ? 'full' : '' }, node));
+    if (f.hint) body.append(el('div', { class: 'muted', style: 'font-size:11px;margin-top:3px' }, f.hint));
+  }
+  // 联动下拉：依赖字段（如上游渠道）变化时，重填本字段的 options
+  for (const f of fields) {
+    if (f.type === 'select' && f.depends && f.optionsFor && inputs[f.depends]) {
+      const target = inputs[f.depends];
+      const populate = () => {
+        const opts = f.optionsFor(String(target.value)) || [];
+        const cur = inputs[f.name];
+        cur.innerHTML = '';
+        for (const o of opts) {
+          const attr = { value: o.disabled ? '' : o.value };
+          if (o.disabled) attr.disabled = '';
+          cur.append(el('option', attr, o.label));
+        }
+        if (f.value && opts.some((o) => String(o.value) === String(f.value))) cur.value = String(f.value);
+        else { const first = opts.find((o) => !o.disabled); if (first) cur.value = first.value; }
+      };
+      target.addEventListener('change', populate);
+      populate();
+    }
+  }
+
+  const submit = async () => {
+    const vals = {};
+    for (const f of fields) vals[f.name] = inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
+    try { await onSubmit(vals); dlg.close(); } catch (e) { toast(e.message, true); }
+  };
+  dlg.innerHTML = '';
+  dlg.append(el('h3', {}, title), body, el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' },
+    el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
+    el('button', { class: 'btn primary', onclick: submit }, '保存')));
+  dlg.showModal();
+}
+
+// ---------------- 路由 ----------------
+const views = {};
+let timer = null;
+function go(v) {
+  clearInterval(timer);
+  if (v !== 'logs' && es) { es.close(); es = null; }
+  location.hash = v;
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  $('#app').innerHTML = '';
+  $('#app').append(views.loading());
+  Promise.resolve(views[v]())
+    .then((node) => { $('#app').innerHTML = ''; $('#app').append(node); })
+    .catch((e) => { $('#app').innerHTML = ''; $('#app').append(el('div', { class: 'card err-text' }, e.message)); });
+}
+
+views.loading = () => el('div', { class: 'muted' }, '加载中…');
+
+const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, sub ? el('small', {}, ' ' + sub) : null));
+
+// ---------------- 概览 ----------------
+views.overview = async () => {
+  const o = await api('/api/overview');
+  const s = o.stats || {};
+  const t = s.totals || {};
+  const frag = document.createDocumentFragment();
+  const box = el('div');
+  box.append(el('div', { class: 'grid cards' },
+    card('24h 请求', num(t.requests), `${s.successRate ?? 100}% 成功`),
+    card('Token 消耗', num((t.promptTokens || 0) + (t.completionTokens || 0)), `出 ${num(t.completionTokens)}`),
+    card('估算花费', money(t.costUsd), '按模型单价'),
+    card('P50 / P95', `${s.p50Latency || 0}/${s.p95Latency || 0}`, 'ms'),
+    card('渠道 / 模型 / Key', `${o.channels.length}/${o.models}/${o.vkeys}`),
+  ));
+
+  box.append(el('h2', {}, '号池健康度'));
+  if (!o.channels.length) box.append(el('div', { class: 'card muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。'));
+  const table = el('table');
+  table.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
+  for (const c of o.channels) {
+    const pct = c.keys ? Math.round((c.available / c.keys) * 100) : 0;
+    table.append(el('tr', {},
+      el('td', {}, c.name),
+      el('td', {}, proto(c.protocol)),
+      el('td', {}, el('div', { class: 'row' }, el('div', { class: 'bar' }, el('i', { style: `width:${pct}%`, class: pct === 0 ? 'e' : '' })), el('span', { class: 'mono muted' }, `${c.available}/${c.keys}`))),
+      el('td', {}, c.cooldown ? el('span', { class: 'pill warn' }, `${c.cooldown} 冷却中`) : c.available ? el('span', { class: 'pill ok' }, '正常') : el('span', { class: 'pill err' }, '无可用 key')),
+      el('td', {}, el('button', { class: 'btn sm', onclick: () => go('channels') }, '管理')),
+    ));
+  }
+  box.append(table);
+
+  box.append(el('h2', {}, '按模型用量（24h）'));
+  const mt = el('table');
+  mt.append(el('tr', {}, el('th', {}, '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读'), el('th', {}, '花费'), el('th', {}, '平均延迟')));
+  for (const m of s.byModel || []) {
+    mt.append(el('tr', {}, el('td', { class: 'mono' }, m.key), el('td', {}, m.requests),
+      el('td', { class: m.errors ? 'err-text' : '' }, m.errors), el('td', { class: 'mono' }, num(m.promptTokens)),
+      el('td', { class: 'mono' }, num(m.completionTokens)), el('td', { class: 'mono' }, num(m.cacheReadTokens)),
+      el('td', { class: 'mono' }, money(m.costUsd)), el('td', { class: 'mono muted' }, m.avgLatencyMs + 'ms')));
+  }
+  if (!(s.byModel || []).length) mt.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
+  box.append(mt);
+
+  timer = setInterval(() => go('overview'), 15000);
+  frag.append(box);
+  return frag;
+};
+
+// ---------------- 模型路由 ----------------
+views.models = async () => {
+  const [models, channels] = await Promise.all([api('/api/models'), api('/api/channels')]);
+  const box = el('div');
+  const addModel = () => form('新增模型路由', [
+    { name: 'publicName', label: '对外模型名（agent 请求里传的 model）', ph: 'gpt-4o / claude-sonnet-4' },
+    { name: 'channelId', label: '上游渠道', type: 'select', options: channels.map((c) => ({ value: c.id, label: `${c.name} (${c.protocol})` })) },
+    { name: 'upstreamModel', label: '上游真实模型名（从所选渠道模型列表选）', type: 'select', depends: 'channelId', optionsFor: (cid) => { const l = (channels.find((c) => c.id === cid)?.modelList || []).filter(Boolean); return l.length ? l.map((mm) => ({ value: mm, label: mm })) : [{ value: '', label: '该渠道未配置模型列表，请先在渠道里填', disabled: true }]; } },
+    { name: 'protocol', label: '协议（默认跟随渠道）', type: 'select', options: [{ value: '', label: '跟随渠道' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }] },
+    { name: 'priceInput', label: '输入 $/百万 token', type: 'number', step: '0.01' },
+    { name: 'priceOutput', label: '输出 $/百万 token', type: 'number', step: '0.01' },
+    { name: 'maxOutputTokens', label: 'max_tokens 默认值', type: 'number' },
+    { name: 'contextWindow', label: '上下文窗口', type: 'number' },
+  ], (v) => api('/api/models', { method: 'POST', body: JSON.stringify({
+      publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || undefined,
+      priceInput: v.priceInput ? Number(v.priceInput) : undefined, priceOutput: v.priceOutput ? Number(v.priceOutput) : undefined,
+      maxOutputTokens: v.maxOutputTokens ? Number(v.maxOutputTokens) : undefined, contextWindow: v.contextWindow ? Number(v.contextWindow) : undefined,
+    }) }).then(() => { toast('已创建'); go('models'); }));
+
+  box.append(el('div', { class: 'toolbar' },
+    el('button', { class: 'btn primary', onclick: addModel }, '+ 新增模型'),
+    el('span', { class: 'muted' }, '统一代理只接受这里登记过的 model；切换 model 即自动切换到对应真实 url/key。'),
+  ));
+
+  const t = el('table');
+  t.append(el('tr', {}, el('th', {}, '对外模型名'), el('th', {}, '→ 上游'), el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '单价 in/out'), el('th', {}, '状态'), el('th', {}, '')));
+  for (const m of models) {
+    t.append(el('tr', {},
+      el('td', { class: 'mono' }, m.publicName, m.tags?.length ? el('span', { class: 'muted' }, ' · ' + m.tags.join(',')) : null),
+      el('td', { class: 'mono muted' }, m.upstreamModel),
+      el('td', {}, m.channelName),
+      el('td', {}, proto(m.protocol || m.channelProtocol)),
+      el('td', { class: 'mono muted' }, m.priceInput != null ? `${m.priceInput} / ${m.priceOutput}` : '-'),
+      el('td', {}, m.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
+      el('td', {}, el('div', { class: 'row' },
+        el('button', { class: 'btn sm', onclick: () => api(`/api/models/${m.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !m.enabled }) }).then(() => go('models')) }, m.enabled ? '停用' : '启用'),
+        el('button', { class: 'btn sm', onclick: () => form('编辑 ' + m.publicName, [
+          { name: 'publicName', label: '对外模型名', value: m.publicName },
+          { name: 'upstreamModel', label: '上游真实模型名', type: 'select', value: m.upstreamModel, depends: 'channelId', optionsFor: (cid) => { const ch = channels.find((c) => c.id === cid); const l = (ch?.modelList || []).filter(Boolean); const opts = l.map((mm) => ({ value: mm, label: mm })); if (!l.includes(m.upstreamModel)) opts.push({ value: m.upstreamModel, label: m.upstreamModel + '（不在列表，保留原值）' }); return opts.length ? opts : [{ value: '', label: '该渠道未配置模型列表', disabled: true }]; } },
+          { name: 'channelId', label: '渠道', type: 'select', value: m.channelId, options: channels.map((c) => ({ value: c.id, label: c.name })) },
+          { name: 'protocol', label: '协议', type: 'select', value: m.protocol || '', options: [{ value: '', label: '跟随渠道' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }] },
+          { name: 'priceInput', label: '输入 $/M', type: 'number', step: '0.01', value: m.priceInput ?? '' },
+          { name: 'priceOutput', label: '输出 $/M', type: 'number', step: '0.01', value: m.priceOutput ?? '' },
+          { name: 'maxOutputTokens', label: 'max_tokens 默认', type: 'number', value: m.maxOutputTokens ?? '' },
+        ], (v) => api(`/api/models/${m.id}`, { method: 'PATCH', body: JSON.stringify({
+            publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || undefined,
+            priceInput: v.priceInput === '' ? null : Number(v.priceInput), priceOutput: v.priceOutput === '' ? null : Number(v.priceOutput),
+            maxOutputTokens: v.maxOutputTokens === '' ? null : Number(v.maxOutputTokens),
+          }) }).then(() => { toast('已更新'); go('models'); })) }, '编辑'),
+        el('button', { class: 'btn sm danger', onclick: () => confirm(`删除模型路由 ${m.publicName}？`) && api(`/api/models/${m.id}`, { method: 'DELETE' }).then((r) => { if (r?.warning) toast(r.warning, true); go('models'); }) }, '删除'),
+      ))));
+  }
+  if (!models.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有模型路由')));
+  box.append(t);
+  return box;
+};
+
+// ---------------- 自动路由（model_auto） ----------------
+views.auto = async () => {
+  const [autos, models, rt] = await Promise.all([api('/api/auto-routes'), api('/api/models'), api('/api/auto-health')]);
+  const box = el('div');
+  const hPill = (h) => el('span', { class: 'pill ' + (h >= 0.9 ? 'ok' : h >= 0.4 ? '' : 'err-text') }, '健康 ' + (Math.round(h * 100) / 100).toFixed(2));
+  const editAuto = (a) => form(a ? '编辑 ' + a.publicName : '新增 auto 路由', [
+    { name: 'publicName', label: 'auto 对外名（agent 的 model 里填它）', value: a?.publicName, ph: 'model_auto', hint: '全局唯一：不得与任何模型外名 / tag / 其它 auto 重名' },
+    { name: 'candidates', label: '候选（每行：模型外名 权重；weight 0 = 禁用）', type: 'textarea', full: true, value: (a?.candidates || []).map((c) => (c.name || c.routeId) + ' ' + c.weight).join('\n'), ph: 'gpt-4o 3\nclaude-sonnet 1' },
+    { name: 'stickyTtlMs', label: '粘性 TTL（ms，0=关）', type: 'number', value: a?.stickyTtlMs ?? 300000, hint: '同一 key + auto 名命中后滑动续期；重启网关即清空' },
+    { name: 'note', label: '备注', value: a?.note || '', full: true },
+  ], (v) => {
+    const candidates = v.candidates.split('\n').map((x) => x.trim()).filter(Boolean).map((line) => {
+      const parts = line.split(/[\s,]+/);
+      const m = models.find((x) => x.publicName === parts[0] || x.id === parts[0]);
+      if (!m) throw new Error('候选「' + parts[0] + '」不存在（先在模型路由登记）');
+      return { routeId: m.id, weight: parts[1] === undefined ? 1 : Number(parts[1]) };
+    });
+    if (!candidates.length) throw new Error('至少填一个候选');
+    return api(a ? '/api/auto-routes/' + a.id : '/api/auto-routes', {
+      method: a ? 'PATCH' : 'POST',
+      body: JSON.stringify({ publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined }),
+    }).then(() => { toast('已保存'); go('auto'); });
+  });
+
+  box.append(el('div', { class: 'toolbar' },
+    el('button', { class: 'btn primary', onclick: () => editAuto(null) }, '+ 新增 auto 路由'),
+    el('span', { class: 'muted' }, '一个对外名聚合一组候选：按请求约束硬过滤 → 会话粘性 → 健康加权随机；失败自动换候选。'),
+  ));
+
+  const t = el('table');
+  t.append(el('tr', {}, el('th', {}, 'auto 名'), el('th', {}, '候选（权重 · 健康）'), el('th', {}, '粘性'), el('th', {}, '状态'), el('th', {}, '')));
+  for (const a of autos) {
+    t.append(el('tr', {},
+      el('td', { class: 'mono' }, a.publicName, a.note ? el('div', { class: 'muted', style: 'font-size:11px' }, a.note) : null),
+      el('td', {}, ...(a.candidates.length ? a.candidates.map((c) => el('div', { style: 'margin:2px 0' },
+        el('span', { class: 'mono' + (c.dangling ? ' err-text' : '') }, (c.name || c.routeId) + (c.dangling ? '（悬空）' : '')),
+        el('span', { class: 'muted' }, ' ×' + c.weight + ' '),
+        c.weight === 0 ? el('span', { class: 'pill' }, '禁用') : c.dangling ? null : hPill(c.health ?? 1),
+        c.routeEnabled === false ? el('span', { class: 'pill' }, '路由停用') : null,
+        c.channelEnabled === false ? el('span', { class: 'pill err-text' }, '渠道停用') : null,
+      )) : [el('span', { class: 'muted' }, '（无候选）')])),
+      el('td', { class: 'mono muted' }, a.stickyTtlMs ? Math.round(a.stickyTtlMs / 1000) + 's' : '关'),
+      el('td', {}, a.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
+      el('td', {}, el('div', { class: 'row' },
+        el('button', { class: 'btn sm', onclick: () => api('/api/auto-routes/' + a.id, { method: 'PATCH', body: JSON.stringify({ enabled: !a.enabled }) }).then(() => go('auto')) }, a.enabled ? '停用' : '启用'),
+        el('button', { class: 'btn sm', onclick: () => editAuto(a) }, '编辑'),
+        el('button', { class: 'btn sm danger', onclick: () => confirm('删除 auto 路由 ' + a.publicName + '？') && api('/api/auto-routes/' + a.id, { method: 'DELETE' }).then(() => go('auto')) }, '删除'),
+      ))));
+  }
+  if (!autos.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有 auto 路由。例：model_auto → [gpt-4o ×3, 本地 qwen ×1]')));
+  box.append(t);
+
+  const rc = el('div', { class: 'card', style: 'margin-top:16px' });
+  rc.append(el('h2', {}, '运行时'), el('div', { class: 'muted', style: 'margin-bottom:8px' }, '健康窗口 10 分钟（全流量含直连），粘性条目内存态：' + (rt.stickyEntries || 0) + ' 条'));
+  const wt = el('table');
+  wt.append(el('tr', {}, el('th', {}, '候选模型'), el('th', {}, '渠道'), el('th', {}, '10min 成功'), el('th', {}, '失败'), el('th', {}, '健康分')));
+  for (const w of (rt.windows || [])) {
+    wt.append(el('tr', {}, el('td', { class: 'mono' }, w.name || w.routeId), el('td', { class: 'muted' }, w.channel || '-'),
+      el('td', { class: 'mono' }, w.ok), el('td', { class: 'mono' + (w.fail ? ' err-text' : '') }, w.fail), el('td', {}, hPill(w.health))));
+  }
+  if (!(rt.windows || []).length) wt.append(el('tr', {}, el('td', { class: 'muted' }, '窗口内暂无候选流量样本')));
+  rc.append(wt);
+  box.append(rc);
+  timer = setInterval(() => go('auto'), 15000);
+  return box;
+};
+
+// ---------------- 渠道与号池 ----------------
+views.channels = async () => {
+  const channels = await api('/api/channels');
+  const box = el('div');
+  const addChannel = () => form('新增上游渠道', [
+    { name: 'name', label: '渠道名称', ph: '生产 Azure OpenAI / 某中转站' },
+    { name: 'protocol', label: '上游协议', type: 'select', options: [{ value: 'openai', label: 'OpenAI 兼容' }, { value: 'anthropic', label: 'Anthropic 原生' }] },
+    { name: 'baseUrl', label: 'Base URL', ph: 'https://api.openai.com/v1', full: true },
+    { name: 'keys', label: '号池 Key（每行一个，可批量导入）', type: 'textarea', ph: 'sk-xxx\nsk-yyy', full: true },
+    { name: 'extraHeaders', label: '附加请求头（JSON，可选）', ph: '{"X-Token":"1"}', full: true },
+    { name: 'modelList', label: '上游真实模型列表（每行一个，选填）', type: 'textarea', ph: 'GLM-5.3-Flash\nQwen3.8-27B', full: true },
+    { name: 'testModel', label: '测试模型名（选填，连通测试用）', ph: 'GLM-5.3-Flash', full: true },
+  ], (v) => {
+    let extraHeaders;
+    if (v.extraHeaders?.trim()) { try { extraHeaders = JSON.parse(v.extraHeaders); } catch { throw new Error('附加请求头不是合法 JSON'); } }
+    return api('/api/channels', { method: 'POST', body: JSON.stringify({
+      name: v.name, protocol: v.protocol, baseUrl: v.baseUrl, extraHeaders,
+      modelList: v.modelList.split('\n').map((s) => s.trim()).filter(Boolean),
+      testModel: v.testModel || undefined,
+      keys: v.keys.split('\n').map((s) => s.trim()).filter(Boolean).map((k) => ({ key: k })),
+    }) }).then(() => { toast('已创建渠道'); go('channels'); });
+  });
+
+  box.append(el('div', { class: 'toolbar' },
+    el('button', { class: 'btn primary', onclick: addChannel }, '+ 新增渠道'),
+    el('span', { class: 'muted' }, '同一渠道的多个 key 组成号池：加权轮询 + 失败自动退避切换。'),
+  ));
+
+  for (const c of channels) {
+    const keys = el('table');
+    keys.append(el('tr', {}, el('th', {}, 'Key'), el('th', {}, '状态'), el('th', {}, '权重'), el('th', {}, '请求/失败'), el('th', {}, '最近错误'), el('th', {}, '')));
+    for (const k of c.keys) {
+      const badge = k.status === 'active' ? el('span', { class: 'pill ok' }, '可用')
+        : k.status === 'cooldown' ? el('span', { class: 'pill warn' }, `冷却 ${Math.ceil((k.cooldownLeftMs || 0) / 1000)}s`)
+        : el('span', { class: 'pill' }, '已禁用');
+      keys.append(el('tr', {},
+        el('td', { class: 'mono' }, k.key, k.name && k.name !== k.key ? el('span', { class: 'muted' }, ' · ' + k.name) : null),
+        el('td', {}, badge),
+        el('td', { class: 'mono' }, k.weight),
+        el('td', { class: 'mono' }, `${k.totalRequests}`, el('span', { class: k.totalErrors ? 'err-text' : 'muted' }, ` / ${k.totalErrors}`)),
+        el('td', { class: 'mono muted', title: k.lastError || '' }, (k.lastError || '-').slice(0, 44)),
+        el('td', {}, el('div', { class: 'row' },
+          k.status !== 'active' ? el('button', { class: 'btn sm', onclick: () => api(`/api/channels/${c.id}/keys/${k.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'active' }) }).then(() => go('channels')) }, '恢复') : '',
+          k.status !== 'disabled' ? el('button', { class: 'btn sm', onclick: () => api(`/api/channels/${c.id}/keys/${k.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'disabled' }) }).then(() => go('channels')) }, '禁用') : '',
+          el('button', { class: 'btn sm danger', onclick: () => api(`/api/channels/${c.id}/keys/${k.id}`, { method: 'DELETE' }).then(() => go('channels')) }, '删除'),
+        ))));
+    }
+    if (!c.keys.length) keys.append(el('tr', {}, el('td', { class: 'muted' }, '号池为空，添加 key 后该渠道才能服务请求')));
+
+    const addKeys = () => form('向 ' + c.name + ' 导入 key', [
+      { name: 'keys', label: '每行一个 key', type: 'textarea', full: true },
+    ], (v) => api(`/api/channels/${c.id}/keys`, { method: 'POST', body: JSON.stringify({ keys: v.keys.split('\n').map((s) => s.trim()).filter(Boolean).map((k) => ({ key: k })) }) })
+      .then(() => { toast('已导入'); go('channels'); }));
+
+    const testAll = async (btn) => {
+      btn.disabled = true; btn.textContent = '测试中…';
+      try {
+        const r = await api(`/api/channels/${c.id}/test`, { method: 'POST' });
+        const out = $('#test-' + c.id);
+        out.innerHTML = '';
+        for (const x of r.results) {
+          out.append(el('div', { class: 'log-line' },
+            el('span', { class: 'pill ' + (x.ok ? 'ok' : 'err') }, x.ok ? 'OK ' + x.status : String(x.status || 'ERR')),
+            el('span', { class: 'mono' }, x.key),
+            el('span', { class: 'mono muted' }, x.latencyMs + 'ms'),
+            el('span', { class: 'c' }, x.error || (x.models.length ? `可见模型：${x.models.slice(0, 8).join(', ')}` : ''))));
+        }
+        if (r.results[0]?.models?.length) {
+          const models = r.results.find((x) => x.models?.length)?.models || [];
+          out.append(el('div', { class: 'row', style: 'margin-top:8px' },
+            el('button', { class: 'btn sm', onclick: () => api(`/api/channels/${c.id}/import-models`, { method: 'POST', body: JSON.stringify({ models }) }).then((z) => { toast(`已导入 ${z.created} 个模型路由`); go('models'); }) }, `把 ${models.length} 个模型导入路由表`)));
+        }
+      } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = '测试连通'; }
+    };
+
+    box.append(el('div', { class: 'card', style: 'margin-bottom:16px' },
+      el('div', { class: 'row' },
+        el('strong', {}, c.name), proto(c.protocol),
+        c.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用'),
+        el('span', { class: 'pill' }, `可用 key ${c.availableKeys}/${c.keys.length}`),
+        el('span', { class: 'mono muted', style: 'flex:1' }, c.urlPreview),
+        el('button', { class: 'btn sm', onclick: (e) => testAll(e.target) }, '测试连通'),
+        el('button', { class: 'btn sm', onclick: addKeys }, '+ 导入 key'),
+        el('button', { class: 'btn sm', onclick: () => form('编辑渠道', [
+          { name: 'name', label: '名称', value: c.name },
+          { name: 'protocol', label: '协议', type: 'select', value: c.protocol, options: [{ value: 'openai', label: 'OpenAI 兼容' }, { value: 'anthropic', label: 'Anthropic 原生' }] },
+          { name: 'baseUrl', label: 'Base URL', value: c.baseUrl, full: true },
+          { name: 'modelList', label: '上游真实模型列表（每行一个）', type: 'textarea', value: (c.modelList || []).join('\n'), full: true },
+          { name: 'testModel', label: '测试模型名（选填，连通测试用）', value: c.testModel || '', full: true },
+        ], (v) => api(`/api/channels/${c.id}`, { method: 'PATCH', body: JSON.stringify({ ...v, modelList: v.modelList.split('\n').map((s) => s.trim()).filter(Boolean) }) }).then(() => { toast('已更新'); go('channels'); })) }, '编辑'),
+        el('button', { class: 'btn sm', onclick: () => api(`/api/channels/${c.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !c.enabled }) }).then(() => go('channels')) }, c.enabled ? '停用' : '启用'),
+        el('button', { class: 'btn sm danger', onclick: () => confirm(`删除渠道 ${c.name}？其下模型路由会一并删除。`) && api(`/api/channels/${c.id}`, { method: 'DELETE' }).then(() => go('channels')) }, '删除'),
+      ),
+      el('div', { id: 'test-' + c.id, style: 'margin-top:10px' }),
+      el('details', { style: 'margin-top:10px' }, el('summary', {}, `号池明细（${c.keys.length}）`), keys),
+    ));
+  }
+  if (!channels.length) box.append(el('div', { class: 'card muted' }, '还没有渠道。添加一个上游渠道开始使用。'));
+  return box;
+};
+
+// ---------------- 对外 Key ----------------
+views.vkeys = async () => {
+  const [vkeys, models] = await Promise.all([api('/api/vkeys'), api('/api/models')]);
+  const box = el('div');
+  box.append(el('div', { class: 'toolbar' },
+    el('button', { class: 'btn primary', onclick: () => form('创建对外 Key', [
+      { name: 'name', label: '名称（如 claude-code / codex / 团队 A）' },
+      { name: 'allowed', label: '允许的模型（逗号分隔，留空 = 全部）', full: true },
+      { name: 'rpmLimit', label: 'RPM 上限（0 = 不限）', type: 'number' },
+      { name: 'dailyTokenLimit', label: '每日 token 上限（0 = 不限）', type: 'number' },
+    ], (v) => api('/api/vkeys', { method: 'POST', body: JSON.stringify({
+      name: v.name, allowedModels: v.allowed ? v.allowed.split(/[,，\s]+/).filter(Boolean) : [],
+      rpmLimit: Number(v.rpmLimit) || 0, dailyTokenLimit: Number(v.dailyTokenLimit) || 0,
+    }) }).then((vk) => { copy(vk.key); toast('已创建并复制完整 key（只显示这一次）'); go('vkeys'); })) }, '+ 新建 Key'),
+    el('span', { class: 'muted' }, '这就是发给各个 agent 的统一 key。'),
+  ));
+  const t = el('table');
+  t.append(el('tr', {}, el('th', {}, '名称'), el('th', {}, 'Key'), el('th', {}, '允许模型'), el('th', {}, '限额'), el('th', {}, '最近使用'), el('th', {}, '状态'), el('th', {}, '')));
+  for (const k of vkeys) {
+    t.append(el('tr', {},
+      el('td', {}, k.name),
+      el('td', { class: 'mono' }, k.key, ' ', el('button', { class: 'btn sm', onclick: () => api(`/api/vkeys?reveal=1`).then((all) => copy(all.find((x) => x.id === k.id)?.key || '')) }, '取完整值')),
+      el('td', { class: 'mono muted' }, k.allowedModels?.length ? k.allowedModels.join(', ') : '全部'),
+      el('td', { class: 'mono muted', title: `今日已用 ${num(k.today?.tokens || 0)} token · ${k.today?.requests || 0} 次 · $${k.today?.costUsd || 0}` },
+        [k.rpmLimit ? `${k.rpmLimit} rpm` : '', k.dailyTokenLimit ? `${num(k.today?.tokens || 0)}/${num(k.dailyTokenLimit)}/天` : ''].filter(Boolean).join(' · ') || '不限'),
+      el('td', { class: 'muted' }, ago(k.lastUsedAt)),
+      el('td', {}, k.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
+      el('td', {}, el('div', { class: 'row' },
+        el('button', { class: 'btn sm', onclick: () => api(`/api/vkeys/${k.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !k.enabled }) }).then(() => go('vkeys')) }, k.enabled ? '停用' : '启用'),
+        el('button', { class: 'btn sm danger', onclick: () => confirm(`删除 ${k.name}？使用该 key 的 agent 会立即失效。`) && api(`/api/vkeys/${k.id}`, { method: 'DELETE' }).then(() => go('vkeys')) }, '删除'),
+      ))));
+  }
+  box.append(t);
+  box.append(el('div', { class: 'muted', style: 'margin-top:10px;font-size:12px' }, `可路由模型：${models.map((m) => m.publicName).join(' / ') || '（还没有）'}`));
+  return box;
+};
+
+// ---------------- 接入方式 ----------------
+views.connect = async () => {
+  const s = await api('/api/snippet');
+  const box = el('div');
+  box.append(el('div', { class: 'card' },
+    el('div', { class: 'k' }, '统一入口'),
+    el('div', { class: 'row', style: 'margin-top:6px' },
+      el('span', { class: 'mono' }, s.baseUrl + '/v1'), el('button', { class: 'btn sm', onclick: () => copy(s.baseUrl + '/v1') }, '复制 URL')),
+    el('div', { class: 'row', style: 'margin-top:8px' },
+      el('span', { class: 'mono' }, s.key), el('button', { class: 'btn sm', onclick: () => copy(s.key) }, '复制 Key')),
+    el('div', { class: 'muted', style: 'margin-top:8px;font-size:12px' }, '同一入口同时提供 OpenAI 与 Anthropic 两套协议，agent 换 model 名即可切到不同真实上游。'),
+    el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
+      '支持的端点：',
+      el('span', { class: 'mono' }, '/v1/chat/completions、/v1/completions、/v1/messages、/v1/messages/count_tokens、/v1/embeddings、GET /v1/models'),
+      '。注意：不支持 OpenAI Responses API（', el('span', { class: 'mono' }, '/v1/responses'),
+      '）；需要该 API 的客户端（如新版 Codex CLI 默认端点）请改用 chat completions 或经 litellm 之类代理转换。'),
+  ));
+  const blocks = [
+    ['curl（OpenAI 协议）', s.curl],
+    ['OpenAI SDK', s.openaiSdk],
+    ['Claude Code / Anthropic SDK', s.claudeCode],
+    ['Codex CLI', s.codexCli],
+  ];
+  for (const [title, code] of blocks) {
+    box.append(el('h2', {}, title), el('div', { class: 'row', style: 'justify-content:flex-end;margin-bottom:-6px' }, el('button', { class: 'btn sm', onclick: () => copy(code) }, '复制')), el('pre', { class: 'code' }, code));
+  }
+  box.append(el('h2', {}, '切换模型'),
+    el('div', { class: 'card muted' }, 'agent 侧只改请求里的 model 字段：例如从 "gpt-4o" 改成 "claude-sonnet"，网关会自动换成对应渠道的真实 base_url 与真实 key，agent 配置无需任何变更。'));
+  return box;
+};
+
+// ---------------- 日志 ----------------
+let es = null;
+views.logs = async () => {
+  const box = el('div');
+  const list = el('div', { class: 'card', style: 'padding:0;max-height:70vh;overflow:auto' });
+  let onlyErr = false;
+  const render = (l) =>
+    el('div', { class: 'log-line', style: l.ok ? '' : 'background:rgba(248,81,73,.06)', title: (l.retries || []).join('\n') || l.error || '' },
+      el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status)),
+      el('span', { class: 'mono' }, clock(l.ts)),
+      el('span', { class: 'mono' }, l.requestedModel || '-'),
+      el('span', { class: 'mono muted' }, l.channelName || '-'),
+      el('span', { class: 'mono muted' }, `${l.latencyMs}ms` + (l.ttftMs ? ` · ttft ${l.ttftMs}ms` : '') + (l.attempts > 1 ? ` · ×${l.attempts}` : '')),
+      el('span', { class: 'mono muted' }, `${l.promptTokens}↑ ${l.completionTokens}↓` + (l.cacheReadTokens ? ` · c${l.cacheReadTokens}` : '')),
+      el('span', { class: 'mono muted' }, money(l.costUsd)),
+      el('span', { class: 'c mono', style: l.ok ? 'color:var(--dimmer)' : 'color:var(--err)' },
+        (l.error || (l.retries || []).join(' | ') || '').slice(0, 120)));
+  const first = await api('/api/logs?limit=200');
+  first.forEach((l) => list.append(render(l)));
+
+  const reload = async () => {
+    list.innerHTML = '';
+    const logs = await api('/api/logs?limit=300' + (onlyErr ? '&errors=1' : ''));
+    logs.forEach((l) => list.append(render(l)));
+  };
+  if (es) es.close();
+  es = null;
+  const tk = await api('/api/logs/stream/ticket', { method: 'POST' }).catch(() => null);
+  if (tk?.ticket) {
+    es = new EventSource(`/api/logs/stream?ticket=${encodeURIComponent(tk.ticket)}`);
+    es.onmessage = (m) => {
+      try { JSON.parse(m.data).forEach((l) => { if (!onlyErr || !l.ok) list.prepend(render(l)); }); } catch {}
+    };
+  }
+
+  box.append(el('div', { class: 'toolbar' },
+    el('label', { class: 'row', style: 'gap:6px' }, el('input', { type: 'checkbox', onchange: (e) => { onlyErr = e.target.checked; reload(); } }), el('span', { class: 'muted' }, '只看失败')),
+    el('button', { class: 'btn sm', onclick: reload }, '刷新'),
+    el('button', { class: 'btn sm danger', onclick: () => confirm('清空全部日志？') && api('/api/logs', { method: 'DELETE' }).then(reload) }, '清空'),
+    el('span', { class: es ? 'pill ok' : 'pill warn' }, es ? '实时推送中' : '实时推送不可用（ticket 获取失败，可手动刷新）'),
+    el('span', { class: 'muted' }, '×N 表示该请求在号池里试过 N 个 key'),
+  ), list);
+  return box;
+};
+
+// ---------------- 设置 ----------------
+views.settings = async () => {
+  const s = await api('/api/settings');
+  const channels = await api('/api/channels');
+  const box = el('div', { class: 'card', style: 'max-width:760px' });
+  const f = (label, name, value, hint) => {
+    box.append(el('label', {}, label));
+    const node = el('input', { name, value: value ?? '', type: 'number' });
+    box.append(node);
+    if (hint) box.append(el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, hint));
+    return node;
+  };
+  box.append(el('h2', {}, '路由与容错'));
+  box.append(el('label', {}, '未知模型兜底渠道'));
+  const fb = el('select', { name: 'fallbackChannelId' },
+    el('option', { value: '', ...(s.fallbackChannelId ? {} : { selected: '' }) }, '不兜底（返回 404）'),
+    ...channels.map((c) => el('option', { value: c.id, ...(s.fallbackChannelId === c.id ? { selected: '' } : {}) }, c.name)));
+  box.append(fb);
+  box.append(el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, '开启后，未登记路由的 model 会透传给该渠道（上游模型名原样传递）。'));
+  const retry = f('单请求最多尝试 key 数', 'maxKeyRetries', s.maxKeyRetries, '号池故障切换的最大尝试次数');
+  const timeout = f('上游首包超时（ms）', 'defaultUpstreamTimeoutMs', s.defaultUpstreamTimeoutMs, '多久没拿到响应头就判超时');
+  const idle = f('上游响应体空闲超时（ms）', 'upstreamIdleTimeoutMs', s.upstreamIdleTimeoutMs, '流式响应连续这么久没有新数据就中断，防止上游 200 后卡死');
+  const bodyLimit = f('请求体上限（字节）', 'maxBodyBytes', s.maxBodyBytes, `当前约 ${(s.maxBodyBytes / 1048576).toFixed(0)} MB，超限返回 413`);
+  const autoChain = f('auto 候选链预算（秒）', 'autoMaxChainSeconds', s.autoMaxChainSeconds, '一次 auto 请求跨所有候选最多耗这么久（本地模型加载慢，默认 300s）');
+  const th = f('进入冷却的连续失败阈值', 'errorThreshold', s.errorThreshold);
+  const cdBase = f('冷却基数（ms）', 'cooldownBaseMs', s.cooldownBaseMs);
+  const cdMax = f('冷却上限（ms）', 'cooldownMaxMs', s.cooldownMaxMs, '上游 Retry-After 再大也只会冷却到这么久');
+  const ret = f('日志保留条数', 'logRetention', s.logRetention);
+  box.append(el('h2', {}, '安全'));
+  box.append(el('label', {}, '管理令牌'));
+  const tok = el('input', { value: '', placeholder: s.adminToken ? '••••••••（留空表示不修改）' : '尚未设置' });
+  tok.style.width = '100%';
+  box.append(tok, el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, '至少 8 个字符；改动会写进 data/db.json（文件权限 0600），也可用 LLM_ADMIN_TOKEN 固定。'));
+  const dbg = el('input', { type: 'checkbox', ...(s.debugHeaders ? { checked: '' } : {}) });
+  box.append(el('label', { style: 'display:flex;gap:8px;align-items:center;margin-top:6px' }, dbg, '返回 x-lm-channel / x-lm-key 等内部调试响应头'));
+  box.append(el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, '默认关闭：这些头会暴露渠道名与 key 尾号，排查故障时再打开。'));
+  const save = async () => {
+    const patch = {
+      maxKeyRetries: Number(retry.value), defaultUpstreamTimeoutMs: Number(timeout.value), errorThreshold: Number(th.value),
+      upstreamIdleTimeoutMs: Number(idle.value), maxBodyBytes: Number(bodyLimit.value),
+      cooldownBaseMs: Number(cdBase.value), cooldownMaxMs: Number(cdMax.value), logRetention: Number(ret.value),
+      autoMaxChainSeconds: Number(autoChain.value),
+      debugHeaders: !!dbg.checked,
+      fallbackChannelId: fb.value,
+    };
+    if (tok.value.trim()) patch.adminToken = tok.value.trim();
+    try {
+      const res = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+      const rejected = res?._rejected || res?.rejected || [];
+      if (rejected.length) toast('部分设置未生效：' + rejected.join('；'), true);
+      else toast('已保存');
+    } catch (e) { toast(e.message, true); }
+  };
+  box.append(el('div', { class: 'row', style: 'margin-top:18px' },
+    el('button', { class: 'btn primary', onclick: save }, '保存设置'),
+  ));
+  return box;
+};
+
+// ---------------- 启动 ----------------
+$('#go').addEventListener('click', () => {
+  TOKEN = $('#token').value.trim();
+  api('/api/overview').then(() => {
+    localStorage.setItem('lm_token', TOKEN);
+    boot();
+  }).catch((e) => toast(e.message, true));
+});
+$('#token').addEventListener('keydown', (e) => e.key === 'Enter' && $('#go').click());
+
+function boot() {
+  $('#gate').hidden = true;
+  $('#app').hidden = false;
+  $('#nav').hidden = false;
+  document.querySelectorAll('nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
+  if (es) es.close(), (es = null);
+  go((location.hash || '#overview').slice(1));
+  api('/healthz').then((h) => { $('#hdr-sub').textContent = `${h.channels} 渠道 · ${h.models} 模型 · ${h.vkeys} 对外 key`; });
+}
+
+if (TOKEN) api('/api/overview').then(() => boot()).catch(() => { localStorage.removeItem('lm_token'); TOKEN = ''; });
+</script>
+</body>
+</html>
