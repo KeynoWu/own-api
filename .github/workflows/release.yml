@@ -1,5 +1,6 @@
-# tag v* 推送即出桌面安装包：mac(Apple 芯片) .dmg + Windows .exe → GitHub Releases
-# Intel Mac 暂不在矩阵（SEA 不可交叉编译，需要 x64 runner）；源码运行方式见 README
+# tag v* 推送即出桌面安装包：mac(aarch64 + Intel) .dmg + Windows .exe → GitHub Releases
+# Intel 包在 Apple Silicon runner 上交叉产出：SEA 无需运行 x64（node x64 经 Rosetta 执行），
+# Rust 用 --target x86_64-apple-darwin 交叉；产物统一 adhoc 签名（signingIdentity "-"）
 name: release
 on:
   push:
@@ -9,16 +10,33 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-latest    # Apple 芯片
+          - os: macos-latest
+            label: mac-aarch64
+            bundle_subdir: ''
+          - os: macos-latest
+            label: mac-x86_64
+            node_arch: x64                 # setup-node 取 x64 构建（arm runner 走 Rosetta）
+            rust_target: x86_64-apple-darwin
+            bundle_subdir: x86_64-apple-darwin/
           - os: windows-latest
+            label: win-x64
+            bundle_subdir: ''
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        if: ${{ !matrix.node_arch }}
         with: { node-version: 22 }
+      - uses: actions/setup-node@v4
+        if: ${{ matrix.node_arch }}
+        with: { node-version: 22, architecture: ${{ matrix.node_arch }} }
       - uses: dtolnay/rust-toolchain@stable
+      - name: rustup 交叉目标
+        if: ${{ matrix.rust_target }}
+        run: rustup target add ${{ matrix.rust_target }}
       - uses: swatinem/rust-cache@v2
         with: { workspaces: src-tauri }
       - name: 前端内嵌 + SEA 二进制 + sidecar 就位
@@ -27,13 +45,17 @@ jobs:
           npm run gen:web
           npm run desktop:prepare
       - name: tauri build
-        run: npx tauri build
+        run: npx tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+      - name: 产物存在性硬校验（防空 glob 静默发布）
+        run: ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe || true
+        shell: bash
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-${{ matrix.os }}
+          name: desktop-${{ matrix.label }}
+          if-no-files-found: warn
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe
 
   release:
     needs: build
@@ -42,6 +64,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: artifacts, merge-multiple: 'true' }
+      - name: 资产数量硬校验（三平台缺一不可）
+        run: test "$(find artifacts -name '*.dmg' -o -name '*.exe' | wc -l)" -ge 3
       - uses: softprops/action-gh-release@v2
         with:
           files: |

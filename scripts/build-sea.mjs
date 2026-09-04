@@ -7,7 +7,12 @@ import { platform, arch } from 'node:os';
 import { inject as postject } from 'postject';
 
 const isWin = platform() === 'win32';
-const outName = `own-api-${arch() === 'arm64' ? 'arm64' : 'x64'}${isWin ? '.exe' : ''}`;
+// 交叉出 Intel Mac 产物（不交叉编译——SEA 构建全程无需运行 x64）：
+//   SEA_HOST_BIN=<x64 node 路径> SEA_ARCH=x64 node scripts/build-sea.mjs
+// CI 的 x64 mac job 用 setup-node architecture:x64（Rosetta 执行），默认路径即可
+const hostBin = process.env.SEA_HOST_BIN || process.execPath;
+const targetArch = process.env.SEA_ARCH || (arch() === 'arm64' ? 'arm64' : 'x64');
+const outName = `own-api-${targetArch}${isWin ? '.exe' : ''}`;
 const out = `dist/${outName}`;
 mkdirSync('dist', { recursive: true });
 
@@ -28,12 +33,12 @@ execSync(`"${process.execPath}" --experimental-sea-config dist/sea-config.json`,
 console.log('② SEA blob 完成');
 
 if (existsSync(out)) rmSync(out);
-copyFileSync(process.execPath, out);
+copyFileSync(hostBin, out);
 chmodSync(out, 0o755);
 if (platform() === 'darwin') execSync(`codesign --remove-signature "${out}"`);
-// fuse 值随 node 构建而异（写死会翻车）：直接从当前 node 二进制里读
-const fuseMatch = readFileSync(process.execPath).toString('latin1').match(/NODE_SEA_FUSE_[0-9a-f]{32}/);
-if (!fuseMatch) throw new Error('当前 node 二进制里找不到 SEA fuse（可能构建时禁用了 SEA）');
+// fuse 值随 node 构建而异（写死会翻车）：从注入宿主（hostBin）二进制里读
+const fuseMatch = readFileSync(hostBin).toString('latin1').match(/NODE_SEA_FUSE_[0-9a-f]{32}/);
+if (!fuseMatch) throw new Error(`${hostBin} 里找不到 SEA fuse（可能构建时禁用了 SEA）`);
 await postject(out, 'NODE_SEA_BLOB', readFileSync('dist/sea-prep.blob'), {
   sentinelFuse: fuseMatch[0],
   machoSegmentName: platform() === 'darwin' ? 'NODE_SEA' : undefined,

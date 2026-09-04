@@ -36,7 +36,8 @@ codex      ───┼──▶  │  统一 URL + 统一 key          │
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| macOS（Apple 芯片） | `own-api_x.x.x_aarch64.dmg` | 拖进"应用程序"即可 |
+| macOS（Apple 芯片 M1/M2/…） | `own-api_x.x.x_aarch64.dmg` | 拖进"应用程序"即可 |
+| macOS（Intel） | `own-api_x.x.x_x64.dmg` | 同左；首次冷启动稍慢（Rosetta 翻译预热） |
 | Windows | `own-api_x.x.x_x64-setup.exe` | 当前用户安装，无需管理员 |
 
 装好运行后：托盘（macOS 菜单栏）出现 own-api 图标 → 服务自动启动 → 浏览器自动打开管理台
