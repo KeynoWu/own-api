@@ -49,17 +49,18 @@ jobs:
       - name: 包内侧车冒烟（v0.1.1 hardened-runtime SIGTRAP 事故的制度化守护）
         if: ${{ runner.os == 'macOS' }}
         run: |
-          APP="src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/macos/own-api.app"
-          OWN_API_DATA_DIR="$RUNNER_TEMP/sidecar-smoke" OWN_API_PORT=18990 "$APP/Contents/MacOS/own-api" &
+          # 验的就是用户真正拿到手的 dmg（bundle_dmg.sh 打包后 bundle/macos 下的 .app 会被搬走）
+          DMG=$(ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg)
+          hdiutil attach "$DMG" -nobrowse -mountpoint /tmp/oa-smoke >/dev/null
+          OWN_API_DATA_DIR="$RUNNER_TEMP/sidecar-smoke" OWN_API_PORT=18990 /tmp/oa-smoke/own-api.app/Contents/MacOS/own-api >/tmp/smoke-sidecar.log 2>&1 &
           SIDECAR=$!
-          trap "kill $SIDECAR 2>/dev/null || true" EXIT
-          for i in $(seq 1 20); do
+          trap 'kill $SIDECAR 2>/dev/null; hdiutil detach /tmp/oa-smoke -force >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
             sleep 1
-            if curl -fsS -o /dev/null "http://127.0.0.1:18990/v1/models" || [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18990/v1/models)" = "401" ]; then
-              echo "sidecar smoke OK (401 as expected)"; kill $SIDECAR; exit 0
-            fi
+            CODE=$(curl -s -o /dev/null --connect-timeout 1 -w "%{http_code}" http://127.0.0.1:18990/v1/models || true)
+            if [ "$CODE" = "401" ]; then echo "dmg 内侧车冒烟 OK（401 as expected）"; kill $SIDECAR; exit 0; fi
           done
-          echo "::error::包内侧车 20 秒未就绪（签名/SEA 注入回归？）"; exit 1
+          echo "::error::dmg 内侧车 30 秒未就绪（签名/SEA 注入回归？）"; cat /tmp/smoke-sidecar.log; exit 1
       - name: 产物存在性硬校验（防空 glob 静默发布）
         run: ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe || true
         shell: bash
