@@ -159,6 +159,34 @@ function form(title, fields, onSubmit) {
       node = el('select', {}, ...(f.options || []).map((o) => el('option', { value: o.value, ...(f.value === o.value ? { selected: '' } : {}) }, o.label)));
     } else if (f.type === 'textarea') {
       node = el('textarea', { placeholder: f.ph || '' }, f.value || '');
+    } else if (f.type === 'cands') {
+      node = el('div');
+      const opts = f.options || [];
+      const rows = [];
+      const syncDup = () => {
+        const used = new Set(rows.map((r) => r.sel.value).filter(Boolean));
+        for (const r of rows)
+          for (const op of r.sel.options)
+            if (op.value) op.disabled = used.has(op.value) && op.value !== r.sel.value;
+      };
+      const addRow = (val, w) => {
+        const sel = el('select', { style: 'flex:1;min-width:0' }, el('option', { value: '', disabled: '' }, '选择模型路由…'),
+          ...opts.map((o) => el('option', { value: o.value }, o.label)));
+        if (val && opts.some((o) => o.value === val)) sel.value = val;
+        const wt = el('input', { type: 'number', value: w ?? 1, min: '0', step: 'any', style: 'width:64px', title: '权重（相对占比，0=禁用）' });
+        const row = el('div', { class: 'row', style: 'margin:3px 0;gap:6px' }, sel, wt, el('button', { class: 'btn sm', title: '移除', onclick: () => { row.remove(); rows.splice(rows.indexOf(r), 1); syncDup(); } }, '✕'));
+        const r = { sel, wt };
+        sel.addEventListener('change', syncDup);
+        rows.push(r);
+        node.insertBefore(row, addBtn);
+        syncDup();
+      };
+      const addBtn = el('button', { class: 'btn sm', onclick: () => addRow() }, '+ 添加候选');
+      node.append(addBtn);
+      for (const c of (f.value || [])) addRow(c.routeId || c.name, c.weight);
+      if (!rows.length && opts.length) addRow();
+      node.__get = () => rows.map((r) => ({ routeId: r.sel.value, weight: Number(r.wt.value === '' ? 1 : r.wt.value) }));
+      if (!opts.length) { node.prepend(el('div', { class: 'muted', style: 'font-size:12px' }, '还没有模型路由——先到「模型」页登记后再来')); addBtn.disabled = true; }
     } else if (f.type === 'check') {
       node = el('input', { type: 'checkbox', ...(f.value ? { checked: '' } : {}) });
     } else {
@@ -192,7 +220,7 @@ function form(title, fields, onSubmit) {
 
   const submit = async () => {
     const vals = {};
-    for (const f of fields) vals[f.name] = inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
+    for (const f of fields) vals[f.name] = f.type === 'cands' ? inputs[f.name].__get() : inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
     try { await onSubmit(vals); dlg.close(); } catch (e) { toast(e.message, true); }
   };
   dlg.innerHTML = '';
@@ -333,16 +361,17 @@ views.auto = async () => {
   const hPill = (h) => el('span', { class: 'pill ' + (h >= 0.9 ? 'ok' : h >= 0.4 ? '' : 'err-text') }, '健康 ' + (Math.round(h * 100) / 100).toFixed(2));
   const editAuto = (a) => form(a ? '编辑 ' + a.publicName : '新增 auto 路由', [
     { name: 'publicName', label: 'auto 对外名（agent 的 model 里填它）', value: a?.publicName, ph: 'model_auto', hint: '全局唯一：不得与任何模型外名 / tag / 其它 auto 重名' },
-    { name: 'candidates', label: '候选（每行：模型外名 权重；weight 0 = 禁用）', type: 'textarea', full: true, value: (a?.candidates || []).map((c) => (c.name || c.routeId) + ' ' + c.weight).join('\\n'), ph: 'gpt-4o 3\\nclaude-sonnet 1' },
+    { name: 'candidates', label: '候选模型（从模型路由选，可多行）', type: 'cands', full: true, value: a?.candidates || [], hint: '权重=相对分配占比；0 = 禁用该候选。要加新候选？先到「模型」页登记路由。',
+      options: models.map((m) => ({ value: m.id, label: m.publicName + '（' + m.channelName + (m.enabled ? '' : ' · 已停用') + '）' }))
+        // 编辑悬空 auto：原候选指向已删路由也要可见可删，不能静默吞掉
+        .concat((a?.candidates || []).filter((c) => c.routeId && !models.some((m) => m.id === c.routeId)).map((c) => ({ value: c.routeId, label: (c.name || c.routeId) + '（路由已删除·悬空）' }))) },
     { name: 'stickyTtlMs', label: '粘性 TTL（ms，0=关）', type: 'number', value: a?.stickyTtlMs ?? 300000, hint: '同一 key + auto 名命中后滑动续期；重启网关即清空' },
     { name: 'note', label: '备注', value: a?.note || '', full: true },
   ], (v) => {
-    const candidates = v.candidates.split('\\n').map((x) => x.trim()).filter(Boolean).map((line) => {
-      const parts = line.split(/[\\s,]+/);
-      const m = models.find((x) => x.publicName === parts[0] || x.id === parts[0]);
-      if (!m) throw new Error('候选「' + parts[0] + '」不存在（先在模型路由登记）');
-      return { routeId: m.id, weight: parts[1] === undefined ? 1 : Number(parts[1]) };
-    });
+    const candidates = v.candidates.filter((c) => c.routeId);
+    if (v.candidates.some((c) => !c.routeId)) throw new Error('有候选还没选模型');
+    if (new Set(candidates.map((c) => c.routeId)).size !== candidates.length) throw new Error('候选模型不能重复');
+    if (candidates.some((c) => !Number.isFinite(c.weight) || c.weight < 0)) throw new Error('权重须为 ≥0 的数字');
     if (!candidates.length) throw new Error('至少填一个候选');
     return api(a ? '/api/auto-routes/' + a.id : '/api/auto-routes', {
       method: a ? 'PATCH' : 'POST',
