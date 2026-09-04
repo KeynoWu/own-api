@@ -702,6 +702,46 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check(`F9 慢客户端停读 2.2×idle 不误杀健康流（M6 反向，收 ${chunks} 块）`, chunks >= 38 && lgSlow.body[0]?.status === 200 && lgSlow.body[0]?.ok === true, `${chunks}块 status=${lgSlow.body[0]?.status}`);
   await admin('/api/settings', 'PATCH', { upstreamIdleTimeoutMs: 120000 });
 }
+{
+  // 桌面引导（spawn 真进程）：端口避让 / 首启随机令牌 / last-session 交接文件。
+  // 这三样是 Tauri 壳与"双击即用"的地基，只有真进程能证明。
+  const { spawn } = await import('node:child_process');
+  const net = await import('node:net');
+  const fs2 = await import('node:fs');
+  const bootDir = mkdtempSync(join(tmpdir(), 'ownapi-boot-'));
+  const blocker = net.createServer();
+  await new Promise<void>((r) => blocker.listen(18810, '127.0.0.1', r));
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, LLM_ADMIN_TOKEN: undefined, LLM_DATA_DIR: undefined, OWN_API_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: bootDir, OWN_API_PORT: '18810', HOST: '127.0.0.1', OWN_API_OPEN_BROWSER: undefined },
+    stdio: 'ignore',
+    cwd: process.cwd(),
+  });
+  let up: Response | null = null;
+  for (let i = 0; i < 80 && !up; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      up = await fetch('http://127.0.0.1:18811/v1/models');
+    } catch {
+      /* 还没起来 */
+    }
+  }
+  check('端口 18810 被占自动避让到 18811（桌面双击的启动率保障）', !!up, String(up?.status));
+  const bootDb = up ? JSON.parse(fs2.readFileSync(join(bootDir, 'db.json'), 'utf8')) : {};
+  check('首启随机管理令牌（无团队共享默认口令）', /^admin-[A-Za-z0-9_-]{8,}$/.test(bootDb.settings?.adminToken || ''), JSON.stringify(String(bootDb.settings?.adminToken || '').slice(0, 9)));
+  let sess: any = {};
+  try {
+    sess = JSON.parse(fs2.readFileSync(join(bootDir, 'last-session.json'), 'utf8'));
+  } catch {
+    /* 缺文件时给空对象走断言 */
+  }
+  check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
+  child.kill();
+  await new Promise<void>((r) => {
+    child.on('exit', () => r());
+    setTimeout(r, 4000);
+  });
+  blocker.close();
+}
 
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

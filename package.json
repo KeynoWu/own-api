@@ -11,7 +11,8 @@
     "seed": "tsx scripts/seed-demo.ts",
     "test": "tsx test/e2e.ts",
     "test:hard": "tsx test/hardening.ts",
-    "test:all": "tsx test/e2e.ts && tsx test/hardening.ts"
+    "test:all": "tsx test/e2e.ts && tsx test/hardening.ts",
+    "gen:web": "node scripts/gen-web-html.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

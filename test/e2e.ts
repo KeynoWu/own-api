@@ -654,6 +654,38 @@ const lKeep = (await getLogs('auto_keep'))[0];
 check('迟滞松手：粘性目标 health<0.4 → 删绑定直接改道，不烧一次失败尝试（松手回归必红）', rKeep.status === 200 && lKeep?.routedTo === 'auto-m-k2' && lKeep?.chainAttempts?.length === 1, JSON.stringify(lKeep?.chainAttempts));
 await patchModel(mK1R.id, { upstreamModel: 'mock-gpt-5' });
 
+section('16. 桌面发行地基：前缀 env / 数据目录 / 控制台内嵌');
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const { envAny, resolveDataDir } = await import('../src/bootstrap.ts');
+  const { WEB_HTML } = await import('../src/web-html.gen.ts');
+  const saved = { llm: process.env.LLM_DATA_DIR, own: process.env.OWN_API_DATA_DIR };
+  const withEnvCleared = (fn: () => string) => {
+    try {
+      delete process.env.LLM_DATA_DIR;
+      delete process.env.OWN_API_DATA_DIR;
+      return fn();
+    } finally {
+      if (saved.llm !== undefined) process.env.LLM_DATA_DIR = saved.llm;
+      if (saved.own !== undefined) process.env.OWN_API_DATA_DIR = saved.own;
+    }
+  };
+  process.env.LLM_TESTVAR = 'old';
+  process.env.OWN_API_TESTVAR = 'new';
+  check('前缀迁移：OWN_API_* 优先于历史 LLM_*', envAny(['OWN_API_TESTVAR', 'LLM_TESTVAR']) === 'new', String(envAny(['OWN_API_TESTVAR', 'LLM_TESTVAR'])));
+  delete process.env.LLM_TESTVAR;
+  delete process.env.OWN_API_TESTVAR;
+  const fbCwd = fs.mkdtempSync(join(os.tmpdir(), 'ownapi-fb-'));
+  fs.mkdirSync(join(fbCwd, 'data'));
+  fs.writeFileSync(join(fbCwd, 'data', 'db.json'), '{}');
+  check('开发兼容：cwd 有 ./data/db.json 继续用（源码用户升级不空库）', withEnvCleared(() => resolveDataDir(fbCwd)) === join(fbCwd, 'data'), withEnvCleared(() => resolveDataDir(fbCwd)));
+  const emptyCwd = fs.mkdtempSync(join(os.tmpdir(), 'ownapi-empty-'));
+  check('默认数据目录 ~/.own-api（不再寄生 cwd，共享盘不共账）', withEnvCleared(() => resolveDataDir(emptyCwd)) === join(os.homedir(), '.own-api'), withEnvCleared(() => resolveDataDir(emptyCwd)));
+  check('控制台 HTML 内嵌副本与磁盘同步（防改 web 忘 gen:web）', WEB_HTML === fs.readFileSync('web/index.html', 'utf8'), `${WEB_HTML.length}/${fs.readFileSync('web/index.html', 'utf8').length}`);
+  check('控制台支持 #token= 注入（双击启动免复制令牌）', WEB_HTML.includes('URLSearchParams(location.hash'), '');
+}
+
 // ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

@@ -7,6 +7,8 @@ import { ENTRYPOINTS, estimateInputTokens, extractClientKey, gateway, listModels
 import { store } from './store.ts';
 import { admitRequest } from './usage.ts';
 
+import { WEB_HTML } from './web-html.gen.ts';
+
 export function createApp() {
   const app = new Hono();
   // 全局兜底：任何漏网异常也必须回 JSON（OpenAI 风格）而不是 "Internal Server Error" 明文
@@ -90,11 +92,11 @@ export function createApp() {
 
   app.route('/api', createAdmin());
 
-  // 管理台静态页
+  // 管理台静态页：开发态磁盘现读（改完刷新即见）；单文件产物里回退内嵌副本
   app.get('/', (c) => {
     const file = join(process.cwd(), 'web', 'index.html');
-    if (!existsSync(file)) return c.text('web/index.html 不存在', 500);
-    return c.html(readFileSync(file, 'utf8'));
+    if (existsSync(file)) return c.html(readFileSync(file, 'utf8'));
+    return c.html(WEB_HTML);
   });
   app.get('/favicon.ico', (c) => c.body(null, 204));
 

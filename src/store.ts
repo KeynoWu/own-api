@@ -2,9 +2,15 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync, existsSy
 import { dirname, join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, Settings, VirtualKey } from './types.ts';
+import { envAny, resolveDataDir } from './bootstrap.ts';
 
-const DATA_DIR = process.env.LLM_DATA_DIR || join(process.cwd(), 'data');
-const DB_FILE = process.env.LLM_DB_FILE || join(DATA_DIR, 'db.json');
+const DATA_DIR = resolveDataDir();
+const DB_FILE = envAny(['OWN_API_DB_FILE', 'LLM_DB_FILE']) || join(DATA_DIR, 'db.json');
+
+/** 数据目录（last-session.json 等桌面壳交接文件写在这里） */
+export function getDataDir() {
+  return DATA_DIR;
+}
 
 function newId(prefix: string) {
   return `${prefix}_${randomBytes(6).toString('hex')}`;
@@ -21,7 +27,7 @@ function n(v: string | undefined, d: number) {
 
 function defaultSettings(): Settings {
   return {
-    adminToken: process.env.LLM_ADMIN_TOKEN || `admin-${randomBytes(9).toString('base64url')}`,
+    adminToken: envAny(['OWN_API_ADMIN_TOKEN', 'LLM_ADMIN_TOKEN']) || `admin-${randomBytes(9).toString('base64url')}`,
     defaultUpstreamTimeoutMs: n(process.env.LLM_UPSTREAM_TIMEOUT, 300_000),
     upstreamIdleTimeoutMs: n(process.env.LLM_IDLE_TIMEOUT, 120_000),
     maxBodyBytes: n(process.env.LLM_MAX_BODY_BYTES, 64 * 1024 * 1024),
