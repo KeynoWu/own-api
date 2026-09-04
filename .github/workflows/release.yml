@@ -32,7 +32,7 @@ jobs:
         with: { node-version: 22 }
       - uses: actions/setup-node@v4
         if: ${{ matrix.node_arch }}
-        with: { node-version: 22, architecture: ${{ matrix.node_arch }} }
+        with: { node-version: 22, architecture: '${{ matrix.node_arch }}' }
       - uses: dtolnay/rust-toolchain@stable
       - name: rustup 交叉目标
         if: ${{ matrix.rust_target }}
