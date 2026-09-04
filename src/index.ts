@@ -11,7 +11,7 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) =>
   const s = store.getSettings();
   const vk = store.listVKeys()[0];
   const base = `http://${info.address}:${info.port}`;
-  console.log(`\n  llm-manager 已启动`);
+  console.log(`\n  own-api 已启动`);
   console.log(`  ├─ 管理台    ${base}/`);
   console.log(`  ├─ 统一代理  ${base}/v1   (OpenAI 与 Anthropic 双协议)`);
   console.log(`  ├─ 管理令牌  ${s.adminToken}`);

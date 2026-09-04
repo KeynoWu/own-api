@@ -1055,7 +1055,7 @@ export function listModels(c: Context) {
       id: m.publicName,
       object: 'model',
       created: Math.floor(m.createdAt / 1000),
-      owned_by: `llm-manager:${store.getChannel(m.channelId)?.name || 'unknown'}`,
+      owned_by: `own-api:${store.getChannel(m.channelId)?.name || 'unknown'}`,
       context_length: m.contextWindow,
       ...(m.maxOutputTokens ? { max_output_tokens: m.maxOutputTokens } : {}),
     }));
@@ -1073,7 +1073,7 @@ export function listModels(c: Context) {
         id: a.publicName,
         object: 'model',
         created: Math.floor(a.createdAt / 1000),
-        owned_by: 'llm-manager:auto',
+        owned_by: 'own-api:auto',
         ...(ctxs.length ? { context_length: Math.min(...ctxs) } : {}),
         ...(outs.length && outs.every((v) => !!v) ? { max_output_tokens: Math.min(...(outs as number[])) } : {}),
       };

@@ -188,7 +188,7 @@ sticky[vid+auto] 存在 && 候选通过 ① && health(routeId) >= 0.4 → 直接
   在途流式请求直到 finalize 才对 admin 可见（by-design：日志是终态记账，不是实时进度）。
 - **成功响应**：`X-Lm-Routed-To` 头仅受 debugHeaders 门控；`exposeHeaders` 同步放宽。
 - **响应体 `model` 恒为 auto 名**（不泄候选；`aliasDiffers` 对 auto 恒真）。
-- `/v1/models` auto 条目：`owned_by:'llm-manager:auto'`；**只聚合有效候选（weight>0，v2.4）**；
+- `/v1/models` auto 条目：`owned_by:'own-api:auto'`；**只聚合有效候选（weight>0，v2.4）**；
   `context_length`=已配置者中的最小（未配置=∞ 不参与；全未配置则省略该字段）；
   `max_output_tokens`=**全部**配置时才取最小；不暴露 candidates 菜单；沿用 `allowedForKey`（层 2 也过滤）；
   消费方须知"配置可见性 ≠ 可用性 SLA"（auto 是否可用还取决于健康分/粘性/链预算）。

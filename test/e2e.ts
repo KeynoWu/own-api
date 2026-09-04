@@ -328,7 +328,7 @@ check('日志 routedTo=候选外名', ['auto-m-gpt', 'auto-m-gpt2'].includes(lgM
 check('日志 chainAttempts 记录链', Array.isArray(lgMain[0]?.chainAttempts) && lgMain[0].chainAttempts.length >= 1, JSON.stringify(lgMain[0]?.chainAttempts));
 const autoMdl = await api('/v1/models', { headers: AH });
 const autoEntry = (autoMdl.body?.data || []).find((m: any) => m.id === 'model_auto');
-check('/v1/models 含 auto 条目且不泄渠道', autoEntry?.owned_by === 'llm-manager:auto', JSON.stringify(autoEntry));
+check('/v1/models 含 auto 条目且不泄渠道', autoEntry?.owned_by === 'own-api:auto', JSON.stringify(autoEntry));
 const embAuto = await api('/v1/embeddings', { method: 'POST', headers: AH, body: JSON.stringify({ model: 'model_auto', input: 'x' }) });
 check('embeddings × auto 直接 400（§6）', embAuto.status === 400, String(embAuto.status));
 

@@ -396,7 +396,7 @@ export function createAdmin(): Hono {
       curl: `curl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${vk.key}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}'`,
       openaiSdk: `import OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${vk.key}" });\nconst r = await client.chat.completions.create({ model: "${model}", messages: [{ role: "user", content: "hi" }] });`,
       claudeCode: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${vk.key}"\nexport ANTHROPIC_MODEL="${model}"`,
-      codexCli: `# ~/.codex/config.toml\nmodel = "${model}"\n[model_providers.llm-manager]\nname = "llm-manager"\nbase_url = "${base}/v1"\nenv_key = "LLM_MANAGER_KEY"\n\n# export LLM_MANAGER_KEY="${vk.key}"`,
+      codexCli: `# ~/.codex/config.toml\nmodel = "${model}"\n[model_providers.own-api]\nname = "own-api"\nbase_url = "${base}/v1"\nenv_key = "OWN_API_KEY"\n\n# export OWN_API_KEY="${vk.key}"`,
     });
   });
 
