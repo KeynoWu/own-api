@@ -734,6 +734,25 @@ section('14. 信息暴露、usage 口径与主键完整性');
   } catch {
     /* 缺文件时给空对象走断言 */
   }
+  // ppid 看护：桌面壳（父进程）没了服务必须自灭——防"壳崩溃后端口永久孤儿占用"
+  {
+    const ghostDir = mkdtempSync(join(tmpdir(), 'ownapi-ghost-'));
+    const ghost = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+      env: { ...process.env, LLM_DATA_DIR: undefined, LLM_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: ghostDir, OWN_API_PORT: '18812', HOST: '127.0.0.1', OWN_API_PPID: '999999' },
+      stdio: 'ignore',
+      cwd: process.cwd(),
+    });
+    const ghostStarted = Date.now();
+    let ghostExited = false;
+    while (Date.now() - ghostStarted < 9000) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (ghost.exitCode !== null || ghost.signalCode !== null) {
+        ghostExited = true;
+        break;
+      }
+    }
+    check('OWN_API_PPID 父进程消失 -> 服务自灭（桌面壳崩溃不残留孤儿）', ghostExited, `exit=${ghost.exitCode} sig=${ghost.signalCode}`);
+  }
   check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
   child.kill();
   await new Promise<void>((r) => {

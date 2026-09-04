@@ -56,19 +56,34 @@ function listen(port: number) {
   return srv;
 }
 
-// 唯一的信号处理入口：停表 -> 落盘 -> 关连接 -> 退出
+// 唯一的退出路径：停表 -> 落盘 -> 关连接 -> 退出（信号 / 父进程看护共用）
 const gc = setInterval(gcRpmWindows, 60_000);
 gc.unref();
 
 let closing = false;
+function shutdown(reason: string) {
+  if (closing) return;
+  closing = true;
+  console.log(`\n  ${reason}，正在落盘并退出…`);
+  clearInterval(gc);
+  store.flushSync();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    if (closing) return;
-    closing = true;
-    console.log(`\n  收到 ${sig}，正在落盘并退出…`);
-    clearInterval(gc);
-    store.flushSync();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 3000).unref();
-  });
+  process.on(sig, () => shutdown(`收到 ${sig}`));
+}
+
+// 桌面看护：OWN_API_PPID 由桌面壳传入；壳没了（含崩溃/强杀）服务绝不孤儿驻留。
+// 2s 轮询存在性；PID 复用在个人单机语境按可忽略处理
+const ppid = Number(envAny(['OWN_API_PPID']) || 0);
+if (ppid > 0) {
+  const guard = setInterval(() => {
+    try {
+      process.kill(ppid, 0);
+    } catch {
+      shutdown('桌面壳已退出');
+    }
+  }, 2000);
+  guard.unref();
 }

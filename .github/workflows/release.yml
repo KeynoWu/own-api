@@ -1,0 +1,49 @@
+# tag v* 推送即出桌面安装包：mac(Apple 芯片) .dmg + Windows .exe → GitHub Releases
+# Intel Mac 暂不在矩阵（SEA 不可交叉编译，需要 x64 runner）；源码运行方式见 README
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest    # Apple 芯片
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - name: 前端内嵌 + SEA 二进制 + sidecar 就位
+        run: |
+          npm ci
+          npm run gen:web
+          npm run desktop:prepare
+      - name: tauri build
+        run: npx tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/nsis/*.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: 'true' }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false

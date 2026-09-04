@@ -30,12 +30,33 @@ codex      ───┼──▶  │  统一 URL + 统一 key          │
 | 管理台 | 渠道与号池、模型路由、auto 自动路由（含候选健康分/粘性运行时视图）、对外 key、实时日志、接入代码片段，全部可视化操作 |
 | 零依赖部署 | 状态存单个 `data/db.json`，无数据库；Node ≥ 20 即可运行 |
 
-## 快速开始
+## 桌面安装（推荐，零依赖）
+
+去 [Releases](../../releases) 下载对应平台安装包：
+
+| 平台 | 文件 | 说明 |
+| --- | --- | --- |
+| macOS（Apple 芯片） | `own-api_x.x.x_aarch64.dmg` | 拖进"应用程序"即可 |
+| Windows | `own-api_x.x.x_x64-setup.exe` | 当前用户安装，无需管理员 |
+
+装好运行后：托盘（macOS 菜单栏）出现 own-api 图标 → 服务自动启动 → 浏览器自动打开管理台
+（令牌已自动带上，无需复制）。首次启动如被系统拦截：macOS 右键图标 →"打开"；Windows"更多信息 → 仍要运行"
+（未购买代码签名证书，属预期提示）。
+
+- 数据（渠道/key/日志）存 `~/.own-api/`，卸载重装不丢；删掉即全新开始
+- 托盘菜单：打开控制台 / 打开数据目录 / 开机自动启动 / 退出（退出会连带关停服务，不留孤儿端口）
+- 端口被占自动 +1 避让；也可在环境变量里设 `OWN_API_PORT` 固定
+
+## 源码运行（开发者）
 
 ```bash
 npm install
 npm start                 # 启动网关 + 管理台（默认 http://127.0.0.1:8787）
 ```
+
+桌面壳本地构建：`npm run desktop:build`（需 Rust 工具链；产物在 `src-tauri/target/release/bundle/`）。
+环境变量统一 `OWN_API_*` 前缀（历史 `LLM_*` 仍兼容）：`OWN_API_DATA_DIR` / `OWN_API_PORT` /
+`OWN_API_HOST` / `OWN_API_ADMIN_TOKEN` / `OWN_API_OPEN_BROWSER=1`。
 
 启动后会打印 **管理令牌** 和 **默认对外 key**。打开管理台，按下面三步就能用：
 
@@ -127,10 +148,10 @@ auto 路由名优先于兜底渠道：auto 没有可用候选时报 404 附逐�
 ## 自测
 
 ```bash
-npm test         # 140 项：对"理想上游"的功能面（鉴权/同协议/跨协议/流式/号池/用量/边界 + auto 全套：
+npm test         # 145 项：对"理想上游"的功能面（鉴权/同协议/跨协议/流式/号池/用量/边界 + auto 全套：
                 # 硬过滤/粘性迟滞松手与 TTL/超窗续链/429 定向续链与终态/ACL 两层含顺序/链预算/断开止损/key 泄漏哨兵
                 # + 审查修复轮 §15：auto×流式两段式提交三态、限额预占与并发拒绝、N11 不覆写、估算器口径、import 回执）
-npm run test:hard # 71 项：对"脏上游"的加固回归（CRLF 分帧、JSON 冒充流式、卡死、离谱 Retry-After、断开 499、
+npm run test:hard # 75 项：对"脏上游"的加固回归（CRLF 分帧、JSON 冒充流式、卡死、离谱 Retry-After、断开 499、
                 # sniff 窗取消复查、慢客户端停读不误杀健康流…）
 npm run test:all  # 两把一起跑
 ```

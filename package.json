@@ -13,13 +13,16 @@
     "test:hard": "tsx test/hardening.ts",
     "test:all": "tsx test/e2e.ts && tsx test/hardening.ts",
     "gen:web": "node scripts/gen-web-html.mjs",
-    "build:sea": "node scripts/build-sea.mjs"
+    "build:sea": "node scripts/build-sea.mjs",
+    "desktop:prepare": "node scripts/build-sea.mjs && node scripts/prepare-desktop.mjs",
+    "desktop:build": "npm run desktop:prepare && tauri build"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
     "hono": "^4.6.16"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.10.5",
     "esbuild": "^0.28.2",
     "postject": "^1.0.0-alpha.6",
