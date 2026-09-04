@@ -1,6 +1,6 @@
 {
   "name": "own-api",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "本地大模型管理器 + 统一代理网关（号池）",

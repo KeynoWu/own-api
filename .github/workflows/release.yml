@@ -46,6 +46,20 @@ jobs:
           npm run desktop:prepare
       - name: tauri build
         run: npx tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+      - name: 包内侧车冒烟（v0.1.1 hardened-runtime SIGTRAP 事故的制度化守护）
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          APP="src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/macos/own-api.app"
+          OWN_API_DATA_DIR="$RUNNER_TEMP/sidecar-smoke" OWN_API_PORT=18990 "$APP/Contents/MacOS/own-api" &
+          SIDECAR=$!
+          trap "kill $SIDECAR 2>/dev/null || true" EXIT
+          for i in $(seq 1 20); do
+            sleep 1
+            if curl -fsS -o /dev/null "http://127.0.0.1:18990/v1/models" || [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18990/v1/models)" = "401" ]; then
+              echo "sidecar smoke OK (401 as expected)"; kill $SIDECAR; exit 0
+            fi
+          done
+          echo "::error::包内侧车 20 秒未就绪（签名/SEA 注入回归？）"; exit 1
       - name: 产物存在性硬校验（防空 glob 静默发布）
         run: ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe || true
         shell: bash
