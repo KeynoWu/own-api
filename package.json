@@ -12,7 +12,8 @@
     "test": "tsx test/e2e.ts",
     "test:hard": "tsx test/hardening.ts",
     "test:all": "tsx test/e2e.ts && tsx test/hardening.ts",
-    "gen:web": "node scripts/gen-web-html.mjs"
+    "gen:web": "node scripts/gen-web-html.mjs",
+    "build:sea": "node scripts/build-sea.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
@@ -20,6 +21,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   },
