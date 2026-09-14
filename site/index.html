@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>own-api · 公司发了一堆模型？一个入口全接住</title>
-<meta name="description" content="own-api：跑在你本机的统一大模型网关。所有 agent 只配一个 base_url、一把 key；改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型。macOS / Windows 桌面版，数据全在本地。">
+<title>own-api · 多个大模型，一个管理台管住</title>
+<meta name="description" content="own-api：跑在你本机的大模型管理台 + 统一网关。公司发的每个模型集中接入、可视化管理：改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型。macOS / Windows 桌面版，数据全在本地。">
 <meta property="og:type" content="website">
-<meta property="og:title" content="own-api · 一堆公司模型，一个入口">
-<meta property="og:description" content="统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂。本机运行，数据不出门。">
+<meta property="og:title" content="own-api · 多个大模型，一个管理台">
+<meta property="og:description" content="集中管理公司发的多个大模型：统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂。本机运行，数据不出门。">
 <meta property="og:url" content="https://keynowu.github.io/own-api/">
 <meta name="theme-color" content="#0B1120">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230F1A2E'/%3E%3Cpath d='M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z' fill='%23EAF1FB'/%3E%3Cpath d='M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z' fill='%23EAF1FB'/%3E%3Ccircle cx='32' cy='32' r='6.5' fill='%2338BDF8'/%3E%3C/svg%3E">
@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"own-api","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Windows","description":"本地统一大模型网关：一个 base_url 接入多个模型渠道，model 名即路由，auto 自动路由与健康分失败转移。","offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"}}
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"own-api","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Windows","description":"本地大模型管理台与统一网关：集中管理多个模型渠道，model 名即路由，auto 自动路由与健康分失败转移。","offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"}}
 </script>
 <style>
 :root{
@@ -254,10 +254,10 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 <section class="hero" aria-labelledby="h1">
   <div class="wrap hero-grid">
     <div>
-      <span class="badge"><i aria-hidden="true"></i>本机运行 · 数据不出门 · macOS / Windows</span>
-      <h1 id="h1">公司发了 <em>N</em> 个模型，<br>我只配 <em>1</em> 个入口。</h1>
-      <p class="sub">每个模型一个 baseURL，Claude Code、Codex、IDE 插件各配一套，还老有模型又慢又抽风？
-        own-api 在你本机跑一个统一网关：所有 agent 只配同一个 <span class="mono">base_url</span> 和同一把 key——
+      <span class="badge"><i aria-hidden="true"></i>多模型管理台 · 本机运行 · macOS / Windows</span>
+      <h1 id="h1">公司发了 <em>N</em> 个大模型，<br>我用 <em>1</em> 个管理台全管住。</h1>
+      <p class="sub">每个模型一个 baseURL，谁快谁慢全凭感觉？own-api 在你本机开一个多模型管理台：
+        渠道、密钥、路由、速度对比集中可视；所有 agent 只配同一个 <span class="mono">base_url</span> 和同一把 key——
         改一个 <span class="mono">model</span> 名就换一家供应商，<span class="mono">auto</span> 名自动绕开慢的和挂掉的模型。</p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="#download">
@@ -269,7 +269,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
           GitHub
         </a>
       </div>
-      <p class="hero-note">145+ 项端到端测试 · 单文件存储 · 无需数据库 · 免费分发</p>
+      <p class="hero-note">380+ 项自动化测试 · 单文件存储 · 无需数据库 · 免费分发</p>
     </div>
 
     <div class="reveal">
@@ -299,11 +299,11 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 <section id="pain" aria-labelledby="pain-h">
   <div class="wrap">
     <p class="sec-tag reveal">Why own-api</p>
-    <h2 id="pain-h" class="reveal">这些场景，你是不是天天在经历</h2>
-    <p class="sec-sub reveal">公司部署了一堆模型免费给大家用——听起来很爽，配起来很痛。</p>
+    <h2 id="pain-h" class="reveal">模型一多，管理就散了架</h2>
+    <p class="sec-sub reveal">公司部署了一堆模型免费给大家用——听起来很爽，管起来很痛。</p>
     <div class="pains">
-      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>每个模型一个 baseURL</p><p class="a">Claude Code 配一套、Codex 配一套、IDE 插件再来一套，内部文档永远过时。</p></div>
-      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>有的模型就是慢</p><p class="a">排队、加载、抽风。你想绕开它，就得记住"今天谁状态好"这种玄学。</p></div>
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>模型散落，没有一处能看全</p><p class="a">这家一个 baseURL、那家一个 key，散在各个 agent 的配置里，谁接了什么全靠回忆。</p></div>
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>谁快谁慢，全凭感觉</p><p class="a">排队、加载、抽风。你想绕开慢模型，就得记住"今天谁状态好"这种玄学。</p></div>
       <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>换模型 = 翻遍所有配置</p><p class="a">每换一次模型，每个 agent 的环境变量都要改一遍，还得担心 key 贴得到处都是。</p></div>
       <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>多协议互不兼容</p><p class="a">Anthropic 原生、OpenAI 兼容、本地 Ollama……客户端和上游对不上就得中间转。</p></div>
     </div>
@@ -314,9 +314,14 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 <section id="features" aria-labelledby="feat-h">
   <div class="wrap">
     <p class="sec-tag reveal">Capabilities</p>
-    <h2 id="feat-h" class="reveal">一个进程，管住所有模型</h2>
-    <p class="sec-sub reveal">管理台 + 统一代理入口同进程提供：渠道号池、模型路由、自动路由、限额用量，全部可视化。</p>
+    <h2 id="feat-h" class="reveal">一个管理台，管住所有模型</h2>
+    <p class="sec-sub reveal">渠道接入、模型路由、自动兜底、用量限额，全部集中在一个可视化界面——多个大模型不再是散装配置。</p>
     <div class="feats">
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
+        <h3>多渠道集中管理</h3>
+        <p>每家上游（baseURL + key）一条渠道，测试连通、批量导模型、启停切换全在一张表里。一个渠道多把 key 组成号池：加权最小负载轮询，401 / 429 / 5xx 自动冷却退避、换 key 重试，到期自动回池。</p>
+      </article>
       <article class="feat reveal">
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h6m-6 5h10m-10 5h6"/><path d="M16 4v16l4-3m-4 3-4-3"/></svg></span>
         <h3>model 名即路由</h3>
@@ -326,11 +331,6 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.2 2.2m8.4 8.4 2.2 2.2m0-12.8-2.2 2.2M7.8 16.2l-2.2 2.2"/><circle cx="12" cy="12" r="3.5"/></svg></span>
         <h3>auto 自动路由</h3>
         <p>一个对外名聚合一组候选：按请求硬约束过滤（窗口 / tools / 流式）→ 会话粘性吃缓存 → 健康分加权随机。挂了自动换下一个，全链失败才报错。</p>
-      </article>
-      <article class="feat reveal">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg></span>
-        <h3>号池调度与退避</h3>
-        <p>一个渠道多把 key，加权最小负载轮询；401 / 429 / 5xx / 超时自动冷却退避、换 key 重试，到期自动回池，无需人工干预。</p>
       </article>
       <article class="feat reveal">
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 8 3 12l4 4m10-8 4 4-4 4M3 12h13m-3-4h11"/></svg></span>
@@ -354,8 +354,8 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 <!-- ================= CONSOLE SHOT ================= -->
 <section aria-labelledby="console-h" style="padding-top:0">
   <div class="wrap">
-    <h2 id="console-h" class="reveal" style="font-size:clamp(20px,2.4vw,26px)">管理台长这样——仪表盘到号池健康，一屏一个真相</h2>
-    <p class="sec-sub reveal" style="margin-bottom:var(--sp-4)">真实截图：token 消耗与缓存命中率、按小时的用量趋势、五个分析视图随切。</p>
+    <h2 id="console-h" class="reveal" style="font-size:clamp(20px,2.4vw,26px)">管理台长这样——多个大模型的状态，一屏一个真相</h2>
+    <p class="sec-sub reveal" style="margin-bottom:var(--sp-4)">真实截图：token 消耗与缓存命中率、按小时的用量趋势、五个分析视图随切；哪个模型慢、哪把 key 出问题，一眼定位。</p>
     <figure>
       <div class="shot reveal">
         <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span>127.0.0.1:8787 · 使用统计</span></div>
@@ -501,6 +501,10 @@ claude
         <p class="a">全部存在本机 <code>~/.own-api/db.json</code>（写入即 0600 权限），不联网上报、没有任何遥测。网关默认只监听 <code>127.0.0.1</code>，管理台密钥默认脱敏，明文仅本机回环可见。</p>
       </details>
       <details class="reveal">
+        <summary>公司发了一堆模型、baseURL 各不相同，都能管进来吗？</summary>
+        <p class="a">能，这正是它的主职：每个渠道独立填 baseURL、协议（OpenAI 兼容 / Anthropic 原生）和自己的 key，测连通后上游模型一键导入路由表；几十个渠道也是同一张表管理。团队内还能用「配置组」把渠道与路由导出成 JSON 分发——不含任何密钥，每人自己填。</p>
+      </details>
+      <details class="reveal">
         <summary>支持哪些上游协议？Codex 新版能用吗？</summary>
         <p class="a">OpenAI 兼容（<code>/v1/chat/completions</code>）与 Anthropic 原生（<code>/v1/messages</code>）双向入口、双向互转，另兼容 legacy completions 与 embeddings。注意暂不支持 OpenAI Responses API（<code>/v1/responses</code>），这类客户端请切到 chat completions 模式。</p>
       </details>
@@ -527,7 +531,7 @@ claude
       <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0F1A2E"/><path d="M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z" fill="#EAF1FB"/><path d="M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z" fill="#EAF1FB"/><circle cx="32" cy="32" r="6.5" fill="#38BDF8"/></svg>
       own-api
     </a>
-    <span>本地大模型网关 · 数据不出你的机器</span>
+    <span>多模型管理台 · 本机网关 · 数据不出你的机器</span>
     <span class="sep"></span>
     <a href="https://github.com/KeynoWu/own-api" rel="noopener">GitHub</a>
     <a href="https://github.com/KeynoWu/own-api/issues" rel="noopener">反馈</a>
