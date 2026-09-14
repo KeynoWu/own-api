@@ -11,3 +11,4 @@ src-tauri/binaries/own-api-*
 .cargo/
 .cargo-home/
 .tmp-node-x64/
+.fixr/

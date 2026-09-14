@@ -129,6 +129,24 @@ export function clearSticky() {
   sticky.clear();
 }
 
+const stickySuffix = (autoName: string) => String.fromCharCode(0) + autoName.toLowerCase(); // 与 stickKey 同源的名后缀判定：只允许这一个拼法
+
+/** 按路由名探测粘性绑定数（/auto-health?route= 观测口，不改数据） */
+export function stickyCountForRoute(autoName: string): number {
+  const suffix = stickySuffix(autoName);
+  let n = 0;
+  for (const k of sticky.keys()) if (k.endsWith(suffix)) n++;
+  return n;
+}
+
+/** 按路由名清粘性（路由页「粘性立即生效」按钮）：改权重/候选后要立刻接管分流，不等 TTL/重启 */
+export function clearStickyForRoute(autoName: string): number {
+  const suffix = stickySuffix(autoName);
+  let n = 0;
+  for (const k of [...sticky.keys()]) if (k.endsWith(suffix)) { sticky.delete(k); n++; }
+  return n;
+}
+
 // ---------------------------------------------------------------- 加权
 
 /**

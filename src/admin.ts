@@ -8,7 +8,7 @@ import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
-import { clearHealth, clearHealthFor, clearSticky, healthSnapshot, stickyCount } from './auto.ts';
+import { clearHealth, clearHealthFor, clearSticky, clearStickyForRoute, healthSnapshot, stickyCount, stickyCountForRoute } from './auto.ts';
 import type { Channel } from './types.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -416,21 +416,37 @@ export function createAdmin(): Hono {
     const found = store.getRoute(id);
     if (!found) return c.json({ error: 'not found' }, 404);
     if (found.type === 'auto') {
+      const oldAutoName = String(found.publicName); // found 是库内活引用：updateAutoRoute 原地 Object.assign 改名后旧名就读不到了，必须先快照
       const { auto, error, missing } = store.updateAutoRoute(id, b);
       if (missing) return c.json({ error: 'not found' }, 404);
       if (error) return c.json({ error }, 400);
+      const newName = typeof b.publicName === 'string' ? b.publicName.trim() : ''; // store 落库前 trim；粘性 key 统一小写→纯大小写改名不算改名，不误清
+      if (newName && newName.toLowerCase() !== oldAutoName.toLowerCase()) clearStickyForRoute(oldAutoName); // 改名即清旧名粘性：不留内存死绑定（§3.2 v2.5）
       return c.json(auto);
     }
     const m = store.updateModel(id, b);
     if (m === 'conflict') return c.json({ error: `名称或 tag 与既有模型/auto 路由冲突${b.publicName ? `：${b.publicName}` : ''}` }, 409);
     return m ? c.json(m) : c.json({ error: 'not found' }, 404);
   });
+  // 粘性立即生效：清空该 auto 路由的全部粘性绑定，下一条请求即按新权重/候选重抽
+  app.delete('/routes/:id/sticky', (c) => {
+    const found = store.getRoute(c.req.param('id'));
+    if (!found) return c.json({ error: 'not found' }, 404);
+    if (found.type !== 'auto') return c.json({ error: '仅 auto 路由有粘性绑定' }, 400);
+    return c.json({ ok: true, cleared: clearStickyForRoute(found.publicName) });
+  });
 
   app.delete('/routes/:id', (c) => {
     const id = c.req.param('id');
     const found = store.getRoute(id);
     if (!found) return c.json({ error: 'not found' }, 404);
-    if (found.type === 'auto') return store.deleteAutoRoute(id) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+    if (found.type === 'auto') {
+      const goneName = String(found.publicName); // 删除前快照，与改名路径同防
+      const gone = store.deleteAutoRoute(id);
+      if (!gone) return c.json({ error: 'not found' }, 404);
+      clearStickyForRoute(goneName); // 删除即清粘性：不留指向已删路由的悬挂绑定
+      return c.json({ ok: true });
+    }
     // C8：被 auto 引用的候选删除后不会自动清理，回引用清单让管理端红标警示
     const { referencedAutoRoutes } = store.deleteModel(id);
     clearHealthFor(id); // 已删路由的健康窗口条目同步回收
@@ -602,6 +618,8 @@ export function createAdmin(): Hono {
       const m = store.getModel(h.routeId);
       return { ...h, name: m?.publicName, channel: m ? store.getChannel(m.channelId)?.name : undefined };
     });
+    const routeQ = c.req.query('route');
+    if (routeQ) return c.json({ windows: snap, stickyEntries: stickyCount(), stickyForRoute: stickyCountForRoute(String(routeQ)) });
     return c.json({ windows: snap, stickyEntries: stickyCount() });
   });
   app.post('/auto-health/reset', (c) => {

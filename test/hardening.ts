@@ -1143,6 +1143,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('SI 渲染层钉（阈值/空态/中断率注/低样本）', htmlD.includes('base * 1.5') && htmlD.includes('窗口内还没有请求记录') && htmlD.includes('多为客户端超时或主动取消') && htmlD.includes('< 5'));
   check('CB 两页导入入口', (htmlD.match(/onclick: \(\) => importConfig\(\)/g) || []).length >= 2, String((htmlD.match(/importConfig\(\)/g) || []).length));
   check('CB 整体失败保留对话框（提交在 onSubmit 内 await，失败即不关窗）', cut('importConfig').includes("const rc2 = await api(") && !cut('importConfig').includes(".then("));
+  check('路由行「粘性立即生效」按钮在版（DELETE /routes/:id/sticky 接线）', htmlD.includes('粘性立即生效') && htmlD.includes("'/sticky'"));
 }
 
 // ---------- R3：v3 形状净化 + 退出锁清理（真 spawn） ----------

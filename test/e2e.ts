@@ -615,6 +615,31 @@ for (let i = 0; i < 8 && !released; i++) {
 }
 check('粘性 TTL 过期：静默越过 TTL 后绑定可易主（不过期则永无此日）', released, JSON.stringify((await getLogs('auto_ttl')).slice(0, 8).map((l) => l.routedTo)));
 check('粘性条目数可观测（auto-health 出口，此刻 auto_ttl 必有活绑定）', (await autoHealth()).stickyEntries > 0, JSON.stringify((await autoHealth()).stickyEntries));
+  await autoReq('auto_ttl'); // TTL=500ms 会过期：先补一发钉住，再验清口
+  const aTtl = (await api('/api/routes?type=auto', { headers: ADMIN })).body.find((r: any) => r.publicName === 'auto_ttl');
+  const rStk1: any = (await api('/api/routes/' + aTtl.id + '/sticky', { method: 'DELETE', headers: ADMIN })).body;
+  check('粘性立即生效：清口删活绑定（cleared>=1）', rStk1?.ok === true && rStk1.cleared >= 1, JSON.stringify(rStk1));
+  const rStk2: any = (await api('/api/routes/' + aTtl.id + '/sticky', { method: 'DELETE', headers: ADMIN })).body;
+  check('粘性清口幂等：再清 cleared=0', rStk2?.ok === true && rStk2.cleared === 0, JSON.stringify(rStk2));
+  const sidP = (await api('/api/routes?type=single', { headers: ADMIN })).body[0].id;
+  const rStk3 = await api('/api/routes/' + sidP + '/sticky', { method: 'DELETE', headers: ADMIN });
+  check('粘性清口对 single 路由 400', rStk3.status === 400, String(rStk3.status));
+  const rNoTokS = await fetch(BASE + '/api/routes/' + aTtl.id + '/sticky', { method: 'DELETE' });
+  check('粘性清口无令牌 401', rNoTokS.status === 401, String(rNoTokS.status));
+  const aStk: any = (await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'auto', publicName: 'auto_stk', candidates: [{ routeId: mGptR.id, weight: 1 }, { routeId: mGpt2R.id, weight: 1 }], stickyTtlMs: 60000 }) })).body;
+  const stkProbe = async (nm: string) => (await api('/api/auto-health?route=' + encodeURIComponent(nm), { headers: ADMIN })).body.stickyForRoute;
+  await autoReq('auto_stk');
+  check('改名清理前置：旧名绑定在（probe=1）', (await stkProbe('auto_stk')) === 1, String(await stkProbe('auto_stk')));
+  await api('/api/routes/' + aStk.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ publicName: 'auto_stk2' }) });
+  check('auto 改名即清旧名粘性（旧名 0、新名 0）', (await stkProbe('auto_stk')) === 0 && (await stkProbe('auto_stk2')) === 0, JSON.stringify([await stkProbe('auto_stk'), await stkProbe('auto_stk2')]));
+  await autoReq('auto_stk2');
+  check('新名重新粘上（probe=1）', (await stkProbe('auto_stk2')) === 1, String(await stkProbe('auto_stk2')));
+  await api('/api/routes/' + aStk.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ publicName: '  auto_stk2  ' }) });
+  check('空格改名（trim 后同名）不误清粘性', (await stkProbe('auto_stk2')) === 1, String(await stkProbe('auto_stk2')));
+  await api('/api/routes/' + aStk.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ publicName: 'AUTO_STK2' }) });
+  check('纯大小写改名不清粘性（key 小写归一，绑定仍有效）', (await stkProbe('AUTO_STK2')) === 1, String(await stkProbe('AUTO_STK2')));
+  const delStk = await api('/api/routes/' + aStk.id, { method: 'DELETE', headers: ADMIN });
+  check('auto 删除即清粘性（probe 归 0）', delStk.status === 200 && (await stkProbe('auto_stk2')) === 0, String(await stkProbe('auto_stk2')));
 
 // —— N11 守护（二轮 F1"绿色谎言①"：M1 修复此前零断言）——
 await resetAutoRT();

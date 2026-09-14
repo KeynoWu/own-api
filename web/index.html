@@ -735,6 +735,7 @@ views.models = async () => {
       el('td', {}, el('div', { class: 'row' },
         el('button', { class: 'btn sm', onclick: () => api('/api/routes/' + r.id, { method: 'PATCH', body: JSON.stringify({ enabled: !r.enabled }) }).then(() => go('models')) }, r.enabled ? '停用' : '启用'),
         el('button', { class: 'btn sm', onclick: () => (r.type === 'auto' ? editAuto(r) : editModel(r)) }, '编辑'),
+        r.type === 'auto' ? el('button', { class: 'btn sm', title: '清空该路由全部粘性绑定：改完权重/候选点一下，下一条请求立即按新配比重抽（不必等粘性 TTL 过期）', onclick: () => api('/api/routes/' + r.id + '/sticky', { method: 'DELETE' }).then((z) => toast(z?.cleared ? '已清除 ' + z.cleared + ' 条粘性绑定，新配比立即生效' : '当前没有粘性绑定')) }, '粘性立即生效') : null,
         el('button', { class: 'btn sm danger', onclick: () => confirm('删除路由 ' + r.publicName + '？') && api('/api/routes/' + r.id, { method: 'DELETE' }).then((z) => { if (z?.warning) toast(z.warning, true); go('models'); }) }, '删除'),
       ))));
   }
