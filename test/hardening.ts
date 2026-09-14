@@ -1095,19 +1095,23 @@ section('14. 信息暴露、usage 口径与主键完整性');
   let dep = 0; let en = -1;
   if (st >= 0) {
     for (let i = htmlC.indexOf('{', st); i < htmlC.length; i++) {
-      if (htmlC[i] === '{') dep++;
+      const cc = htmlC[i];
+      if (cc === '/' && htmlC[i + 1] === '/') { i = Math.max(i + 1, htmlC.indexOf(String.fromCharCode(10), i)); continue; }
+      if (cc === '/' && htmlC[i + 1] === '*') { i = htmlC.indexOf('*/', i) + 1; continue; }
+      if (cc === String.fromCharCode(39) || cc === String.fromCharCode(34) || cc === String.fromCharCode(96)) { i++; while (i < htmlC.length && htmlC[i] !== cc) { if (htmlC[i] === String.fromCharCode(92)) i++; i++; } continue; }
+      if (cc === '{') dep++;
       else if (htmlC[i] === '}') { dep--; if (dep === 0) { en = i; break; } }
     }
   }
   check('CB scanBundleForSecrets 可抽取', en > 0, String(en));
-  const scan = new Function('return ' + htmlC.slice(st, en + 1))();
+  const scan = new Function('return ' + (htmlC.slice(Math.max(0, st - 6), st).trimEnd().endsWith('async') ? 'async ' : '') + htmlC.slice(st, en + 1))();
   const hit = scan({ channels: [{ name: 'x', note: '我的 key 是 sk-abcdefghijklmnopqrstuvwxyz0123 记得换' }], exportedAt: '2026-01-01T00:00:00Z' });
   check('CB 启发式命中自由文本 key', hit.length === 1 && hit[0].includes('.note'), JSON.stringify(hit));
   const miss = scan({ channels: [{ name: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', note: '正常备注' }], routes: { singles: [], autos: [] } });
   check('CB 启发式不误伤普通配置', miss.length === 0, JSON.stringify(miss));
   const exp2 = htmlC.slice(htmlC.indexOf('async function exportConfig('));
   check('CB 导出确认不阻断语义（confirm 可续）', exp2.includes('仍要导出？') && exp2.includes('confirm('));
-  check('CB 两页同位导出入口+微文案', (htmlC.match(/导出全部配置/g) || []).length >= 2 && htmlC.includes('含全部渠道与路由，不含密钥'), String((htmlC.match(/导出全部配置/g) || []).length));
+  check('CB 两页同位导出入口+微文案', (htmlC.match(/导出全部配置/g) || []).length >= 2 && htmlC.includes('不含渠道密钥；extraHeaders 原样导出'), String((htmlC.match(/导出全部配置/g) || []).length));
 }
 // ---------- CB-3 DOM 钉：两步导入 UI + 徽章判据 + 回执文案 ----------
 {
@@ -1118,8 +1122,12 @@ section('14. 信息暴露、usage 口径与主键完整性');
     if (st < 0) return '';
     let dep = 0;
     for (let i = htmlD.indexOf('{', st); i < htmlD.length; i++) {
-      if (htmlD[i] === '{') dep++;
-      else if (htmlD[i] === '}') { dep--; if (dep === 0) return htmlD.slice(st, i + 1); }
+      const cc = htmlD[i];
+      if (cc === '/' && htmlD[i + 1] === '/') { i = Math.max(i + 1, htmlD.indexOf(String.fromCharCode(10), i)); continue; }
+      if (cc === '/' && htmlD[i + 1] === '*') { i = htmlD.indexOf('*/', i) + 1; continue; }
+      if (cc === String.fromCharCode(39) || cc === String.fromCharCode(34) || cc === String.fromCharCode(96)) { i++; while (i < htmlD.length && htmlD[i] !== cc) { if (htmlD[i] === String.fromCharCode(92)) i++; i++; } continue; }
+      if (cc === '{') dep++;
+      else if (htmlD[i] === '}') { dep--; if (dep === 0) return (htmlD.slice(Math.max(0, st - 6), st).trimEnd().endsWith('async') ? 'async ' : '') + htmlD.slice(st, i + 1); }
     }
     return '';
   };
@@ -1128,9 +1136,13 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('CB 零变更回执固定首行「没有新变更」', zero.startsWith('没有新变更：5 项一致、0 项冲突'), zero);
   const pf = new Function('cbKeyDraft', 'return ' + cut('cbPendingFields'))({})({ pendingKeyChannels: ['甲', '乙'] });
   check('CB pending 密钥框字段（ck: 前缀+textarea）', pf.length === 2 && pf[0].name === 'ck:甲' && pf[0].type === 'textarea', JSON.stringify(pf.map((f: any) => f.name)));
+  check('DOM 抽源语法自洽（截断即红）', (() => { try { new Function('cbKeyDraft', 'cbFillPendingKeys', 'return ' + cut('importConfig'))(() => {}); new Function('cbKeyDraft', 'cbFillPendingKeys', 'return ' + cut('cbFillPendingKeys'))(() => {}); return true; } catch { return false; } })());
   check('CB 徽章判据=空号池且启用（琥珀 warn，非红）', htmlD.includes('c.keys.length === 0 && c.enabled') && htmlD.includes("'待填密钥'"));
+  check('CB 两步链式结构在版（dryRun→ctx 守卫→pending 第三幕）', cut('importConfig').includes('dryRun: true') && cut('importConfig').includes('cbFillPendingKeys(') && cut('importConfig').includes('ctx.cancelled()'));
+  check('CB 粘贴幕失败保幕（throw 不关窗）', cut('importConfig').includes("throw new Error('bundle 不是合法 JSON')"));
+  check('SI 渲染层钉（阈值/空态/中断率注/低样本）', htmlD.includes('base * 1.5') && htmlD.includes('窗口内还没有请求记录') && htmlD.includes('多为客户端超时或主动取消') && htmlD.includes('< 5'));
   check('CB 两页导入入口', (htmlD.match(/onclick: \(\) => importConfig\(\)/g) || []).length >= 2, String((htmlD.match(/importConfig\(\)/g) || []).length));
-  check('CB 整体失败保留对话框（catch 不清场）', cut('importConfig').includes("'导入失败，本对话框内容已保留"));
+  check('CB 整体失败保留对话框（提交在 onSubmit 内 await，失败即不关窗）', cut('importConfig').includes("const rc2 = await api(") && !cut('importConfig').includes(".then("));
 }
 
 // ---------- R3：v3 形状净化 + 退出锁清理（真 spawn） ----------

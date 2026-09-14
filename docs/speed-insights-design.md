@@ -1,6 +1,6 @@
 # 模型速度排行 — 设计 v1.1（方案，未实现）
 
-> 状态：**已实现（2026-09-14）**（v1.1 按稿落地；守护断言：test/e2e.ts §17-18 与 §21 前后、test/hardening.ts「SI-2 DOM 钉」；实现与稿面无偏差，hours 钳制/两表分装/benchmark 单源均按 DR 执行）。
+> 状态：**已实现（2026-09-14）**（v1.1 按稿落地；守护断言：test/e2e.ts §17-18 与 §21 前后、test/hardening.ts「SI-2 DOM 钉」；实现与稿面一致（v1.2：§4 接口块订正；实况 smoke/卫生钉落 e2e §21；渲染层 DOM 钉补齐），hours 钳制/两表分装/benchmark 单源均按 DR 执行）。
 > 受众背景（全部取舍的前提）：员工本机各跑一个桌面实例，聚合公司内部多个模型端点；
 > 「有的模型慢/效率低」是**常态而非故障**——本页回答"哪个模型慢、慢多少"，支撑手动调整 auto 候选权重的决策。
 >
@@ -87,7 +87,7 @@ interface SpeedReport {
   retention: number;      // 当前 logRetention（样本真相用）
   oldestTs: number;       // 窗口内最早样本（保留窗不足提示用，§5）
   benchmark: { streamP50Ms?: number; latP50Ms?: number };  // 高亮唯一基准，后端单源（DR-SI-9）
-  rows: SpeedRow[];
+  streamRows: SpeedRow[]; latencyRows: SpeedRow[]; unattributed: SpeedRow | null; // v1.2 订正：接口块与正文/实现一致
 }
 ```
 

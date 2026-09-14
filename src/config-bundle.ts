@@ -67,14 +67,14 @@ export interface Conflict { name?: string; publicName?: string; reason: string }
 export interface Receipt {
   dryRun: boolean;
   channels: { created: number; merged: number; keysAdded: number; keysAddedByChannel: Record<string, number>; conflicts: Conflict[] };
-  routes: { created: number; skipped: number; conflicts: Conflict[]; warnings: { publicName?: string; reason: string }[] };
+  routes: { created: number; skipped: number; conflicts: Conflict[]; warnings: { publicName?: string; reason: string }[]; candidatesMerged: { publicName: string; changes: string[] }[] };
   pendingKeyChannels: string[];
 }
 interface Plan {
   chanCreate: { src: any; keyList: string[] }[];
   chanMerge: { targetId: string; name: string; keyList: string[] }[];
   singles: { src: any; channelId?: string; newChanIdx?: number; srcIdx: number }[];
-  autos: { src: any; mergeTargetId?: string; okCount: number }[];
+  autos: { src: any; mergeTargetId?: string; okCount: number; changes?: string[] }[];
   candRoutes: { publicName: string; localId?: string; newSingleIdx?: number }[];
   skippedSingles: number;
 }
@@ -102,7 +102,7 @@ function chanEq(local: any, src: any) {
 }
 function singleEq(local: any, src: any, channelId: string) {
   return local.channelId === channelId
-    && local.upstreamModel === src.upstreamModel
+    && local.upstreamModel === String(src.upstreamModel ?? '').trim() // 与 createModel 落库 trim 对齐
     && normOpt(src.protocol) === normOpt(local.protocol)
     && boolDef(src.enabled, true) === (local.enabled !== false)
     && (normOpt(src.contextWindow) ?? 128000) === (normOpt(local.contextWindow) ?? 128000) // 布尔/数值缺省按 create 默认展开后再比（§4.2）
@@ -124,7 +124,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
   if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return { errors: ['bundle 需为对象'] };
   if (bundle.kind !== BUNDLE_KIND) return { errors: ['kind 必须为 ' + BUNDLE_KIND] };
   const ver = bundle.version;
-  if (!Number.isInteger(ver) || ver > BUNDLE_VERSION) {
+  if (ver !== BUNDLE_VERSION) {
     return { errors: [typeof ver === 'number' && ver > BUNDLE_VERSION ? '该 bundle 由更新版本 own-api 导出（version=' + ver + '），请升级后重试' : 'version 无效'] };
   }
   const chans = bundle.channels ?? [];
@@ -134,6 +134,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
     return { errors: ['channels/routes.singles/routes.autos 需为数组'] };
   }
   if (!chans.length && !singlesIn.length && !autosIn.length) errors.push('空 bundle：channels 与 routes 均为空');
+  if (chans.length + singlesIn.length + autosIn.length > 5000) return { errors: ['实体数量超过上限 5000（当前 ' + (chans.length + singlesIn.length + autosIn.length) + '），请拆分 bundle 后重试'] };
   const chanNames = new Set<string>();
   for (let i = 0; i < chans.length; i++) {
     const c = chans[i];
@@ -170,6 +171,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       if (arr.length) keysIn[n.trim()] = [...new Set(arr)];
     }
   }
+  if (Object.values(keysIn).reduce((s, a) => s + a.length, 0) > 1000) return { errors: ['keys 条目超过上限 1000，请分批导入'] };
   const plan: Plan = { chanCreate: [], chanMerge: [], singles: [], autos: [], candRoutes: [], skippedSingles: 0 };
   const chanConflicts: Conflict[] = [];
   const routeConflicts: Conflict[] = [];
@@ -188,11 +190,12 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       else if (!CHAN_FIELDS.has(k)) warnings.push({ reason: '渠道 ' + name + ' 未知字段「' + k + '」已忽略' });
     }
     for (const k of [...KEYISH]) delete (src as any)[k];
-    if (src.protocol !== undefined && src.protocol !== 'openai' && src.protocol !== 'anthropic') { chanConflicts.push({ name, reason: 'protocol 无效' }); continue; }
+    if (src.protocol !== undefined && src.protocol !== null && src.protocol !== 'openai' && src.protocol !== 'anthropic') { chanConflicts.push({ name, reason: 'protocol 无效' }); continue; }
     if (src.authStyle !== undefined && src.authStyle !== 'bearer' && src.authStyle !== 'x-api-key') { chanConflicts.push({ name, reason: 'authStyle 无效' }); continue; }
     if (src.timeoutMs !== undefined && src.timeoutMs !== null && !(typeof src.timeoutMs === 'number' && Number.isFinite(src.timeoutMs) && src.timeoutMs >= 1000 && src.timeoutMs <= 3_600_000)) { chanConflicts.push({ name, reason: 'timeoutMs 无效（1000..3600000 或 null）' }); continue; }
     if ((src.note !== undefined && typeof src.note !== 'string') || (src.testModel !== undefined && typeof src.testModel !== 'string')) { chanConflicts.push({ name, reason: 'note/testModel 需为字符串' }); continue; }
     if (src.extraHeaders !== undefined && src.extraHeaders !== null && (typeof src.extraHeaders !== 'object' || Array.isArray(src.extraHeaders))) { chanConflicts.push({ name, reason: 'extraHeaders 需为对象' }); continue; }
+    try { normalizeBaseUrl(String(src.baseUrl)); } catch (e: any) { chanConflicts.push({ name, reason: 'baseUrl 无效：' + (e?.message || '仅支持 http/https') }); continue; } // 正确性审查 H1：createChannel 会抛→半截落盘，闸必须前移
     const matches = db.channels.filter((c) => c.name.trim() === name);
     const keyList = keysIn[name] || [];
     if (keyList.length) consumedKeyNames.add(name);
@@ -213,7 +216,8 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       const net = keyList.filter((k) => !have.has(k)).length;
       if (net) { keysAddedByChannel[name] = net; keysAdded += net; }
       plan.chanMerge.push({ targetId: local.id, name, keyList });
-      if ((local.keys || []).length === 0 && keyList.length === 0) pending.add(name); // 判据=空号池（§4.1/§8 钉：仅剩 cooldown 不算待填）
+      const usableNow = (local.keys || []).some((k: any) => k.status === 'active' || k.status === 'cooldown');
+      if (!usableNow && keyList.length === 0) pending.add(name); // §5 判据：无 active 即待填（cooldown 瞬态不算；disabled 算——双评审裁决）
     } else {
       plan.chanCreate.push({ src, keyList });
       if (keyList.length) { keysAddedByChannel[name] = keyList.length; keysAdded += keyList.length; }
@@ -229,9 +233,10 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
   const singleIdByName = new Map(db.routes.filter((r): r is any => r.type === 'single').map((r: any) => [r.publicName, r.id] as const));
   const autoNameSet = new Set(db.routes.filter((r) => r.type === 'auto').map((r: any) => r.publicName));
 
+  const accTags = new Set<string>(); // 计划层 tag 闸：守 dryRun≡提交
   singlesIn.forEach((src: any, srcIdx: number) => {
     const name = String(src.publicName).trim();
-    for (const k of Object.keys(src)) if (!SINGLE_FIELDS.has(k)) warnings.push({ publicName: name, reason: '未知字段「' + k + '」已忽略' });
+    for (const k of Object.keys(src)) { if (KEYISH.has(k)) warnings.push({ publicName: name, reason: '密钥字段「' + k + '」已忽略：每人密钥不同，请经 keys 参数或渠道页填入' }); else if (!SINGLE_FIELDS.has(k)) warnings.push({ publicName: name, reason: '未知字段「' + k + '」已忽略' }); }
     if (src.protocol !== undefined && src.protocol !== null && src.protocol !== 'openai' && src.protocol !== 'anthropic') { routeConflicts.push({ publicName: name, reason: 'protocol 无效' }); return; }
     if (!(isNum0(src.contextWindow) && isNum0(src.maxOutputTokens) && isNum0(src.priceInput) && isNum0(src.priceOutput) && isNum0(src.priceCacheRead) && isNum0(src.priceCacheWrite))) { routeConflicts.push({ publicName: name, reason: '数值字段需为非负数或 null' }); return; }
     if (src.tags !== undefined && !(Array.isArray(src.tags) && src.tags.every((t: any) => typeof t === 'string'))) { routeConflicts.push({ publicName: name, reason: 'tags 需为字符串数组' }); return; }
@@ -252,22 +257,41 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       return;
     }
     if (store.routeNameTaken(name)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); return; }
+    {
+      const tg: string[] = (src.tags || []).map(String);
+      let tagBad = '';
+      for (const t of tg) { if (store.routeNameTaken(t) || accTags.has(t)) { tagBad = t; break; } }
+      if (tagBad) { routeConflicts.push({ publicName: name, reason: 'tag「' + tagBad + '」与既有路由或本包内冲突' }); return; }
+      for (const t of tg) accTags.add(t);
+    }
     plan.singles.push({ src, channelId, newChanIdx, srcIdx });
   });
   const bundleSingleNames = new Set(singlesIn.map((s: any) => String(s.publicName).trim()));
+  const conflictedSingles = new Set(routeConflicts.map((x) => String(x.publicName)).filter((n: string) => bundleSingleNames.has(n)));
+
+  const candNameSet = new Set<string>();
+  const bundleSingleIdx = new Map<string, number>();
+  singlesIn.forEach((s: any, i: number) => bundleSingleIdx.set(String(s.publicName).trim(), i));
 
   for (const src of autosIn) {
     const name = String(src.publicName).trim();
-    for (const k of Object.keys(src)) if (!AUTO_FIELDS.has(k)) warnings.push({ publicName: name, reason: '未知字段「' + k + '」已忽略' });
+    for (const k of Object.keys(src)) { if (KEYISH.has(k)) warnings.push({ publicName: name, reason: '密钥字段「' + k + '」已忽略：每人密钥不同，请经 keys 参数或渠道页填入' }); else if (!AUTO_FIELDS.has(k)) warnings.push({ publicName: name, reason: '未知字段「' + k + '」已忽略' }); }
     const cands = (Array.isArray(src.candidates) ? src.candidates : []) as any[];
+    if (cands.length > 16) { routeConflicts.push({ publicName: name, reason: '候选数量超过上限 16（与路由存储同闸，不静默截断）' }); continue; }
+    if (src.stickyTtlMs !== undefined && !(typeof src.stickyTtlMs === 'number' && Number.isFinite(src.stickyTtlMs) && src.stickyTtlMs >= 1000 && src.stickyTtlMs <= 86400000)) { routeConflicts.push({ publicName: name, reason: 'stickyTtlMs 无效（1000..86400000）' }); continue; }
+    let weightBad = false;
+    for (const cdw of cands) { const wv = cdw && cdw.weight; if (wv !== undefined && wv !== null && !(typeof wv === 'number' && Number.isFinite(wv) && wv >= 0 && wv <= 10000)) { weightBad = true; break; } }
+    if (weightBad) { routeConflicts.push({ publicName: name, reason: '候选 weight 无效（0..10000）' }); continue; }
     let okCount = 0;
     for (const cd of cands) {
       const pn = cd && typeof cd.publicName === 'string' ? cd.publicName.trim() : '';
       if (!pn) continue;
       if (pn === name || autoNameSet.has(pn) || autosIn.some((a: any) => String(a.publicName).trim() === pn)) { warnings.push({ publicName: name, reason: '候选 ' + pn + ' 指向自动路由，已跳过（禁嵌套）' }); continue; }
+      if (conflictedSingles.has(pn)) { warnings.push({ publicName: name, reason: '候选 ' + pn + ' 因配置冲突未导入，已跳过' }); continue; }
       if (singleIdByName.has(pn) || bundleSingleNames.has(pn)) {
-        if (!plan.candRoutes.some((x) => x.publicName === pn)) {
-          plan.candRoutes.push(singleIdByName.has(pn) ? { publicName: pn, localId: singleIdByName.get(pn) } : { publicName: pn, newSingleIdx: singlesIn.findIndex((s: any) => String(s.publicName).trim() === pn) });
+        if (!candNameSet.has(pn)) {
+          candNameSet.add(pn);
+          plan.candRoutes.push(singleIdByName.has(pn) ? { publicName: pn, localId: singleIdByName.get(pn) } : { publicName: pn, newSingleIdx: bundleSingleIdx.get(pn) });
         }
         okCount++;
       } else warnings.push({ publicName: name, reason: '候选 ' + pn + ' 不存在，已跳过' });
@@ -279,7 +303,24 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
         continue;
       }
       if (!okCount) { warnings.push({ publicName: name, reason: '无可解析候选，auto 未合并' }); continue; }
-      plan.autos.push({ src, mergeTargetId: existing.id, okCount });
+      // §4.2 回执列合并后候选集：篡改 bundle 给既有 auto 塞候选/改权重，必须在两步审阅里可见
+      const curBy = new Map<string, number>();
+      for (const x of (existing.candidates || [])) curBy.set(x.routeId, typeof x.weight === 'number' ? x.weight : 1);
+      const changes: string[] = []; const seenChg = new Set<string>();
+      for (const cd of cands) {
+        const pn2 = cd && typeof cd.publicName === 'string' ? cd.publicName.trim() : '';
+        if (!pn2 || seenChg.has(pn2)) continue;
+        if (!singleIdByName.has(pn2) && !bundleSingleNames.has(pn2)) continue;
+        const w2 = typeof cd.weight === 'number' && Number.isFinite(cd.weight) ? Math.trunc(cd.weight) : 1;
+        const lid = singleIdByName.get(pn2); // 本机同名 single（含包内同名已合并项）一律按本机 id 判权重改写
+        seenChg.add(pn2);
+        if (lid === undefined) changes.push('新增候选 ' + pn2 + '（w' + w2 + '）');
+        else if (curBy.has(lid)) { const old = curBy.get(lid)!; if (old !== w2) changes.push('权重 ' + pn2 + '：' + old + '→' + w2); }
+        else changes.push('新增候选 ' + pn2 + '（w' + w2 + '）');
+      }
+      if ((existing.candidates || []).length + changes.filter((s) => s.indexOf('新增候选') === 0).length > 16) { routeConflicts.push({ publicName: name, reason: '合并后候选并集超过上限 16（与存储同闸）' }); continue; }
+      if (!changes.length) changes.push('候选不变（合并为空操作）');
+      plan.autos.push({ src, mergeTargetId: existing.id, okCount, changes });
       continue;
     }
     if (store.routeNameTaken(name)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); continue; }
@@ -290,7 +331,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
   const receipt: Receipt = {
     dryRun: false,
     channels: { created: plan.chanCreate.length, merged: plan.chanMerge.length, keysAdded, keysAddedByChannel, conflicts: chanConflicts },
-    routes: { created: plan.singles.length + plan.autos.filter((a) => !a.mergeTargetId).length, skipped: plan.skippedSingles, conflicts: routeConflicts, warnings },
+    routes: { created: plan.singles.length + plan.autos.filter((a) => !a.mergeTargetId).length, skipped: plan.skippedSingles, conflicts: routeConflicts, warnings, candidatesMerged: plan.autos.filter((a) => a.mergeTargetId).map((a) => ({ publicName: String(a.src.publicName).trim(), changes: a.changes || [] })) },
     pendingKeyChannels: [...pending],
   };
   return { plan, receipt };
@@ -361,6 +402,7 @@ export function applyPlan(plan: Plan): Conflict[] {
       const { auto, error } = store.updateAutoRoute(a.mergeTargetId, { candidates: merged } as any);
       if (!auto) errs.push({ publicName: a.src.publicName, reason: error || '合并候选失败' });
     } else {
+      if (!cands.length) { errs.push({ publicName: a.src.publicName, reason: '无可解析候选（包内候选全部 conflict）' }); continue; }
       const { auto, error } = store.createAutoRoute({ type: 'auto', publicName: String(a.src.publicName).trim(), enabled: boolDef(a.src.enabled, true), stickyTtlMs: a.src.stickyTtlMs ?? 300000, note: a.src.note, candidates: cands });
       if (!auto) errs.push({ publicName: a.src.publicName, reason: error || '创建失败' });
     }

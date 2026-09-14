@@ -526,7 +526,7 @@ export function createAdmin(): Hono {
 
   app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24))));
   // 速度排行（speed-insights v1.1）：hours 归一钳制在 buildSpeedStats 内（DR-SI-8）
-  app.get('/stats/speed', (c) => c.json(buildSpeedStats(Number(c.req.query('hours') ?? 24))));
+  app.get('/stats/speed', (c) => { const hv = c.req.query('hours'); return c.json(buildSpeedStats(hv === undefined || hv === '' ? 24 : Number(hv))); });
   app.get('/config/export', (c) => c.json(buildBundle()));
   app.post('/config/import', async (c) => {
     // 本端点自建 body 闸（§6.4：/api/* 从无全局体积守卫）：content-length 预拒 + reader 流式累计

@@ -288,7 +288,7 @@ export function buildSpeedStats(rawHours: number = 24): SpeedReport {
     if (l.ok) {
       a.okN++;
       if (l.stream && typeof l.ttftMs === 'number') { a.ttfts.push(l.ttftMs); allTtfts.push(l.ttftMs); }
-      if (l.attempts === 1) { a.lats.push(l.latencyMs); allLats.push(l.latencyMs); } else a.failovers++;
+      if (l.attempts === 1) { a.lats.push(l.latencyMs); allLats.push(l.latencyMs); } else if (l.attempts > 1) a.failovers++;
     } else if (l.status === 499) a.cancels++;
     else a.errors++;
   }
@@ -301,7 +301,7 @@ export function buildSpeedStats(rawHours: number = 24): SpeedReport {
     return r;
   };
   const rows = [...map.entries()].map(([k, a]) => row(k, a));
-  const streamRows = rows.filter((r) => r.streamN > 0);
+  const streamRows = rows.filter((r) => r.key !== '-' && r.streamN > 0);
   streamRows.sort((x, y) => ((x.ttftP50Ms ?? 0) - (y.ttftP50Ms ?? 0)) || (y.requests - x.requests) || x.key.localeCompare(y.key));
   const latencyRows = rows.filter((r) => r.key !== '-');
   latencyRows.sort((x, y) => {
@@ -320,7 +320,7 @@ export function buildSpeedStats(rawHours: number = 24): SpeedReport {
     window: { from, to, hours },
     logsInWindow: logs.length,
     retention: store.db.settings.logRetention,
-    oldestTs: logs.length ? logs[0].ts : 0,
+    oldestTs: logs.length ? logs.reduce((m, l) => (l.ts < m ? l.ts : m), logs[0].ts) : 0,
     benchmark,
     streamRows,
     latencyRows,

@@ -852,6 +852,20 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const cl3: any = (await api('/api/stats/speed?hours=1000000000000', { headers: ADMIN })).body;
   check('SI hours 归一钳制（-1→0全窗 / abc→24 / 1e12→87600）', cl1?.window?.hours === 0 && cl2?.window?.hours === 24 && cl3?.window?.hours === 87600, [cl1?.window?.hours, cl2?.window?.hours, cl3?.window?.hours].join('/'));
   const noauth = await fetch(BASE + '/api/stats/speed');
+  // —— 评审增补钉 B：实况 smoke + 卫生 + pending 边界 + 键序 + single 不覆盖 ——
+  const Bsm: any = (o: any) => ({ method: 'POST', headers: ADMIN, body: JSON.stringify(o) });
+  const spCh: any = (await api('/api/channels', Bsm({ name: 'cb3-sp', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'openai', keys: ['sk-slow-1'] }))).body;
+  await api('/api/routes', Bsm({ type: 'single', publicName: 'sp-slow', channelId: spCh.id, upstreamModel: 'k-slow' }));
+  const spKey: any = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'sp-smoke', allowedModels: ['sp-slow'] }) })).body;
+  const spCodes: string[] = [];
+  { const rl = await import('../src/ratelimit.ts'); rl.resetFailureBuckets(); } // 爆破钉故意打爆本机桶：守卫已验，清桶后再跑实况流量
+  for (let i = 0; i < 2; i++) { const rr = await fetch(BASE + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + spKey.key }, body: JSON.stringify({ model: 'sp-slow', messages: [{ role: 'user', content: 'smoke' }] }) }); spCodes.push(rr.status + ':' + (await rr.text()).slice(0, 40)); }
+  const spRep: any = (await api('/api/stats/speed?hours=0', { headers: ADMIN })).body;
+  const spRow = (spRep.latencyRows || []).find((r: any) => r.key === 'sp-slow');
+  check('SI 实况 smoke：慢上游进 latencyRows 且 latP50 区间稳', !!spRow && spRow.requests === 2 && spRow.latP50Ms >= 900 && spRow.latP50Ms <= 9000, JSON.stringify(spRow || {}) + ' codes=' + spCodes + ' keys=' + (spRep.latencyRows || []).map((r: any) => r.key).join(','));
+  const stNow: any = (await api('/api/settings', { headers: ADMIN })).body;
+  check('SI 卫生：retention=设置、logsInWindow 如实', spRep.retention === stNow.logRetention && spRep.logsInWindow >= 2, JSON.stringify({ ret: spRep.retention, liw: spRep.logsInWindow }));
+
   check('SI 无令牌 401', noauth.status === 401, String(noauth.status));
 }
 // ============ 19. 配置组导出（config-bundle CB-1） ============
@@ -938,6 +952,12 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const r413 = await imp({ bundle: fat, dryRun: true });
   check('CB 超 maxBodyBytes → 413（本端点自建闸）', r413.status === 413, String(r413.status));
   await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ maxBodyBytes: st0.maxBodyBytes }) });
+  const fatN = { kind: 'own-api-config-bundle', version: 1, channels: Array.from({ length: 5001 }, (_, i) => ({ name: 'cb2-e' + i, baseUrl: 'http://h/v1', protocol: 'openai' })) };
+  const rCap = await api('/api/config/import', { method: 'POST', headers: ADMIN, body: JSON.stringify({ bundle: fatN, dryRun: true }) });
+  check('CB 实体数超上限 → 400（§6.2 条数闸兑现）', rCap.status === 400 && JSON.stringify(rCap.body || {}).includes('上限 5000'), JSON.stringify(rCap.body || {}).slice(0, 120));
+  const mkk: string[] = []; for (let i = 0; i < 1001; i++) mkk.push('sk-e' + i);
+  const rCap2 = await api('/api/config/import', { method: 'POST', headers: ADMIN, body: JSON.stringify({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'cb2-new', baseUrl: 'http://127.0.0.1:7/v1', protocol: 'openai' }] }, keys: { 'cb2-new': mkk }, dryRun: true }) });
+  check('CB keys 条目超上限 → 400', rCap2.status === 400, String(rCap2.status));
 }
 // ============ 21. 配置组提交导入：等价/幂等/round-trip（CB-3） ============
 {
@@ -983,6 +1003,42 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   check('CB auto 新建候选解析正确（悬空/嵌套已剔）', !!autoNew && autoNew.candidates.length === 1 && autoNew.candidates[0].routeId === sNew.id && autoNew.candidates[0].weight === 5, JSON.stringify(autoNew && autoNew.candidates));
   const auto3 = routes1.find((r: any) => r.publicName === 'cb3-auto');
   check('CB auto merge：weight bundle 胜 + 新候选并入', !!auto3 && auto3.candidates.length === 2 && auto3.candidates.find((x: any) => x.routeId === mId)?.weight === 9 && !!auto3.candidates.find((x: any) => x.routeId === sNew.id), JSON.stringify(auto3 && auto3.candidates));
+  const cmList = JSON.stringify((im.body as any).routes.candidatesMerged || []);
+  check('CB candidatesMerged 明细入回执（塞候选/权重改写可见）', cmList.includes('cb3-auto') && cmList.includes('1→9') && cmList.includes('新增候选'), cmList.slice(0, 200));
+  const rNoAuth = await fetch(BASE + '/api/config/import', { method: 'POST', body: '{}' });
+  check('CB 导入无令牌 401', rNoAuth.status === 401);
+  const rVer0 = await imp({ bundle: { kind: 'own-api-config-bundle', version: 0, channels: [] }, dryRun: true });
+  check('CB version 0 → 400（DR-CB-G 严格集合）', rVer0.status === 400, String(rVer0.status));
+  const badBase = { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'cb2-badbase', baseUrl: 'ftp://x/v1', protocol: 'openai' }], routes: { singles: [], autos: [] } };
+  const rBase = await imp({ bundle: badBase, dryRun: true });
+  check('CB 畸形 baseUrl → conflict 不再 500（dryRun 不诸报）', rBase.status === 200 && JSON.stringify(rBase.body?.channels?.conflicts || []).includes('baseUrl'), JSON.stringify(rBase.body || {}).slice(0, 120));
+  const rBase2 = await imp({ bundle: badBase });
+  check('CB 畸形 baseUrl 真导入零落库', rBase2.status === 200 && rBase2.body?.channels?.created === 0 && !store.db.channels.some((c: any) => c.name === 'cb2-badbase'), String(rBase2.status));
+  const rW = await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [], routes: { singles: [], autos: [{ publicName: 'cb2-badw', candidates: [{ publicName: 'cb1-model', weight: -5 }] }] } }, dryRun: true });
+  check('CB 候选 weight -5 → conflict（前置闸守 dryRun≡真导入）', rW.status === 200 && JSON.stringify(rW.body?.routes?.conflicts || []).includes('weight'), JSON.stringify(rW.body || {}).slice(0, 120));
+  const rC17 = await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [], routes: { singles: [], autos: [{ publicName: 'cb2-c17', candidates: Array.from({ length: 17 }, () => ({ publicName: 'cb1-model', weight: 1 })) }] } }, dryRun: true });
+  check('CB 候选数 >16 → 整条 conflict（不静默截断）', JSON.stringify(rC17.body?.routes?.conflicts || []).includes('16'), String(rC17.status));
+  const chDis: any = store.db.channels.find((c: any) => c.name === 'cb2-new');
+  for (const k of chDis.keys) await api('/api/channels/' + chDis.id + '/keys/' + k.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ status: 'disabled' }) });
+  const bDis: any = (await api('/api/config/export', { headers: ADMIN })).body;
+  const rcDis: any = (await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [bDis.channels.find((c: any) => c.name === 'cb2-new')] }, keys: {}, dryRun: true })).body;
+  check('CB disabled-only 渠道算待填（§5 判据：无 active）', (rcDis.pendingKeyChannels || []).includes('cb2-new'), JSON.stringify(rcDis.pendingKeyChannels));
+  await api('/api/channels', B({ name: 'cb3-mergeempty', baseUrl: 'http://127.0.0.1:5/v1', protocol: 'openai' }));
+  const chCold: any = (await api('/api/channels', B({ name: 'cb3-cold', baseUrl: 'http://127.0.0.1:4/v1', protocol: 'openai', keys: ['sk-cold-1'] }))).body;
+  await api('/api/channels/' + chCold.id + '/keys/' + chCold.keys[0].id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ status: 'cooldown', cooldownUntil: Date.now() + 60000 }) });
+  await api('/api/channels', B({ name: 'cb3-hdr', baseUrl: 'http://127.0.0.1:3/v1', protocol: 'openai', extraHeaders: { 'X-A': '1', 'X-B': '2' } }));
+  const bP2: any = (await api('/api/config/export', { headers: ADMIN })).body;
+  const eHdr = bP2.channels.find((c: any) => c.name === 'cb3-hdr');
+  eHdr.extraHeaders = { 'X-B': '2', 'X-A': '1' };
+  const rcP2: any = (await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [bP2.channels.find((c: any) => c.name === 'cb3-mergeempty'), bP2.channels.find((c: any) => c.name === 'cb3-cold'), eHdr] }, keys: {}, dryRun: true })).body;
+  check('CB merged 空池算待填（DR-CB-E 核心场景）', (rcP2.pendingKeyChannels || []).includes('cb3-mergeempty'), JSON.stringify(rcP2.pendingKeyChannels));
+  check('CB cooldown-only 豁免待填（真置 cooldown 验证）', !(rcP2.pendingKeyChannels || []).includes('cb3-cold'), JSON.stringify(rcP2.pendingKeyChannels));
+  check('CB extraHeaders 键序无关（merged 不 conflict）', rcP2.channels.conflicts.every((x: any) => x.name !== 'cb3-hdr'), JSON.stringify(rcP2.channels.conflicts));
+  const singleFlip = { ...cb1Single, upstreamModel: 'cb1-changed-9' };
+  const rtSnap0 = JSON.stringify((await api('/api/routes', { headers: ADMIN })).body);
+  const rcFlip: any = (await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [], routes: { singles: [singleFlip], autos: [] } }, keys: {}, dryRun: true })).body;
+  const rtSnap1 = JSON.stringify((await api('/api/routes', { headers: ADMIN })).body);
+  check('CB single 改 upstreamModel → conflict 且路由零变化', JSON.stringify(rcFlip?.routes?.conflicts || []).includes('cb1-model') && rtSnap0 === rtSnap1, JSON.stringify(rcFlip?.routes?.conflicts || []).slice(0, 120));
   const rc2: any = (await imp({ bundle, keys })).body;
   check('CB 幂等重跑：零新建零 keysAdded', rc2?.channels?.created === 0 && rc2?.routes?.created === 0 && rc2?.channels?.keysAdded === 0 && rc2?.routes?.skipped === 3, JSON.stringify(rc2 && { c: rc2.channels.created, m: rc2.channels.merged, r: rc2.routes.created, s: rc2.routes.skipped, ka: rc2.channels.keysAdded }));
   const rc3: any = (await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [cb1Chan] }, keys: {} })).body;
@@ -1028,7 +1084,7 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   }
   A.child.kill();
   check('CB 往返等价（A 导出→B 导入→B 导出语义相等，密钥全程不出 A）', rtOk && rtInfo.indexOf('leak=false') >= 0, rtInfo);
-  await new Promise((r) => setTimeout(r, 800));
+  await new Promise((r) => setTimeout(r, 3500)); // 等优雅关闭（含最后 persist）再删目录（审查竞态钉）
   rmSync(dirA, { recursive: true, force: true });
   rmSync(dirB, { recursive: true, force: true });
 }

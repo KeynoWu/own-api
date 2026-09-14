@@ -1,6 +1,6 @@
 # 渠道与路由快速导入（Config Bundle）— 设计 v2.1（方案，未实现）
 
-> 状态：**已实现（2026-09-14）**（v2.1 按稿落地；守护断言：test/e2e.ts §19-21、test/hardening.ts「CB-1/CB-3 DOM 钉」；§10 checklist 随实现 PR 勾销）。
+> 状态：**已实现（2026-09-14）**（v2.1 按稿落地；守护断言：test/e2e.ts §19-21、test/hardening.ts「CB-1/CB-3 DOM 钉」。v2.2：实现后安全/正确性/前端/测试四路评审修订——candidatesMerged 回执、baseUrl/weight/stickyTtl/tag 闸前移、三闸（5000/1000/16）、disabled-only 算待填、导出文案与启发式扩充、两步弹窗失败保幕、待填第三幕直达）。
 > 受众定位：员工本机各跑一个桌面实例，公司发 N 个模型端点 + 每人自己的 token。
 > v1→v2 的关键修正：**bundle 里没有密钥，密钥由用户导入时/导入后手动填入**——
 > 每个人的 token 不一样，导出来自别人 bundle 的 key 是有害无益的。
@@ -71,10 +71,10 @@
 `GET /api/config/export` —— 无参数、无选项、不导密钥，导出恒含**全部**渠道+路由（v1 不做选择性导出勾选）。
 
 - **入口**：「模型路由」与「渠道与号池」两页工具栏各放同一个「**导出全部配置**」按钮（同一端点、同一文件），
-  按钮旁固定微文案「含全部渠道与路由，不含密钥」——无论从哪页导出都是全量，杜绝「路由页导出的只有路由」误读。
+  按钮旁固定微文案「不含渠道密钥；extraHeaders 原样导出——内部资料」——全量导出课题不变；extraHeaders 可能含认证头，文案不承诺「无敏感信息」（v2.2 安全评审订正）。
   落盘 `own-api-config-YYYYMMDD.json`。
 - **导出前置检查（v2.1 新增，用户裁决）**：① 全部出包字符串字段（name/note/extraHeaders 值/modelList/tags）
-  跑疑似密钥启发式 `/(sk|xoxb|sk-ant)[-_A-Za-z0-9]{16,}|[A-Za-z0-9_-]{40,}/`，命中即弹确认框**标黄提示
+  跑疑似密钥启发式 `/(sk|xoxb|sk-ant)[-_A-Za-z0-9]{16,}|[A-Za-z0-9_-]{40,}|\b[0-9a-fA-F]{32}\b|eyJ[A-Za-z0-9_-]{20,}/`（v2.2 扩 JWT/32-hex），命中即弹确认框**标黄提示
   「疑似密钥文本」并列出字段路径，不阻断导出**（「把 key 记在备注里」是真实使用模式，已知 key 哨兵拦不住自由文本）；
   ② 本机存在同名渠道时提示「存在同名渠道，导入方将按 §4.2-R 判定冲突」。
 - **敏感度定级（v2.1 收紧）**：bundle 不含渠道密钥，但**不是公开文件**——它包含内部端点地址、extraHeaders
@@ -91,7 +91,7 @@
 1. **粘贴 bundle**（v1 仅 textarea 粘贴，复用渠道页 key 批量粘贴交互；「选文件」需 FileReader+form() 新字段
    类型，超出一期，列 §7 非目标）→ 自动 `dryRun` 预览：**第二幕弹窗**（链式 form，DOM 桩已有同构先例可钉）
    = 回执摘要静态区 + **每个「无可用密钥」渠道一个密钥粘贴框**（一行一个）+ 确认导入按钮。
-2. **确认导入** → 落盘 + 回执；对**密钥仍为空**的渠道，回执尾部给出「待填密钥」清单（可点击直达该渠道的密钥输入）。
+2. **确认导入** → 落盘 + 回执；对**密钥仍为空**的渠道，回执后仍有待填渠道 → 自动弹「按渠道填 key」第三幕（填写即走 addKeys 写入；取消则留琥珀徽章到渠道页补）。
 
 **粘贴框呈现口径（v2.1，与 §5 pendingKeyChannels 严格同口径）**：新建渠道 + **已存在但号池里没有
 `status==='active'` key 的渠道**都给框——「同事重发 bundle、首导留空」的合并渠道同样在发生现场填 key（DR-CB-E）。
@@ -126,7 +126,7 @@ model-auto §4.1 ①-b 的「硬过滤」措辞与实现有出入，属 model-au
 | --- | --- | --- |
 | 渠道（按 name） | 合并 keys（`keys` 参数走 addKeys 既有去重；bundle 字段不覆盖） | `conflict`，不动（同名不同 baseUrl = 环境漂移，人来裁决） |
 | 单模型路由（按 publicName） | skipped | `conflict`，**不覆盖** |
-| auto（按 publicName） | 候选并集合并；同候选 weight 冲突**以 bundle 为准**（导入=对齐意图），回执列合并后候选集 | `conflict`；候选解析失败 → warning + 跳过该候选（悬空同 C8） |
+| auto（按 publicName） | 候选并集合并；同候选 weight 冲突**以 bundle 为准**（导入=对齐意图），回执 candidatesMerged 列合并明细（新增候选 X（wN）/权重 X：a→b；并集 >16 整条 conflict） | `conflict`；候选解析失败 → warning + 跳过该候选（悬空同 C8） |
 
 **「配置一致」判定 = 双侧先过与创建路径相同的归一化，再比 bundle 字段域（含 v2.1 新补的 enabled/timeoutMs）**：
 baseUrl 过 `normalizeBaseUrl`（尾斜杠差异不算漂移）；extraHeaders 键排序后序列化比较，`{}` ≡ 缺失；
@@ -184,7 +184,8 @@ conflict 条目，不炸整包）、extraHeaders 走 `sanitizeExtraHeaders`—�
   "channels": { "created": 3, "merged": 1, "conflicts": [{ "name": "x", "reason": "baseUrl 不同" }],
                 "keysAdded": 2, "keysAddedByChannel": { "公司-DeepSeek": 2 } },
   "routes":   { "created": 8, "skipped": 2, "conflicts": [],
-                "warnings": [{ "publicName": "model_auto", "reason": "候选 gpt-4o 不存在，已跳过" }] },
+                "warnings": [{ "publicName": "model_auto", "reason": "候选 gpt-4o 不存在，已跳过" }],
+                "candidatesMerged": [{ "publicName": "model_auto", "changes": ["新增候选 b（w3）", "权重 a：1→9"] }] },
   "pendingKeyChannels": ["公司-DeepSeek", "公司-GLM"]   // 无 status==='active' key 的渠道（新建+已存在都算；冷却不算）
 }
 ```
@@ -199,7 +200,7 @@ conflict 条目，不炸整包）、extraHeaders 走 `sanitizeExtraHeaders`—�
 2. 密钥只经两条路进系统：既有渠道页添加 key、本次导入的 `keys` 参数。**导入路径任何错误消息/回执字段
    禁止插值 keys 值**；非法 keys 项静默丢弃或计数，不进文案。鉴权不变：admin 令牌覆盖导入/导出
    （GET 同样过 createAdmin 的鉴权中间件）；`adm:IP` 桶不变——**注意它是鉴权失败锁定而非请求节流**，
-   成功请求无速率限制（既定取舍），导入的体量防护由本端点 body 闸 + 实体条数上限承担。
+   成功请求无速率限制（既定取舍），导入的体量防护由本端点 body 闸 + 实体条数上限（5000 实体 / 1000 key 条 / 单 auto 候选 16，超限 400 或 conflict）承担。
 3. 导入是配置写面：不触碰 `settings`、vkeys、网关鉴权语义。
 4. **body 限额为本端点新增闸（v2.1 事实校准）**：现状 `/api/*` **没有**任何 body 体积守卫
    （maxBodyBytes 仅在网关 /v1/* 与 count_tokens 生效；admin 各处理器 `c.req.json()` 裸读）。
@@ -222,6 +223,8 @@ conflict 条目，不炸整包）、extraHeaders 走 `sanitizeExtraHeaders`—�
   琥珀徽章已覆盖 v1 全部反馈场景。重评估触发条件：出现「页面关闭后仍需提醒」的异步长任务。
 
 ## 8. 测试钉（实现时固化；**API/库层 → test/e2e.ts，UI/DOM → test/hardening.ts DOM 桩**）
+
+> v2.2 偏差说明：两步链式下「预览后 bundle 被改→置灰」结构性不可达（确认幕 bundle 不可变、keys 提交时服务端重算）；DOM 钉落地为链式结构级 + 粘贴幕 throw 保幕。待填直达：导入完成后自动弹「按渠道填 key」第三幕（直走 addKeys）。
 
 | 场景 | 层 | 断言 |
 | --- | --- | --- |

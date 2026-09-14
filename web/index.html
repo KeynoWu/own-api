@@ -229,6 +229,7 @@ function form(title, fields, onSubmit) {
   }
 
   const myForm = ++formSeq; // 表单叠开（类型选择→具体表单）时的本实例标识
+  let formClosed = false; // 链式弹窗：预览在途取消则不再放孤儿确认幕
   const saveBtn = el('button', { class: 'btn primary', onclick: () => submit() }, '保存');
   let submitting = false; // F2：双击保存=双发 POST（渠道会真建两条），在途一律吞掉
   const submit = async () => {
@@ -237,11 +238,12 @@ function form(title, fields, onSubmit) {
     saveBtn.disabled = true;
     const vals = {};
     for (const f of fields) vals[f.name] = f.type === 'cands' ? inputs[f.name].__get() : inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
-    try { await onSubmit(vals); if (dlg.__form === myForm) dlg.close(); }
+    try { await onSubmit(vals, { cancelled: () => formClosed || dlg.__form !== myForm }); if (dlg.__form === myForm) dlg.close(); }
     catch (e) { toast(e.message, true); saveBtn.disabled = false; submitting = false; }
   };
   if (dlg.open) dlg.close(); // 叠开先退旧场再入幕
   dlg.__form = myForm;
+  dlg.addEventListener('close', () => { if (dlg.__form === myForm) formClosed = true; });
   dlg.innerHTML = '';
   dlg.append(el('h3', {}, title), body, el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' },
     el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
@@ -348,7 +350,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
 // ---------------- 配置组导出/导入（config-bundle v2.1） ----------------
 /** 出包前疑似密钥启发式（DR-CB-K）：只做标黄提示不阻断；自由文本藏 key 是真实模式。 */
 function scanBundleForSecrets(b) {
-  const re = /(sk|xoxb|sk-ant)[-_A-Za-z0-9]{16,}|[A-Za-z0-9_-]{40,}/;
+  const re = /(sk|xoxb|sk-ant)[-_A-Za-z0-9]{16,}|[A-Za-z0-9_-]{40,}|\b[0-9a-fA-F]{32}\b|eyJ[A-Za-z0-9_-]{20,}/;
   const out = [];
   const walk = (v, path) => {
     if (typeof v === 'string') { if (re.test(v)) out.push(path); }
@@ -372,61 +374,89 @@ async function exportConfig() {
   a.href = URL.createObjectURL(new Blob([JSON.stringify(b, null, 2)], { type: 'application/json' }));
   a.download = 'own-api-config-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '.json';
   a.click();
-  toast('已导出全部配置（不含密钥）');
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast('已导出（不含渠道密钥；extraHeaders 请转发前人工检查）');
 }
 // ---- 配置组导入：两步链式弹窗（预览≡提交由服务端同一计划构建器保证） ----
 const cbKeyDraft = {};
 function cbReceiptText(rc) {
   const ch = rc.channels; const rt = rc.routes;
   const lines = [];
-  if (!ch.created && !rt.created && !ch.conflicts.length && !rt.conflicts.length) {
+  const realMerge = (rt.candidatesMerged || []).some((c) => (c.changes || []).some((s) => s.indexOf('候选不变') !== 0));
+  if (!ch.created && !rt.created && !realMerge && !ch.conflicts.length && !rt.conflicts.length) {
     lines.push('没有新变更：' + (ch.merged + rt.skipped) + ' 项一致、0 项冲突');
   } else {
     lines.push('渠道：新建 ' + ch.created + ' / 合并 ' + ch.merged + (ch.keysAdded ? ' / 密钥写入 ' + ch.keysAdded : ''));
-    lines.push('路由：新建 ' + rt.created + ' / 跳过 ' + rt.skipped);
+    lines.push('路由：新建 ' + rt.created + ' / 跳过 ' + rt.skipped + ((rt.candidatesMerged || []).length ? ' / auto 合并 ' + rt.candidatesMerged.length : ''));
   }
   for (const x of ch.conflicts) lines.push('⚠ 渠道 ' + x.name + '：' + x.reason);
   for (const x of rt.conflicts) lines.push('⚠ 路由 ' + x.publicName + '：' + x.reason);
+  for (const cm of (rt.candidatesMerged || [])) lines.push('↻ ' + cm.publicName + '：' + cm.changes.join('，'));
   for (const w of rt.warnings) lines.push('· ' + (w.publicName ? w.publicName + '：' : '') + w.reason);
   if (rc.pendingKeyChannels && rc.pendingKeyChannels.length) lines.push('待填密钥渠道：' + rc.pendingKeyChannels.join('、'));
   return lines.join('\n');
 }
 function cbPendingFields(rc) {
-  return (rc.pendingKeyChannels || []).map((n) => ({ name: 'ck:' + n, label: '密钥（一行一个）：' + n, type: 'textarea', value: cbKeyDraft[n] || '', hint: '留空可跳过；之后也能在渠道页「+ 导入 key」补', full: true }));
+  const names = rc.pendingKeyChannels || [];
+  // 单一收口点：新预览即裁剪——不在本次 pending 集合的草稿一并移除（§4.1「粘贴框连同内容移除」）
+  for (const n of Object.keys(cbKeyDraft)) if (!names.includes(n)) delete cbKeyDraft[n];
+  return names.map((n) => ({ name: 'ck:' + n, label: '密钥（一行一个）：' + n, type: 'textarea', value: cbKeyDraft[n] || '', hint: '留空可跳过；之后也能在渠道页「+ 导入 key」补', full: true }));
 }
 async function importConfig() {
   form('导入配置组（粘贴）', [
     { name: 'bundle', label: 'Bundle JSON（公司内部渠道获取；不含任何密钥）', type: 'textarea', full: true, hint: '先预览再确认；导入全程零外呼，不连接 bundle 里的任何地址' },
-  ], async (v0) => {
+  ], async (v0, ctx) => {
     let bundle;
-    try { bundle = JSON.parse(v0.bundle); } catch { toast('bundle 不是合法 JSON', true); return; }
+    try { bundle = JSON.parse(v0.bundle); } catch { throw new Error('bundle 不是合法 JSON'); }
     let rc;
     try { rc = await api('/api/config/import', { method: 'POST', body: JSON.stringify({ bundle, dryRun: true }) }); }
-    catch (e) { toast('预览失败：' + e.message, true); return; }
+    catch (e) { throw new Error('预览失败：' + e.message); }
+    if (ctx && ctx.cancelled && ctx.cancelled()) return; // 预览在途用户已取消：不放孤儿确认幕
     const pf = cbPendingFields(rc);
     const fields = [{ name: '_rc', label: '预览（仅展示，提交以当前 bundle 重新计算）', type: 'textarea', value: cbReceiptText(rc), full: true }].concat(pf);
-    form('确认导入（新建 ' + (rc.channels.created + rc.routes.created) + ' 项）', fields, (v) => {
-      for (const f of pf) { const val = (v[f.name] || '').trim(); if (val) cbKeyDraft[f.name.slice(3)] = val; }
+    // keys 只取本次对话框的 ck: 字段实际值——cbKeyDraft 仅作预填，绝不整仓回灌（防跨 bundle 串写）
+    form('确认导入（新建 ' + (rc.channels.created + rc.routes.created) + ' 项）', fields, async (v) => {
       const keys = {};
-      for (const n of Object.keys(cbKeyDraft)) { const arr = cbKeyDraft[n].split('\n').map((s) => s.trim()).filter(Boolean); if (arr.length) keys[n] = arr; }
-      api('/api/config/import', { method: 'POST', body: JSON.stringify({ bundle, keys }) }).then((rc2) => {
-        for (const f of pf) delete cbKeyDraft[f.name.slice(3)];
-        toast('导入完成：新建 ' + (rc2.channels.created + rc2.routes.created) + ' / 合并 ' + rc2.channels.merged + ' / 冲突 ' + (rc2.channels.conflicts.length + rc2.routes.conflicts.length) + (rc2.pendingKeyChannels.length ? '；待填密钥：' + rc2.pendingKeyChannels.join('、') : ''));
-        go('channels');
-      }).catch(() => toast('导入失败，本对话框内容已保留，可直接重试', true));
+      for (const f of pf) {
+        const val = (v[f.name] || '').trim();
+        const nm = f.name.slice(3);
+        if (val) { cbKeyDraft[nm] = val; keys[nm] = val.split('\n').map((s) => s.trim()).filter(Boolean); }
+        else delete cbKeyDraft[nm];
+      }
+      // 提交在 onSubmit 内 await：失败抛出 → form 不关幕、内容保留可直接重试
+      const rc2 = await api('/api/config/import', { method: 'POST', body: JSON.stringify({ bundle, keys }) });
+      for (const f of pf) delete cbKeyDraft[f.name.slice(3)];
+      toast('导入完成：新建 ' + (rc2.channels.created + rc2.routes.created) + ' / 合并 ' + rc2.channels.merged + ' / 冲突 ' + (rc2.channels.conflicts.length + rc2.routes.conflicts.length));
+      if (rc2.pendingKeyChannels && rc2.pendingKeyChannels.length) cbFillPendingKeys(rc2.pendingKeyChannels);
+      else go('channels');
     });
   });
 }
-
+async function cbFillPendingKeys(names) {
+  let chans;
+  try { chans = await api('/api/channels'); } catch { go('channels'); return; }
+  const idOf = {};
+  for (const c of chans) idOf[c.name] = c.id;
+  const fields = names.filter((n) => idOf[n]).map((n) => ({ name: 'ck:' + n, label: '密钥（一行一个）：' + n, type: 'textarea', full: true, hint: '导入成功但该渠道还没有密钥——现在填，或取消后到渠道页「+ 导入 key」补' }));
+  if (!fields.length) { go('channels'); return; }
+  form('仍有待填密钥（' + names.length + ' 个渠道）', fields, async (v) => {
+    for (const f of fields) {
+      const arr = (v[f.name] || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      if (arr.length) await api('/api/channels/' + idOf[f.name.slice(3)] + '/keys', { method: 'POST', body: JSON.stringify({ keys: arr }) });
+    }
+    toast('密钥已写入');
+    go('channels');
+  });
+}
 // ---------------- 速度排行（speed-insights v1.1） ----------------
 // renderSpeedTab 是纯展示层：只消费后端预计算数值，严禁在这里重算任何百分位（DR-SI-9），
 // DOM 桩钉会抽源断言本函数体不含 .sort( 与 Math.floor。
 async function speedFetch() {
   const hours = ovSt.spHours === undefined ? 24 : ovSt.spHours;
   const rep = await api('/api/stats/speed?hours=' + hours);
-  const chOf = {}; const autoNames = {};
-  try { for (const r of await api('/api/routes')) { if (r.type === 'single') chOf[r.publicName] = r.channelName; else autoNames[r.publicName] = 1; } } catch { /* 徽章尽力而为 */ }
-  return { rep, chOf, autoNames };
+  const chOf = {}; const autoNames = {}; let routesFailed = false;
+  try { for (const r of await api('/api/routes')) { if (r.type === 'single') chOf[r.publicName] = r.channelName; else autoNames[r.publicName] = 1; } } catch { routesFailed = true; }
+  return { rep, chOf, autoNames, routesFailed };
 }
 function renderSpeedTab(pack) {
   const rep = pack.rep;
@@ -434,6 +464,7 @@ function renderSpeedTab(pack) {
   const frag = el('div');
   frag.append(el('div', { class: 'card', style: 'padding:9px 12px;margin-bottom:10px;font-size:12px' },
     el('b', {}, '本页只做观测，不影响 auto 路由；'), '要躲开慢模型请到模型路由调整候选权重。'));
+  if (pack.routesFailed) frag.append(el('div', { class: 'muted', style: 'font-size:11px;margin:-4px 0 8px' }, '渠道归属映射加载失败——徽章暂省略，数值不受影响。'));
   frag.append(el('div', { class: 'row', style: 'gap:8px;align-items:center;margin-bottom:8px' },
     el('span', { class: 'muted', style: 'font-size:12px' }, '样本取自最近 ' + rep.logsInWindow + ' 条日志（logRetention=' + rep.retention + '），时间范围：'),
     el('select', { style: 'width:auto', onchange: (e) => { ovSt.spHours = Number(e.target.value); go('overview'); } },
@@ -675,7 +706,7 @@ views.models = async () => {
     el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
     el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
     el('button', { class: 'btn sm', onclick: () => importConfig() }, '导入配置'),
-    el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
+    el('span', { class: 'muted' }, '不含渠道密钥；extraHeaders 原样导出——内部资料。'),
   ));
 
   const t = el('table');
@@ -751,7 +782,7 @@ views.channels = async () => {
     el('button', { class: 'btn primary', onclick: addChannel }, '+ 新增渠道'),
     el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
     el('button', { class: 'btn sm', onclick: () => importConfig() }, '导入配置'),
-    el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
+    el('span', { class: 'muted' }, '不含渠道密钥；extraHeaders 原样导出——内部资料。'),
   ));
 
   for (const c of channels) {

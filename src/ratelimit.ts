@@ -36,6 +36,8 @@ export function failurePeek(key: string, limit: number): { blocked: boolean; ret
   return { blocked: false, retryAfterSec: 0 };
 }
 
+export function resetFailureBuckets(): void { buckets.clear(); } // 仅测试：爆破钉验证封禁行为后清桶，不留污染后续用例（同 flushSync 先例）
+
 export function failureHit(key: string, windowMs: number): void {
   const now = Date.now();
   const b = buckets.get(key);
