@@ -81,7 +81,7 @@ export const WEB_HTML = `<!doctype html>
   <h1>own-api</h1>
   <span class="sub" id="hdr-sub">统一模型代理网关</span>
   <nav id="nav" hidden>
-    <button data-v="overview">概览</button>
+    <button data-v="overview">使用统计</button>
     <button data-v="models">模型路由</button>
     <button data-v="channels">渠道与号池</button>
     <button data-v="vkeys">对外 Key</button>
@@ -254,53 +254,184 @@ views.loading = () => el('div', { class: 'muted' }, '加载中…');
 const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, sub ? el('small', {}, ' ' + sub) : null));
 
 // ---------------- 概览 ----------------
-views.overview = async () => {
-  const o = await api('/api/overview');
-  const s = o.stats || {};
-  const t = s.totals || {};
-  const frag = document.createDocumentFragment();
-  const box = el('div');
-  box.append(el('div', { class: 'grid cards' },
-    card('24h 请求', num(t.requests), \`\${s.successRate ?? 100}% 成功\`),
-    card('Token 消耗', num((t.promptTokens || 0) + (t.completionTokens || 0)), \`出 \${num(t.completionTokens)}\`),
-    card('估算花费', money(t.costUsd), '按模型单价'),
-    card('P50 / P95', \`\${s.p50Latency || 0}/\${s.p95Latency || 0}\`, 'ms'),
-    card('渠道 / 模型 / Key', \`\${o.channels.length}/\${o.models}/\${o.vkeys}\`),
-  ));
-
-  box.append(el('h2', {}, '号池健康度'));
-  if (!o.channels.length) box.append(el('div', { class: 'card muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。'));
-  const table = el('table');
-  table.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
-  for (const c of o.channels) {
-    const pct = c.keys ? Math.round((c.available / c.keys) * 100) : 0;
-    table.append(el('tr', {},
-      el('td', {}, c.name),
-      el('td', {}, proto(c.protocol)),
-      el('td', {}, el('div', { class: 'row' }, el('div', { class: 'bar' }, el('i', { style: \`width:\${pct}%\`, class: pct === 0 ? 'e' : '' })), el('span', { class: 'mono muted' }, \`\${c.available}/\${c.keys}\`))),
-      el('td', {}, c.cooldown ? el('span', { class: 'pill warn' }, \`\${c.cooldown} 冷却中\`) : c.available ? el('span', { class: 'pill ok' }, '正常') : el('span', { class: 'pill err' }, '无可用 key')),
-      el('td', {}, el('button', { class: 'btn sm', onclick: () => go('channels') }, '管理')),
-    ));
-  }
-  box.append(table);
-
-  box.append(el('h2', {}, '按模型用量（24h）'));
-  const mt = el('table');
-  mt.append(el('tr', {}, el('th', {}, '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读'), el('th', {}, '花费'), el('th', {}, '平均延迟')));
-  for (const m of s.byModel || []) {
-    mt.append(el('tr', {}, el('td', { class: 'mono' }, m.key), el('td', {}, m.requests),
-      el('td', { class: m.errors ? 'err-text' : '' }, m.errors), el('td', { class: 'mono' }, num(m.promptTokens)),
-      el('td', { class: 'mono' }, num(m.completionTokens)), el('td', { class: 'mono' }, num(m.cacheReadTokens)),
-      el('td', { class: 'mono' }, money(m.costUsd)), el('td', { class: 'mono muted' }, m.avgLatencyMs + 'ms')));
-  }
-  if (!(s.byModel || []).length) mt.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
-  box.append(mt);
-
-  timer = setInterval(() => go('overview'), 15000);
-  frag.append(box);
-  return frag;
-};
-
+// ---------------- 使用统计（首页） ----------------
+const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
+{
+  const newAgg = () => ({ requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, cost: 0 });
+  const addAgg = (b, l) => {
+    b.requests++; if (!l.ok) b.errors++;
+    const cr = l.cacheReadTokens || 0, cw = l.cacheWriteTokens || 0;
+    b.pin += Math.max(0, (l.promptTokens || 0) - cr - cw);
+    b.pout += l.completionTokens || 0; b.cr += cr; b.cw += cw; b.cost += l.costUsd || 0;
+  };
+  const niceMax = (v) => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); return Math.ceil(v / p * 2) / 2 * p; };
+  const svgChart = (buckets, hourly) => {
+    const W = 1060, H = 280, PL = 52, PR = 52, PT = 14, PB = 40;
+    const iw = W - PL - PR, ih = H - PT - PB;
+    const tokMax = niceMax(Math.max(1, ...buckets.map((b) => Math.max(b.pin, b.pout, b.cr, b.cw))));
+    const costMax = niceMax(Math.max(...buckets.map((b) => b.cost), 0.0001));
+    const n = Math.max(1, buckets.length - 1);
+    const X = (i) => PL + (i * iw) / n;
+    const YL = (v) => PT + (1 - v / tokMax) * ih;
+    const YR = (v) => PT + (1 - v / costMax) * ih;
+    const fmtL = (v) => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v)));
+    const fmtR = (v) => '$' + (v >= 1 ? v.toFixed(v >= 10 ? 0 : 1) : v.toFixed(2));
+    const s = [];
+    s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">');
+    for (let g = 0; g <= 4; g++) {
+      const y = PT + (g * ih) / 4;
+      s.push('<line x1="' + PL + '" y1="' + y + '" x2="' + (W - PR) + '" y2="' + y + '" stroke="#23262e"/>');
+      s.push('<text x="' + (PL - 6) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="#6b7280">' + fmtL((tokMax * (4 - g)) / 4) + '</text>');
+      s.push('<text x="' + (W - PR + 6) + '" y="' + (y + 3) + '" font-size="10" fill="#6b7280">' + fmtR((costMax * (4 - g)) / 4) + '</text>');
+    }
+    const every = Math.max(1, Math.ceil(buckets.length / 9));
+    buckets.forEach((b, i) => {
+      if (i % every === 0 || i === buckets.length - 1) {
+        const d = new Date(b.t);
+        const lb = hourly ? (d.getMonth() + 1 + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':00') : (d.getMonth() + 1 + '/' + d.getDate());
+        s.push('<text x="' + X(i) + '" y="' + (H - PB + 16) + '" text-anchor="middle" font-size="9.5" fill="#6b7280">' + lb + '</text>');
+      }
+    });
+    const series = [
+      { name: '成本', color: '#ef4444', y: YR, get: (b) => b.cost, fmt: (v) => '$' + v.toFixed(4) },
+      { name: '缓存创建', color: '#f59e0b', y: YL, get: (b) => b.cw, fmt: num },
+      { name: '缓存命中', color: '#8b5cf6', y: YL, get: (b) => b.cr, fmt: num },
+      { name: '输入', color: '#3b82f6', y: YL, get: (b) => b.pin, fmt: num },
+      { name: '输出', color: '#22c55e', y: YL, get: (b) => b.pout, fmt: num },
+    ];
+    for (const se of series) {
+      const pts = buckets.map((b, i) => X(i).toFixed(1) + ',' + se.y(se.get(b)).toFixed(1)).join(' ');
+      s.push('<polyline points="' + pts + '" fill="none" stroke="' + se.color + '" stroke-width="1.6"/>');
+      buckets.forEach((b, i) => {
+        const d = new Date(b.t);
+        const lb = (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
+        s.push('<circle cx="' + X(i).toFixed(1) + '" cy="' + se.y(se.get(b)).toFixed(1) + '" r="2.2" fill="' + se.color + '"><title>' + lb + ' · ' + se.name + ' ' + se.fmt(se.get(b)) + '</title></circle>');
+      });
+    }
+    s.push('</svg>');
+    const legend = el('div', { class: 'row', style: 'justify-content:center;gap:14px;margin-top:2px' },
+      ...series.map((se) => el('span', { class: 'row', style: 'gap:5px;font-size:12px;color:' + se.color }, el('i', { style: 'width:8px;height:8px;border-radius:50%;background:' + se.color + ';display:inline-block' }), se.name)));
+    const wrap = el('div');
+    wrap.innerHTML = s.join('');
+    const out = el('div', {}, wrap, legend);
+    return out;
+  };
+  views.overview = async () => {
+    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
+    const box = el('div');
+    const from = Date.now() - ovSt.hours * 3600e3;
+    let logs = allLogs.filter((l) => l.ts >= from);
+    const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
+    if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
+    const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
+    box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
+      el('div', {},
+        el('h2', { style: 'margin:0' }, '使用统计'),
+        el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, '查看 AI 模型的使用情况和成本统计 · 渠道 ' + o.channels.length + ' · 路由 ' + (o.models + o.autoRoutes) + ' · 对外 Key ' + o.vkeys + ' · 日志 ' + o.logs + ' 条')),
+      el('div', { class: 'row', style: 'gap:8px' },
+        sel([['', '全部模型'], ...modelNames.map((m) => [m, m])], ovSt.model, (v) => { ovSt.model = v; go('overview'); }),
+        sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
+        sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
+      )));
+    const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
+    const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
+    const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
+    const hero = el('div', { class: 'card', style: 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px' },
+      el('div', {}, el('div', { class: 'k' }, '真实消耗 Tokens'),
+        el('div', { style: 'font-size:30px;font-weight:700' }, num(realTok), el('small', { class: 'muted' }, ' ≈ ' + money(tot.cost)))),
+      el('div', { class: 'row', style: 'gap:0' },
+        el('div', { style: 'padding:0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总请求数'), el('div', { style: 'font-size:18px;font-weight:600' }, num(tot.requests), tot.errors ? el('small', { class: 'err-text' }, ' · 失败 ' + tot.errors) : null)),
+        el('div', { style: 'padding:0 4px 0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总成本'), el('div', { style: 'font-size:18px;font-weight:600' }, money(tot.cost)))));
+    box.append(hero);
+    const sub = (k, v, extra) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, extra ? el('small', {}, ' ' + extra) : null));
+    box.append(el('div', { class: 'grid cards', style: 'grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:10px' },
+      sub('新增输入', num(tot.pin)),
+      sub('Output', num(tot.pout)),
+      sub('缓存创建', num(tot.cw)),
+      sub('缓存命中', num(tot.cr)),
+      el('div', { class: 'card' }, el('div', { class: 'row', style: 'justify-content:space-between' }, el('span', { class: 'k' }, '缓存命中率'), el('b', { style: hitRate >= 30 ? 'color:var(--ok)' : '' }, hitRate + '%')),
+        el('div', { class: 'bar', style: 'margin-top:8px' }, el('i', { style: 'width:' + Math.min(100, hitRate) + '%' })))));
+    const hourly = ovSt.hours <= 48;
+    const step = hourly ? 3600e3 : 86400e3;
+    const align = (t) => { const d = new Date(t); if (hourly) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); };
+    const buckets = new Map();
+    const startT = align(Date.now() - (ovSt.hours * 3600e3 - step));
+    for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
+    for (const l of logs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
+    const bArr = [...buckets.values()];
+    const chartCard = el('div', { class: 'card', style: 'margin-top:12px' },
+      el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { style: 'margin:0' }, '使用趋势'),
+        el('span', { class: 'muted' }, hourly ? '按小时' : '按天')),
+      svgChart(bArr, hourly));
+    box.append(chartCard);
+    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['pool', '号池健康']];
+    box.append(el('div', { class: 'row', style: 'gap:6px;margin:16px 0 10px' },
+      ...TABS.map(([k, t]) => el('button', { class: 'btn sm' + (ovSt.tab === k ? ' primary' : ''), onclick: () => { ovSt.tab = k; go('overview'); } }, t))));
+    const groupAgg = (keyFn) => {
+      const m = new Map();
+      for (const l of logs) {
+        const k = keyFn(l) || '-';
+        if (!m.has(k)) m.set(k, Object.assign({ key: k, latSum: 0 }, newAgg()));
+        const b = m.get(k); addAgg(b, l); b.latSum += l.latencyMs || 0;
+      }
+      return [...m.values()].sort((a, b) => b.requests - a.requests);
+    };
+    if (ovSt.tab === 'logs') {
+      const fbar = el('div', { class: 'card', style: 'padding:10px 12px;margin-bottom:10px' },
+        el('div', { class: 'row', style: 'gap:8px' },
+          sel([['', '全部'], ['ok', '仅成功'], ['err', '仅失败']], ovSt.fstat, (v) => { ovSt.fstat = v; go('overview'); }),
+          el('span', { class: 'muted' }, ovSt.hours === 24 ? '当天' : ovSt.hours === 168 ? '近 7 天' : '近 30 天' + (ovSt.model ? ' · ' + ovSt.model : ''))));
+      box.append(fbar);
+      let rows = logs;
+      if (ovSt.fstat === 'ok') rows = rows.filter((l) => l.ok);
+      if (ovSt.fstat === 'err') rows = rows.filter((l) => !l.ok);
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, '计费模型'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '总成本'), el('th', {}, '用时/首字'), el('th', {}, '状态'), el('th', {}, '来源')));
+      for (const l of rows.slice(0, 200)) {
+        t.append(el('tr', { title: (l.retries || []).join('\\n') || l.error || '' },
+          el('td', { class: 'mono muted' }, new Date(l.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })),
+          el('td', { class: 'muted' }, l.channelName || '-'),
+          el('td', { class: 'mono' }, (l.requestedModel || '-') + (l.routedTo && l.routedTo !== l.requestedModel ? ' → ' + l.routedTo : '')),
+          el('td', { class: 'mono' }, num(l.promptTokens)), el('td', { class: 'mono' }, num(l.completionTokens)),
+          el('td', { class: 'mono' }, money(l.costUsd)),
+          el('td', { class: 'mono muted' }, l.latencyMs + 'ms' + (l.ttftMs ? ' / ' + l.ttftMs + 'ms' : '')),
+          el('td', {}, el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status))),
+          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : 'OpenAI')));
+      }
+      if (!rows.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
+      box.append(t);
+      if (rows.length > 200) box.append(el('div', { class: 'muted', style: 'margin-top:6px' }, '共 ' + rows.length + ' 条，仅显示最近 200 条'));
+    } else if (ovSt.tab === 'provider' || ovSt.tab === 'model') {
+      const g = ovSt.tab === 'provider' ? groupAgg((l) => l.channelName) : groupAgg((l) => l.requestedModel);
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, ovSt.tab === 'provider' ? 'Provider（渠道）' : '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读/写'), el('th', {}, '成本'), el('th', {}, '平均延迟')));
+      for (const b of g) {
+        t.append(el('tr', {}, el('td', { class: 'mono' }, b.key), el('td', {}, b.requests),
+          el('td', { class: b.errors ? 'err-text' : '' }, b.errors),
+          el('td', { class: 'mono' }, num(b.pin)), el('td', { class: 'mono' }, num(b.pout)),
+          el('td', { class: 'mono muted' }, num(b.cr) + ' / ' + num(b.cw)),
+          el('td', { class: 'mono' }, money(b.cost)),
+          el('td', { class: 'mono muted' }, (b.requests ? Math.round(b.latSum / b.requests) : 0) + 'ms')));
+      }
+      if (!g.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
+      box.append(t);
+    } else {
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
+      for (const c of o.channels) {
+        const pct = c.keys ? Math.round((c.available / c.keys) * 100) : 0;
+        t.append(el('tr', {}, el('td', {}, c.name), el('td', {}, proto(c.protocol)),
+          el('td', {}, el('div', { class: 'row' }, el('div', { class: 'bar' }, el('i', { style: 'width:' + pct + '%', class: pct === 0 ? 'e' : '' })), el('span', { class: 'muted' }, c.available + '/' + c.keys))),
+          el('td', {}, c.cooldown ? el('span', { class: 'pill warn' }, c.cooldown + ' 冷却中') : c.available ? el('span', { class: 'pill ok' }, '正常') : el('span', { class: 'pill err-text' }, '不可用')),
+          el('td', {}, el('button', { class: 'btn sm', onclick: () => go('channels') }, '管理'))));
+      }
+      if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
+      box.append(t);
+    }
+    if (ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
+    return box;
+  };
+}
 // ---------------- 模型路由（v3 单表：新增时选类型，single/auto 同页管理） ----------------
 views.models = async () => {
   const [routes, channels, rt] = await Promise.all([api('/api/routes'), api('/api/channels'), api('/api/auto-health')]);
