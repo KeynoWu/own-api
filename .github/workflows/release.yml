@@ -110,10 +110,23 @@ jobs:
           awk -v tag="## v${VER}（" 'index($0,tag)==1{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release-body.md
           [ -s release-body.md ] || { echo "::warning::CHANGELOG 找不到 v${VER} 节，release 说明退化为对比链接"; }
           printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
+      - name: 校验和（v0.1.6 起人工补挂的 sha256sums.txt 制度化进 CI）
+        shell: bash
+        run: cd artifacts && find . \( -name '*.dmg' -o -name '*.exe' \) -type f | sort | xargs sha256sum > sha256sums.txt
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.exe
+            artifacts/sha256sums.txt
           body_path: release-body.md
           draft: false
+          fail_on_unmatched_files: true # v0.1.7 事故：glob 零匹配时静默发空 release，success 假象
+      - name: 发布后资产硬校验（软校验不可靠，传完必须见真资产）
+        shell: bash
+        run: |
+          N=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '[.assets] | length')
+          echo "release 资产数: $N"
+          [ "$N" -ge 4 ] || { echo "::error::release 资产少于 4（3 平台包 + sha256sums）——上传环节静默失败"; exit 1; }
+        env:
+          GH_TOKEN: ${{ github.token }}
