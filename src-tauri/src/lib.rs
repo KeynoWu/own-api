@@ -139,28 +139,31 @@ fn open_path(path: &str) {
     let _ = StdCommand::new("xdg-open").arg(path).spawn();
 }
 
-/// 服务已就绪就开控制台，返回是否成功
-fn open_console_now() -> Result<(), String> {
+/// 服务已就绪就开控制台（view=Some 深链到指定视图，如 "settings"），返回是否成功
+fn open_console_now(view: Option<&str>) -> Result<(), String> {
     let (port, token) = read_session().ok_or_else(|| "no session".to_string())?;
     if !healthy(port) {
         return Err(format!("port {port} down"));
     }
+    let suffix = view.map(|v| format!("&view={v}")).unwrap_or_default();
     let url = handoff_url(port, &token)
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}/#token={}", port, urlencode(&token)));
+        .map(|u| format!("{u}{suffix}"))
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/#token={}{suffix}", port, urlencode(&token)));
     open_url(&url);
     Ok(())
 }
 
 /// 等待就绪后开控制台；超时且确认服务没活着则释放槽位，让下一次托盘点击能重新拉起
-fn wait_ready<R: Runtime>(app: AppHandle<R>) {
+fn wait_ready<R: Runtime>(app: AppHandle<R>, view: Option<&str>) {
     // 审查 P4：waiter 去重——托盘连点每次都新起等待线程，多线程抢开浏览器/抢杀槽位；同一时刻只留一个
     if WAIT_READY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    let view = view.map(|v| v.to_string()); // 线程 'static：视图名转 owned
     std::thread::spawn(move || {
         for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(250));
-            if open_console_now().is_ok() {
+            if open_console_now(view.as_deref()).is_ok() {
                 WAIT_READY.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
@@ -183,8 +186,8 @@ fn wait_ready<R: Runtime>(app: AppHandle<R>) {
 }
 
 /// 主线程调用：健康则直接开；否则拉侧车并交给无状态线程等待就绪后开浏览器
-fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
-    if open_console_now().is_ok() {
+fn ensure_running<R: Runtime>(app: &AppHandle<R>, view: Option<&str>) {
+    if open_console_now(view).is_ok() {
         return;
     }
     {
@@ -192,7 +195,7 @@ fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
         // db.json 会 last-writer-wins 互踩；服务端单实例锁是第二道防线，这里是第一道。
         let state = app.state::<Sidecar>();
         if lock_slot(&state.0).is_some() {
-            wait_ready(app.clone());
+            wait_ready(app.clone(), view);
             return;
         }
     }
@@ -224,13 +227,13 @@ fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
             return;
         }
     }
-    wait_ready(app.clone());
+    wait_ready(app.clone(), view);
 }
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            ensure_running(app);
+            ensure_running(app, None);
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
@@ -250,8 +253,11 @@ pub fn run() {
                 None::<&str>,
             )?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 own-api", true, None::<&str>)?;
+            // 检查更新（update-check v1）：托盘只做入口，版本比较逻辑单源在侧车 /api/version/check——Rust 侧零逻辑
+            let update_item = MenuItem::with_id(app, "update", "检查更新…", true, None::<&str>)?;
             let menu = MenuBuilder::new(app)
                 .item(&open_item)
+                .item(&update_item)
                 .item(&data_item)
                 .item(&PredefinedMenuItem::separator(app)?)
                 .item(&autostart_item)
@@ -266,7 +272,8 @@ pub fn run() {
                 .tooltip("own-api · 个人 LLM 网关")
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" => ensure_running(app),
+                    "open" => ensure_running(app, None),
+                    "update" => ensure_running(app, Some("settings")), // 深链设置页，检查由控制台发起
                     "data" => open_path(&data_dir().to_string_lossy()),
                     "autostart" => {
                         let now = !app.autolaunch().is_enabled().unwrap_or(false);
@@ -281,7 +288,7 @@ pub fn run() {
                 })
                 .build(app)?;
             // 首启/开机自启：拉起服务并自动开一次控制台（双击即用的最后一步）
-            ensure_running(app.handle());
+            ensure_running(app.handle(), None);
             Ok(())
         })
         .build(tauri::generate_context!())

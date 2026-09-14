@@ -4,7 +4,7 @@
  * 运行：npm test
  */
 import { serve } from '@hono/node-server';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1123,6 +1123,63 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const del = await api('/api/logs', { method: 'DELETE', headers: ADMIN });
   const rep: any = (await api('/api/stats/speed?hours=0', { headers: ADMIN })).body;
   check('SI 空窗 200 且三集合全空不 500', del.status === 200 && rep && rep.streamRows.length === 0 && rep.latencyRows.length === 0 && rep.unattributed === null && rep.logsInWindow === 0 && rep.oldestTs === 0, JSON.stringify(rep && { n: rep.logsInWindow }));
+}
+// ================================================================
+// §17 控制台脚本绑定钉（回归：裸块作用域吞 async 声明 → 导出/导入按钮静默无效）
+// vm 全量执行内嵌控制台脚本（DOM 用万能 Proxy 桩），断言按钮 onclick 引用的
+// 顶层函数在同上下文 typeof 均为 function——任何「声明被困进块作用域」都会在此爆。
+{
+  const vm = await import('node:vm');
+  const { WEB_HTML } = await import('../src/web-html.gen.ts');
+  const script = WEB_HTML.match(/<script>([\s\S]*)<\/script>/)?.[1] || '';
+  const noop = () => {};
+  const magic: any = () => new Proxy(function () {}, {
+    get: (_t, p) => {
+      if (p === 'classList') return { add: noop, remove: noop, toggle: noop, contains: () => false };
+      if (p === 'style' || p === 'dataset') return {};
+      if (p === 'length') return 0;
+      if (p === 'then') return undefined; // 防被当 thenable
+      if (p === Symbol.toPrimitive) return () => '';
+      return magic();
+    },
+    set: () => true, apply: () => magic(),
+  });
+  const sandbox: any = {
+    console, setTimeout, clearTimeout, setInterval, clearInterval, URL, URLSearchParams,
+    Blob: class {}, Date, JSON, Math,
+    navigator: { clipboard: null },
+    location: { hash: '', pathname: '/', search: '', href: 'http://x/' },
+    history: { replaceState: noop },
+    localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+    document: new Proxy({}, { get: (_t, p) => {
+      if (p === 'querySelector' || p === 'getElementById' || p === 'createElement') return () => magic();
+      if (p === 'querySelectorAll') return () => [];
+      if (p === 'addEventListener' || p === 'removeEventListener') return noop;
+      return magic();
+    } }),
+    fetch: async () => ({ ok: true, status: 200, text: async () => '{}', json: async () => ({}) }),
+    addEventListener: noop, removeEventListener: noop,
+    EventSource: class { close() {} },
+    confirm: () => false, alert: noop, Headers: class {},
+  };
+  sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
+  // 列 0 的 function/async function 声明全部必须可解析（列 0 = 意图顶层；被困进裸块时 vm typeof 即 undefined）
+  const refs = [...new Set([
+    ...[...script.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]),
+    'exportConfig', 'importConfig', 'cbFillPendingKeys', 'speedFetch', // 显式钉住四个曾经的受害者
+  ])];
+  let probeResult: Record<string, string> = {};
+  let threw = '';
+  sandbox.__probe = (o: any) => { probeResult = o; };
+  try { vm.runInNewContext(script + `\n;__probe({${refs.map((n) => JSON.stringify(n) + ':typeof ' + n)}});`, sandbox, { filename: 'console-inline.js' }); }
+  catch (e: any) { threw = e.message; }
+  check('控制台脚本 vm 全量执行零异常', threw === '', threw);
+  const missing = refs.filter((n) => probeResult[n] !== 'function');
+  check(`控制台列 0 顶层函数声明全部可解析（${refs.length} 个）`, threw === '' && missing.length === 0, `缺失: ${missing.join(', ')}`);
+  // 版本单源：version.gen.ts 必须与 package.json 一致（gen:web 产物陈旧性守护）
+  const { APP_VERSION } = await import('../src/version.gen.ts');
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  check('version.gen.ts 与 package.json 版本一致', APP_VERSION === pkg.version, `${APP_VERSION} != ${pkg.version}`);
 }
 // ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);

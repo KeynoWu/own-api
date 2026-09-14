@@ -8,6 +8,7 @@ import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
+import { APP_VERSION } from './version.gen.ts';
 import { clearHealth, clearHealthFor, clearSticky, clearStickyForRoute, healthSnapshot, stickyCount, stickyCountForRoute } from './auto.ts';
 import type { Channel } from './types.ts';
 
@@ -543,6 +544,38 @@ export function createAdmin(): Hono {
   app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24))));
   // 速度排行（speed-insights v1.1）：hours 归一钳制在 buildSpeedStats 内（DR-SI-8）
   app.get('/stats/speed', (c) => { const hv = c.req.query('hours'); return c.json(buildSpeedStats(hv === undefined || hv === '' ? 24 : Number(hv))); });
+  // ---------------- 检查更新（update-check v1）：纯手动触发，绝不启动自动联网——守住「不联网上报」承诺 ----------------
+  app.get('/version', (c) => c.json({ version: APP_VERSION }));
+  const GH_LATEST = 'https://api.github.com/repos/KeynoWu/own-api/releases/latest';
+  let ghCache: { at: number; rel: any } | null = null; // 10 分钟内存缓存：点击风暴也只真网一次
+  const semverCmp = (a: string, b: string): number => {
+    const seg = (s: string) => String(s).replace(/^v/, '').split('.').map((x) => Number(x) || 0);
+    const [a1 = 0, a2 = 0, a3 = 0] = seg(a); const [b1 = 0, b2 = 0, b3 = 0] = seg(b);
+    return a1 - b1 || a2 - b2 || a3 - b3;
+  };
+  app.get('/version/check', async (c) => {
+    const current = APP_VERSION;
+    try {
+      if (!ghCache || Date.now() - ghCache.at > 10 * 60_000) {
+        const r = await fetch(GH_LATEST, { headers: { 'user-agent': 'own-api-update-check', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(5000) });
+        if (!r.ok) return c.json({ current, error: `GitHub 返回 ${r.status}（频控或网络受限，稍后再试）` }, 502);
+        ghCache = { at: Date.now(), rel: await r.json() };
+      }
+      const rel = ghCache.rel;
+      const latest = String(rel.tag_name || '').replace(/^v/, '');
+      const plat = process.platform === 'win32' ? 'x64-setup.exe' : process.arch === 'arm64' ? 'aarch64.dmg' : 'x64.dmg';
+      const asset = (rel.assets || []).find((a: any) => typeof a?.name === 'string' && a.name.endsWith(plat));
+      return c.json({
+        current, latest, updateAvailable: semverCmp(latest, current) > 0,
+        releaseUrl: rel.html_url || null,
+        downloadUrl: asset?.browser_download_url || rel.html_url || null,
+        publishedAt: rel.published_at || null,
+      });
+    } catch (e: any) {
+      const msg = e?.name === 'TimeoutError' || e?.name === 'AbortError' ? '查询超时（5s）——当前网络访问 GitHub 受限' : '检查失败：' + (e?.message || e);
+      return c.json({ current, error: msg }, 502);
+    }
+  });
   app.get('/config/export', (c) => c.json(buildBundle()));
   app.post('/config/import', async (c) => {
     // 本端点自建 body 闸（§6.4：/api/* 从无全局体积守卫）：content-length 预拒 + reader 流式累计

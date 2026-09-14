@@ -117,7 +117,9 @@ const el = (tag, attrs = {}, ...kids) => {
   return n;
 };
 // 管理令牌只从本地存储取：不走 URL，避免令牌进地址栏 / 浏览历史 / 任何访问日志
-{ const h = new URLSearchParams(location.hash.slice(1)); const t = h.get('token'); if (t) { localStorage.setItem('lm_token', t); history.replaceState(null, '', location.pathname); }
+{ const h = new URLSearchParams(location.hash.slice(1)); const t = h.get('token'); const vw = h.get('view') || '';
+  if (vw) localStorage.setItem('lm_view', vw); // 托盘「检查更新」深链：换票/清 hash 会抹掉视图，意图暂存，boot 一次性消费
+  if (t) { localStorage.setItem('lm_token', t); history.replaceState(null, '', location.pathname); }
   const hd = h.get('handoff'); // 60s 一次性交接票据：换回真令牌后立刻清 hash，长期令牌不再进历史/日志
   if (hd) { history.replaceState(null, '', location.pathname);
     fetch('/api/auth/handoff', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: hd }) })
@@ -352,6 +354,9 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
     const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
     const box = el('div');
+    if (updateState && updateState.updateAvailable && !updateState.error) box.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px' },
+      '检测到新版本 v' + updateState.latest + '（当前 v' + updateState.current + '）——',
+      el('a', { href: '#settings', style: 'color:var(--accent)' }, '到「设置」安装')));
     const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
     let logs = allLogs.filter((l) => l.ts >= from);
     const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
@@ -575,6 +580,24 @@ async function cbFillPendingKeys(names) {
     toast('密钥已写入');
     go('channels');
   });
+}
+// ---------------- 检查更新（update-check v1）：手动触发，绝不自动联网（README「不联网上报」承诺） ----------------
+let updateState = null; // 最近一次手动检查结果（含 latest/downloadUrl），概览页据此挂提示条
+async function checkUpdate(btn, out) {
+  btn.disabled = true; out.textContent = '检查中…（联网查询 GitHub Releases，最多 5s）';
+  try {
+    const r = await api('/api/version/check');
+    updateState = r;
+    out.innerHTML = '';
+    if (r.error) out.append(el('span', { class: 'muted' }, r.error));
+    else if (r.updateAvailable) out.append(
+      el('div', { style: 'color:var(--ok);font-weight:600;margin-bottom:6px' }, '有新版本 v' + r.latest + '（当前 v' + r.current + '）'),
+      el('div', { class: 'row', style: 'gap:8px' },
+        el('a', { class: 'btn primary sm', href: r.downloadUrl || r.releaseUrl, target: '_blank', rel: 'noreferrer' }, '下载安装包'),
+        el('a', { class: 'btn sm', href: r.releaseUrl, target: '_blank', rel: 'noreferrer' }, '查看发布说明')));
+    else out.append(el('span', {}, '已是最新版本（v' + r.current + '）✓'));
+  } catch (e) { out.textContent = '检查失败：' + e.message; }
+  btn.disabled = false;
 }
 // ---------------- 速度排行（speed-insights v1.1） ----------------
 // renderSpeedTab 是纯展示层：只消费后端预计算数值，严禁在这里重算任何百分位（DR-SI-9），
@@ -1053,7 +1076,22 @@ views.settings = async () => {
   box.append(el('div', { class: 'row', style: 'margin-top:18px' },
     el('button', { class: 'btn primary', onclick: save }, '保存设置'),
   ));
-  return box;
+  // 关于与更新（update-check v1）：当前版本 + 手动检查；绝不自动联网
+  const about = el('div', { class: 'card', style: 'max-width:760px;margin-top:16px' });
+  about.append(el('h2', {}, '关于与更新'));
+  const verLabel = el('b', {}, '…');
+  api('/api/version').then((v) => (verLabel.textContent = 'v' + v.version)).catch(() => (verLabel.textContent = '未知'));
+  const chkBtn = el('button', { class: 'btn sm' }, '检查更新');
+  const updOut = el('div', { style: 'font-size:12px;margin-top:8px' });
+  chkBtn.addEventListener('click', () => checkUpdate(chkBtn, updOut));
+  about.append(el('div', { class: 'row', style: 'gap:8px;align-items:center' },
+    el('span', { class: 'muted', style: 'font-size:12px' }, '当前版本：'), verLabel, chkBtn),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px' },
+      '仅在你点击「检查更新」时联网查询一次 GitHub Releases（10 分钟缓存）；本应用其余时间零外呼。'),
+    updOut);
+  const wrap = el('div');
+  wrap.append(box, about);
+  return wrap;
 };
 
 // ---------------- 启动 ----------------
@@ -1072,7 +1110,9 @@ function boot() {
   $('#nav').hidden = false;
   document.querySelectorAll('nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
   if (es) es.close(), (es = null);
-  go((location.hash || '#overview').slice(1));
+  const wantV = localStorage.getItem('lm_view'); // 托盘深链目标视图：一次性消费（消费即删，不影响后续手点导航）
+  if (wantV) localStorage.removeItem('lm_view');
+  go(wantV || (location.hash || '#overview').slice(1));
   api('/healthz').then((h) => { $('#hdr-sub').textContent = \`\${h.channels} 渠道 · \${h.models} 模型 · \${h.vkeys} 对外 key\`; });
 }
 

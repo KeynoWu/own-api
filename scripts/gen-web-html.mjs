@@ -2,7 +2,10 @@
 // 改过 web/index.html 记得 npm run gen:web——e2e §16 有陈旧性守护断言兜底
 import { readFileSync, writeFileSync } from 'node:fs';
 const html = readFileSync('web/index.html', 'utf8');
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 const body = html.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 const out = '// 生成文件：由 scripts/gen-web-html.mjs 产出，勿手改（源头是 web/index.html）' + String.fromCharCode(10) + 'export const WEB_HTML = `' + body + '`;' + String.fromCharCode(10);
 writeFileSync('src/web-html.gen.ts', out);
-console.log(`web-html.gen.ts 已生成（${(html.length / 1024).toFixed(1)} KB）`);
+// 版本单源：SEA 产物运行时没有 package.json 可读，这里把 version 烙成常量（e2e 有与 package.json 一致性断言兜底）
+writeFileSync('src/version.gen.ts', '// 生成文件：由 scripts/gen-web-html.mjs 产出，勿手改（源头是 package.json 的 version）' + String.fromCharCode(10) + 'export const APP_VERSION = \'' + pkg.version + '\';' + String.fromCharCode(10));
+console.log(`web-html.gen.ts 已生成（${(html.length / 1024).toFixed(1)} KB）；version.gen.ts → v${pkg.version}`);
