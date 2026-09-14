@@ -210,7 +210,7 @@ npm run test:all  # 两把一起跑
 - 管理令牌只接受 `x-admin-token` 请求头；`/api/logs/stream` 因 `EventSource` 无法带自定义头，改用
   `/api/logs/stream/ticket` 换取**短期（10 分钟）SSE 订阅令牌**再以 `?ticket=` 订阅；
   浏览器 URL 交接改走 60 秒一次性 `#handoff` 票据（`POST /api/auth/handoff` 换回令牌），长期令牌不进 URL。
-- 鉴权失败有限速：管理台每来源 20 次/分、网关每来源 30 次/分（chat / messages / count_tokens / models 共享同一桶），超限 429。桶键为 TCP 对端地址（XFF 自报头不采信）；只计鉴权失败、成功不增不清——合法 key 无法替爆破者洗白计数。
+- 鉴权失败有限速：管理台每来源 20 次/分、网关每来源 30 次/分（chat / messages / count_tokens / models 共享同一桶），超限 429。桶键为 TCP 对端地址（XFF 自报头不采信）；只计鉴权失败、成功不增不清——合法 key 无法替爆破者洗白计数。注意：服务挂在反向代理后面时所有用户的对端都是代理地址、共用同一只桶，任一人超阈值会连坐全体 60 秒——反代侧请自配按 IP 限速。
 - `/v1/messages/count_tokens` 与推理入口共用同一把 key 的 RPM 准入与每日额度闸门，不是免费端点。
 - CORS 默认只放行 `localhost` 来源；`x-lm-*` 内部头默认不下发给 agent。
 

@@ -1,0 +1,2 @@
+    const rl = admitRequest(vk.id);
+    if (!rl.ok) return c.json({ type: 'error', error: { type: 'rate_limit_error', message: rl.reason || 'rate limited' } }, 429, rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);

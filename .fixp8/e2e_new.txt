@@ -1,0 +1,8 @@
+  let last = 0;
+  let first429 = 0;
+  for (let i = 1; i <= 32; i++) {
+    last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;
+    if (last === 429 && !first429) first429 = i;
+  }
+  check('网关爆破错误 key -> 30/min 限速 429 生效', last === 429, String(last));
+  check('R2 边界精钉：含前置 2 hits（文件前部无钥匙/错钥匙各一发），第 30 发即首次 429', first429 === 30, String(first429));

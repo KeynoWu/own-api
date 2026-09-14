@@ -1,0 +1,6 @@
+    const addr = c?.env?.incoming?.socket?.remoteAddress;
+    if (typeof addr === 'string' && addr) {
+      const ip = addr.replace(/^::ffff:/, '');
+      // R2：::1 与 127.0.0.1 是同一台机器——分桶等于给本机攻击者发第二份免费预算，归一合并
+      return ip === '::1' ? '127.0.0.1' : ip;
+    }

@@ -1,0 +1,6 @@
+        seenIds.add(r.id);
+        return true;
+      });
+      const chanOK = (ch: any) => !!ch && typeof ch.id === 'string' && typeof ch.baseUrl === 'string' && /^https?:\/\//i.test(ch.baseUrl) && (ch.protocol === 'openai' || ch.protocol === 'anthropic') && Array.isArray(ch.keys);
+      const chanRaw = arr<Channel>(parsed.channels) ?? base.channels;
+      const channels = chanRaw.filter(chanOK);

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { createAdmin } from './admin.ts';
-import { ENTRYPOINTS, estimateInputTokens, extractClientKey, gateway, listModels } from './gateway.ts';
+import { ENTRYPOINTS, baseLog, estimateInputTokens, extractClientKey, gateway, listModels, pushLog } from './gateway.ts';
 import { store } from './store.ts';
 import { admitRequest } from './usage.ts';import { clientIp, failureHit, failurePeek } from './ratelimit.ts';
 
@@ -54,7 +54,11 @@ export function createApp() {
     if (!vk.enabled) return c.json({ error: { type: 'permission_error', message: 'api key disabled' }, type: 'error' }, 403);
     // 与主网关一致：先限流准入，再流式计数 body，避免无上限占用（SEC-02）
     const rl = admitRequest(vk.id);
-    if (!rl.ok) return c.json({ type: 'error', error: { type: 'rate_limit_error', message: rl.reason || 'rate limited' } }, 429, rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
+    if (!rl.ok) {
+      // P3 原则贯彻（R2）：与主链/listModels 同语义 429 同口径落日志
+      pushLog(baseLog(Date.now(), vk, c, 'anthropic', 'count_tokens'), { ok: false, status: 429, error: rl.reason || 'rate limited' });
+      return c.json({ type: 'error', error: { type: 'rate_limit_error', message: rl.reason || 'rate limited' } }, 429, rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
+    }
     const max = store.getSettings().maxBodyBytes;
     const declared = Number(c.req.header('content-length') || 0);
     if (declared && declared > max) return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'request body too large' } }, 413);

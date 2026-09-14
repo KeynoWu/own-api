@@ -1,0 +1,11 @@
+  app.post('/auth/handoff/ticket', (c) => {
+    if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
+    const expect = store.getSettings().adminToken;
+    // R2：同 shutdown——豁免区令牌失败进 adm 桶并受 429 拦截
+    const bucket = 'adm:' + clientIp(c);
+    const block = failurePeek(bucket, 20);
+    if (block.blocked) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(block.retryAfterSec) });
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) {
+      if (expect) failureHit(bucket, 60_000);
+      return c.json({ error: 'unauthorized' }, 401);
+    }

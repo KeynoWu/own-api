@@ -1,0 +1,1 @@
+export function baseLog(ts: number, vkey: VirtualKey, c: Context, wire: WireFormat, op: string): RequestLog {

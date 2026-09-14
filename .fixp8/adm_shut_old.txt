@@ -1,0 +1,4 @@
+  app.post('/shutdown', async (c) => {
+    if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
+    const expect = store.getSettings().adminToken;
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) return c.json({ error: 'unauthorized' }, 401);

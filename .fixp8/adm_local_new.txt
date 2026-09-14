@@ -1,0 +1,10 @@
+/**
+ * 回环判定（R2 修订）：Host 是请求头，直连方可任意伪造——旧口径在 LAN 模式下
+ * 「Host: localhost」即可收割 reveal 明文、打 shutdown/ticket 令牌校验，且不进限速桶。
+ * 现在以 socket 对端为准（clientIp 已归一回环形态）；XFF/Forwarded 存在一律不算本机。
+ */
+function isLocalish(c: any) {
+  if (c.req.header('x-forwarded-for') || c.req.header('forwarded')) return false;
+  const ip = clientIp(c);
+  return ip !== 'unknown' && (ip === '127.0.0.1' || ip.startsWith('127.'));
+}

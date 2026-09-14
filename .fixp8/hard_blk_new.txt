@@ -1,0 +1,1 @@
+    check('M0-b 成功穿插不洗白：干净桶精确第 12 发 429（20+11 败后 n=31，第 12 发 peek 31>30）', blockedAt === 12, String(blockedAt));

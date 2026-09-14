@@ -1020,7 +1020,7 @@ function autoAbort(c: Context, wire: WireFormat, log: RequestLog, retries: strin
 
 // ---------------------------------------------------------------- 辅助
 
-function baseLog(ts: number, vkey: VirtualKey, c: Context, wire: WireFormat, op: string): RequestLog {
+export function baseLog(ts: number, vkey: VirtualKey, c: Context, wire: WireFormat, op: string): RequestLog {
   return {
     id: newId('log'),
     ts,
@@ -1045,7 +1045,7 @@ function baseLog(ts: number, vkey: VirtualKey, c: Context, wire: WireFormat, op:
   };
 }
 
-function pushLog(log: RequestLog, patch: Partial<RequestLog> = {}) {
+export function pushLog(log: RequestLog, patch: Partial<RequestLog> = {}) {
   if (patch.stream !== undefined) log.stream = patch.stream;
   store.pushLog(log);
 }
@@ -1141,7 +1141,11 @@ export function listModels(c: Context) {
   if (!vkey) { failureHit(authBucket, 60_000); return fail(c, 'openai', 401, 'invalid api key'); }
   if (!vkey.enabled) return fail(c, 'openai', 403, 'api key disabled');
   const rl = admitRequest(vkey.id);
-  if (!rl.ok) return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
+  if (!rl.ok) {
+    // P3 原则贯彻（R2）：per-key RPM 门槛前拒绝也要在控制台可见——三个端点同语义 429 同口径记账
+    pushLog(baseLog(Date.now(), vkey, c, 'openai', 'models'), { ok: false, status: 429, error: rl.reason || 'rate limited' });
+    return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
+  }
 
   const models = store
     .listModels()

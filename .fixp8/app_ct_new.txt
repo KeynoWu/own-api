@@ -1,0 +1,6 @@
+    const rl = admitRequest(vk.id);
+    if (!rl.ok) {
+      // P3 原则贯彻（R2）：与主链/listModels 同语义 429 同口径落日志
+      pushLog(baseLog(Date.now(), vk, c, 'anthropic', 'count_tokens'), { ok: false, status: 429, error: rl.reason || 'rate limited' });
+      return c.json({ type: 'error', error: { type: 'rate_limit_error', message: rl.reason || 'rate limited' } }, 429, rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
+    }

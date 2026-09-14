@@ -6,6 +6,8 @@
  * 不再采信（本服务是本地网关，直连模型下 socket IP 就是真实来源）。
  * 固定窗口、内存态；桶表超上限按插入序 FIFO 逐出——绝不整体 fail-open
  * （旧实现在洪峰清完过期仍超限时全员放行，等于限速器被灌爆即瘫痪）。
+ * 残留语义（R2 记录在案，属有意取舍）：内存桶随进程重启清零；FIFO 逐出不随活跃度续位，
+ * 需 1 万+ 真实源才会触发，方向 fail-closed。
  */
 const buckets = new Map<string, { n: number; resetAt: number }>();
 const MAX_KEYS = 10_000;
@@ -14,7 +16,11 @@ const MAX_KEYS = 10_000;
 export function clientIp(c: any): string {
   try {
     const addr = c?.env?.incoming?.socket?.remoteAddress;
-    if (typeof addr === 'string' && addr) return addr.replace(/^::ffff:/, '');
+    if (typeof addr === 'string' && addr) {
+      const ip = addr.replace(/^::ffff:/, '');
+      // R2：::1 与 127.0.0.1 是同一台机器——分桶等于给本机攻击者发第二份免费预算，归一合并
+      return ip === '::1' ? '127.0.0.1' : ip;
+    }
   } catch {
     /* env 形态异常时归入共享桶，宁严勿松 */
   }

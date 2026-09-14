@@ -1,0 +1,4 @@
+    // R3[低5]：与 createChannel 同规——null 元素读 .key 直接 500、非串 key 在 store 里炸，这里 400 拒收
+    const clean = items.filter((k: any) => !!k && typeof k === 'object' && typeof k.key === 'string' && k.key.trim() !== '');
+    if (!clean.length) return c.json({ error: '无有效 key（key 需为非空字符串）' }, 400);
+    const ch = store.addKeys(c.req.param('id'), clean);

@@ -776,10 +776,13 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   // 限速语义钉（P1 重做后）：只计鉴权失败、成功不增不清；桶按 socket IP。
   // 本循环是文件里最后的 /v1 消费位——429 粘住来源直至窗口结束也无所谓，其后无合法请求
   let last = 0;
-  for (let i = 0; i < 32; i++) {
+  let first429 = 0;
+  for (let i = 1; i <= 32; i++) {
     last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;
+    if (last === 429 && !first429) first429 = i;
   }
   check('网关爆破错误 key -> 30/min 限速 429 生效', last === 429, String(last));
+  check('R2 边界精钉：含前置 2 hits（文件前部无钥匙/错钥匙各一发），第 30 发即首次 429', first429 === 30, String(first429));
 {
   // 模块合并契约：单表撞名双向互斥 + 候选禁嵌套 auto
   const autos = (await api('/api/routes?type=auto', { headers: ADMIN })).body;

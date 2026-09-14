@@ -1,0 +1,5 @@
+    if (patch.modelList !== undefined) {
+      const ml = toStrList(patch.modelList);
+      if (ml) next.modelList = ml; // R3[S3]：换算不动的值保持原清单，不再静默吞成 []
+      else delete next.modelList;
+    }

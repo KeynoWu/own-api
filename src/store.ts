@@ -161,6 +161,9 @@ class Store {
     this.logSeq = (Array.isArray(this.db.logs) ? this.db.logs : []).reduce((m, l) => Math.max(m, (l && l.seq) || 0), 0);
   }
 
+  // R3[中3]：装载失败（IO/权限/损坏但备份改名也失败）时禁 persist——空库绝不许覆盖读不到的原库
+  private loadBlocked = false;
+
   private load(): DBShape {
     if (!existsSync(DB_FILE)) {
       const fresh = emptyDb();
@@ -203,9 +206,31 @@ class Store {
         seenIds.add(r.id);
         return true;
       });
-      const chanOK = (ch: any) => !!ch && typeof ch.id === 'string' && typeof ch.baseUrl === 'string' && /^https?:\/\//i.test(ch.baseUrl) && (ch.protocol === 'openai' || ch.protocol === 'anthropic') && Array.isArray(ch.keys);
+      // R3[高危2]：v3 分支 auto 缺 candidates/候选元素脏同样毒化五类读路径（auto 对话、/v1/models、
+      // GET /api/routes、删除级联、前端渲染）——v2 分支当年只修了一半，这里统一归一候选层。
+      routes = routes.map((r: any) => {
+        if (r.type !== 'auto') return r;
+        const cdRaw = Array.isArray(r.candidates) ? r.candidates : [];
+        if (!Array.isArray(r.candidates)) console.warn(`[store] auto 路由 ${r.publicName} 缺 candidates，兜底空候选`);
+        const cd = cdRaw.filter((x: any) => !!x && typeof x === 'object' && typeof x.routeId === 'string');
+        if (cd.length !== cdRaw.length) console.warn(`[store] auto 路由 ${r.publicName} 丢弃 ${cdRaw.length - cd.length} 个坏候选元素`);
+        return { ...r, candidates: cd };
+      });
+      // R3[低6/S1]：坏 protocol 降级 openai+warn（旧库存量拼写变体曾正常工作，整渠道误杀过重）；
+      // keys 元素级清洗：缺 id/key 的元素会被 pickKey 当 Bearer undefined 打上游搅冷却
+      const chanOK = (ch: any) => !!ch && typeof ch.id === 'string' && typeof ch.baseUrl === 'string' && /^https?:\/\//i.test(ch.baseUrl);
       const chanRaw = arr<Channel>(parsed.channels) ?? base.channels;
-      const channels = chanRaw.filter(chanOK);
+      const channels = chanRaw.filter(chanOK).map((ch: any) => {
+        let protocol = ch.protocol;
+        if (protocol !== 'openai' && protocol !== 'anthropic') {
+          console.warn(`[store] 渠道 ${ch.id} protocol ${JSON.stringify(ch.protocol)} 不识别，兜底 openai`);
+          protocol = 'openai';
+        }
+        const keysRaw = Array.isArray(ch.keys) ? ch.keys : [];
+        const keys = keysRaw.filter((k: any) => !!k && typeof k.id === 'string' && typeof k.key === 'string' && k.key !== '');
+        if (keys.length !== keysRaw.length) console.warn(`[store] 渠道 ${ch.id} 丢弃 ${keysRaw.length - keys.length} 个坏 key 元素`);
+        return { ...ch, protocol, keys };
+      });
       if (channels.length !== chanRaw.length) console.warn(`[store] channels 丢弃 ${chanRaw.length - channels.length} 条非法条目（缺 id/baseUrl 非 http(s)/protocol 非法/keys 非数组）`);
       const vkOK = (v: any) => !!v && typeof v.id === 'string' && typeof v.key === 'string' && v.key !== '';
       const vkRaw = arr<VirtualKey>(parsed.vkeys) ?? base.vkeys;
@@ -236,7 +261,8 @@ class Store {
         Object.fromEntries(Object.entries(merged.settings).filter(([k]) => k !== 'adminToken')),
         base.settings,
       );
-      merged.settings = { ...merged.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };
+      // R3[中4]：以 base 默认+净化结果为准——非法原值不得从文件直通运行期（logRetention:-5 曾每写即清空）
+      merged.settings = { ...base.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };
       if (!Array.isArray(merged.vkeys) || merged.vkeys.length === 0) merged.vkeys = [freshVKey()];
       return merged;
     } catch (err) {
@@ -246,17 +272,26 @@ class Store {
         try {
           renameSync(DB_FILE, backup);
         } catch {
-          /* ignore */
+          this.loadBlocked = true; // 备份改名失败=没有安全网，禁 persist 保原数据
+          console.error('[store] corrupt 备份改名失败，本次运行禁止回写以保护原文件');
         }
         console.error(`[store] db.json 解析失败，已备份到 ${backup}，使用空库启动`, err);
       } else {
-        console.error('[store] db.json 装载异常（不判损坏、不改名，空库兜底启动，原文件保留）：', err);
+        this.loadBlocked = true; // R3[中3]：原文件unreadable≠不存在，空库只能内存跑
+        console.error('[store] db.json 装载异常（不判损坏、不改名，空库兜底启动，原文件保留并禁止回写）：', err);
       }
-      return emptyDb();
+      const fb = emptyDb();
+      fb.vkeys.push(freshVKey()); // R3[缺口b]：恢复库同样开箱可用（此前无默认 key，/v1 全 401）
+      if (!this.loadBlocked) this.persist(fb);
+      return fb;
     }
   }
 
   private persist(db: DBShape = this.db) {
+    if (this.loadBlocked) {
+      console.error('[store] 上次装载未成功，拒绝回写（防止空库顶掉不可读的原库，R3[中3]）');
+      return;
+    }
     mkdirSync(dirname(DB_FILE), { recursive: true, mode: 0o700 });
     const tmp = `${DB_FILE}.tmp`;
     // db.json 里是明文上游 key，必须 0600：默认 umask 出来的 0644 同机其他人可读
@@ -374,7 +409,11 @@ class Store {
     if (patch.testModel !== undefined && next.testModel !== undefined && typeof next.testModel !== "string") delete next.testModel;
 
     // modelList 兼容数组 / “每行一个”字符串，统一归一化，避免字符串直接落库
-    if (patch.modelList !== undefined) next.modelList = toStrList(patch.modelList) ?? [];
+    if (patch.modelList !== undefined) {
+      const ml = toStrList(patch.modelList);
+      if (ml) next.modelList = ml; // R3[S3]：换算不动的值保持原清单，不再静默吞成 []
+      else delete next.modelList;
+    }
     Object.assign(ch, next);
     this.save();
     return ch;
@@ -874,7 +913,9 @@ export { newId };
 process.on('exit', () => {
   store.flushSync();
   try {
-    if (existsSync(LOCK_FILE) && readFileSync(LOCK_FILE, 'utf8').trim() === String(process.pid)) unlinkSync(LOCK_FILE);
+    // R3[高危1]：锁内容是「pid ts」（P2 改了写入格式漏改这里）→ 比对永假 → 正常退出永不清锁
+    const lockRaw = existsSync(LOCK_FILE) ? readFileSync(LOCK_FILE, 'utf8').trim() : '';
+    if (lockRaw && lockRaw.split(' ')[0] === String(process.pid)) unlinkSync(LOCK_FILE);
   } catch {
     /* ignore */
   }

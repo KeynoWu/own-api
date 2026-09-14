@@ -1,0 +1,48 @@
+// ---------- R3：v3 形状净化 + 退出锁清理（真 spawn） ----------
+{
+  const { spawn } = await import('node:child_process');
+  const fs6 = await import('node:fs');
+  const v3Dir = mkdtempSync(join(tmpdir(), 'ownapi-v3fix-'));
+  fs6.writeFileSync(join(v3Dir, 'db.json'), JSON.stringify({
+    version: 3, quotas: {}, logs: [],
+    channels: [{ id: 'c1', name: 'c1', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'OpenAI', enabled: true, createdAt: 1,
+      keys: [{ id: 'k1', key: 'k-ok', weight: 1, status: 'active' }, { id: 2 }, null] }],
+    routes: [
+      { id: 'm1', type: 'single', publicName: 'fix-m', channelId: 'c1', upstreamModel: 'mock-gpt-5', createdAt: 1 },
+      { id: 'a1', type: 'auto', publicName: 'fix-a', createdAt: 1 },
+      { id: 'a2', type: 'auto', publicName: 'fix-a2', candidates: [null, { routeId: 'm1', weight: 1 }, 7], createdAt: 1 },
+    ],
+    vkeys: [{ id: 'vk1', key: 'sk-v3fix-key0123456789abcde', name: 'd', enabled: true, allowedModels: [], createdAt: 1 }],
+    settings: { adminToken: 'v3fix-admin' },
+  }));
+  const v3 = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, LLM_DATA_DIR: undefined, LLM_ADMIN_TOKEN: undefined, OWN_API_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: v3Dir, OWN_API_PORT: '18822' },
+    stdio: 'ignore', cwd: process.cwd(),
+  });
+  let v3Up = false;
+  for (let i = 0; i < 80 && !v3Up; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { v3Up = (await fetch('http://127.0.0.1:18822/api/healthz')).ok; } catch { /* 还没起来 */ }
+  }
+  check('R3 v3 脏形状服务（18822）就绪（不再启动即毒）', v3Up);
+  const v3h = { 'x-admin-token': 'v3fix-admin' };
+  const v3rs = await fetch('http://127.0.0.1:18822/api/routes', { headers: v3h });
+  const v3routes: any = v3rs.ok ? await v3rs.json() : [];
+  const a1 = (v3routes as any[]).find((r) => r.publicName === 'fix-a');
+  const a2 = (v3routes as any[]).find((r) => r.publicName === 'fix-a2');
+  check('R3 GET /api/routes 不再被缺 candidates 的 auto 毒成 500', v3rs.status === 200 && Array.isArray(a1?.candidates) && a1.candidates.length === 0 && a2?.candidates?.length === 1, v3rs.status + ' ' + JSON.stringify(a1?.candidates) + JSON.stringify(a2?.candidates));
+  const v3ml = await fetch('http://127.0.0.1:18822/v1/models', { headers: { authorization: 'Bearer sk-v3fix-key0123456789abcde' } });
+  check('R3 /v1/models 聚合不再被坏 auto 拖死', v3ml.status === 200, String(v3ml.status));
+  const v3ch: any = await (await fetch('http://127.0.0.1:18822/api/channels', { headers: v3h })).json();
+  check('R3 拼写变体 protocol 渠道降级保命而非整渠道销毁（keys 元素级清洗）', Array.isArray(v3ch) && v3ch.length === 1 && v3ch[0].protocol === 'openai' && v3ch[0].keys.length === 1, JSON.stringify(v3ch?.[0] ? { p: v3ch[0].protocol, k: v3ch[0].keys.length } : v3ch));
+  const v3chat = await fetch('http://127.0.0.1:18822/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-v3fix-key0123456789abcde', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'fix-a', messages: [{ role: 'user', content: 'x' }] }) });
+  check('R3 空候选 auto 对话走受控错误而非 TypeError 500', v3chat.status < 500, String(v3chat.status));
+  const v3del = await fetch('http://127.0.0.1:18822/api/channels/c1', { method: 'DELETE', headers: v3h });
+  check('R3 删除级联 autoRoutesReferencing 不再 TypeError', v3del.status === 200, String(v3del.status));
+  const v3ex = new Promise<void>((r) => v3.on('exit', () => r()));
+  v3.kill('SIGTERM');
+  await Promise.race([v3ex, new Promise((r) => setTimeout(r, 9000))]);
+  check('R3 优雅退出后锁文件被清理（exit 钩子比对格式修复）', !fs6.existsSync(join(v3Dir, 'db.json.lock')));
+  try { fs6.rmSync(v3Dir, { recursive: true, force: true }); } catch {}
+}
+

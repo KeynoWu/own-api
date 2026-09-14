@@ -1,0 +1,5 @@
+  let last = 0;
+  for (let i = 0; i < 32; i++) {
+    last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;
+  }
+  check('网关爆破错误 key -> 30/min 限速 429 生效', last === 429, String(last));

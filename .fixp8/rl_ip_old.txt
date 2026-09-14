@@ -1,0 +1,2 @@
+    const addr = c?.env?.incoming?.socket?.remoteAddress;
+    if (typeof addr === 'string' && addr) return addr.replace(/^::ffff:/, '');

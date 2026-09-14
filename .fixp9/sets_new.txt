@@ -1,0 +1,2 @@
+      // R3[中4]：以 base 默认+净化结果为准——非法原值不得从文件直通运行期（logRetention:-5 曾每写即清空）
+      merged.settings = { ...base.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };

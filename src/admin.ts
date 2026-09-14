@@ -19,11 +19,15 @@ function scrubbedError(text: string, key: string, status: number) {
   return scrubSecret(s, key);
 }
 
-/** 近似回环判定：经反向代理（带 XFF）一律不算本机——reveal 明文与令牌交接只在直连本机时开放 */
-function isLocalish(c: { req: { header: (n: string) => string | undefined } }) {
+/**
+ * 回环判定（R2 修订）：Host 是请求头，直连方可任意伪造——旧口径在 LAN 模式下
+ * 「Host: localhost」即可收割 reveal 明文、打 shutdown/ticket 令牌校验，且不进限速桶。
+ * 现在以 socket 对端为准（clientIp 已归一回环形态）；XFF/Forwarded 存在一律不算本机。
+ */
+function isLocalish(c: any) {
   if (c.req.header('x-forwarded-for') || c.req.header('forwarded')) return false;
-  const host = (c.req.header('host') || '').split(':')[0].replace(/^\[|\]$/g, '');
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]' || host.endsWith('.local');
+  const ip = clientIp(c);
+  return ip !== 'unknown' && (ip === '127.0.0.1' || ip.startsWith('127.'));
 }
 
 /**
@@ -55,7 +59,14 @@ export function createAdmin(): Hono {
   app.post('/shutdown', async (c) => {
     if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
     const expect = store.getSettings().adminToken;
-    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) return c.json({ error: 'unauthorized' }, 401);
+    // R2：豁免区不再是免计数爆破面——令牌失败进 adm 同桶同阈值
+    const bucket = 'adm:' + clientIp(c);
+    const block = failurePeek(bucket, 20);
+    if (block.blocked) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(block.retryAfterSec) });
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) {
+      if (expect) failureHit(bucket, 60_000);
+      return c.json({ error: 'unauthorized' }, 401);
+    }
     if (!shutdownHookFn) return c.json({ error: 'shutdown hook 未注册' }, 501);
     setTimeout(() => shutdownHookFn && shutdownHookFn(), 30); // 先让本响应冲刷出去
     return c.json({ ok: true, note: 'shutting down' });
@@ -64,11 +75,18 @@ export function createAdmin(): Hono {
 
   // 一次性票据换令牌：仅回环、60s、单次消费——注册在鉴权中间件之前（豁免）
   app.post('/auth/handoff', async (c) => {
+    const local = isLocalish(c);
+    const bucket = 'adm:' + clientIp(c);
+    const block = local ? failurePeek(bucket, 20) : { blocked: false, retryAfterSec: 0 };
+    if (block.blocked) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(block.retryAfterSec) });
     const b = await c.req.json().catch(() => ({} as any));
     const t = typeof b?.ticket === 'string' ? b.ticket : '';
     const exp = handoffTickets.get(t);
     handoffTickets.delete(t); // 一次性：无论成败即毁
-    if (!exp || exp < Date.now() || !isLocalish(c)) return c.json({ error: 'invalid or expired handoff ticket' }, 401);
+    if (!exp || exp < Date.now() || !local) {
+      if (local && t) failureHit(bucket, 60_000); // 票据猜测也计数（128 位随机票不可猜，纵深防御）
+      return c.json({ error: 'invalid or expired handoff ticket' }, 401);
+    }
     return c.json({ token: store.getSettings().adminToken });
   });
 
@@ -77,7 +95,14 @@ export function createAdmin(): Hono {
   app.post('/auth/handoff/ticket', (c) => {
     if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
     const expect = store.getSettings().adminToken;
-    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) return c.json({ error: 'unauthorized' }, 401);
+    // R2：同 shutdown——豁免区令牌失败进 adm 桶并受 429 拦截
+    const bucket = 'adm:' + clientIp(c);
+    const block = failurePeek(bucket, 20);
+    if (block.blocked) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(block.retryAfterSec) });
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) {
+      if (expect) failureHit(bucket, 60_000);
+      return c.json({ error: 'unauthorized' }, 401);
+    }
     return c.json({ ticket: createHandoffTicket() });
   });
 
@@ -201,7 +226,10 @@ export function createAdmin(): Hono {
     const items = Array.isArray(b.keys)
       ? b.keys.map((k: any) => (typeof k === 'string' ? { key: k } : k))
       : [{ key: b.key, name: b.name, weight: b.weight }];
-    const ch = store.addKeys(c.req.param('id'), items.filter((k: any) => k.key));
+    // R3[低5]：与 createChannel 同规——null 元素读 .key 直接 500、非串 key 在 store 里炸，这里 400 拒收
+    const clean = items.filter((k: any) => !!k && typeof k === 'object' && typeof k.key === 'string' && k.key.trim() !== '');
+    if (!clean.length) return c.json({ error: '无有效 key（key 需为非空字符串）' }, 400);
+    const ch = store.addKeys(c.req.param('id'), clean);
     return ch ? c.json(maskChannel(ch, isLocalish(c))) : c.json({ error: 'channel not found' }, 404);
   });
 
