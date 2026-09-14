@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, Settings, VirtualKey } from './types.ts';
 import { envAny, resolveDataDir } from './bootstrap.ts';
 
@@ -538,7 +538,13 @@ class Store {
     return this.db.vkeys;
   }
   findVKey(key: string) {
-    return this.db.vkeys.find((k) => k.key === key);
+    if (!key) return undefined;
+    // 常数时间（先各自过 SHA-256，长度也不泄露）——与 admin safeEq 同口径，逐字符短路不再泄露前缀（审查 A-M）
+    const want = createHash('sha256').update(key).digest();
+    for (const k of this.db.vkeys) {
+      if (timingSafeEqual(want, createHash('sha256').update(k.key).digest())) return k;
+    }
+    return undefined;
   }
   createVKey(input: Partial<VirtualKey> & { name: string }) {
     const key = input.key?.trim() || genVirtualKey();
@@ -656,6 +662,30 @@ export function maskKey(key: string) {
   if (!key) return '';
   if (key.length <= 10) return `${key.slice(0, 2)}***`;
   return `${key.slice(0, 6)}***${key.slice(-4)}`;
+}
+
+/**
+ * 出站文本 key 掩码：原文之外连 URL 编码 / base64 / base64url（去 padding）变体一起遮。
+ * 上游错误体 echo api_key 时常见编码回显——只匹配原文是掩码链的实测缺口（审查需确认项，预防加固）。
+ */
+export function scrubSecret(s: string, k: string) {
+  if (!s || !k) return s;
+  let out = s;
+  const mask = maskKey(k);
+  const variants = new Set<string>([k]);
+  try {
+    const enc = encodeURIComponent(k);
+    if (enc !== k) variants.add(enc);
+  } catch {
+    /* ignore */
+  }
+  const b64 = Buffer.from(k, 'utf8').toString('base64');
+  variants.add(b64);
+  variants.add(b64.replace(/=+$/, ''));
+  for (const v of variants) {
+    if (v && out.includes(v)) out = out.split(v).join(mask);
+  }
+  return out;
 }
 
 const LOCK_FILE = `${DB_FILE}.lock`;

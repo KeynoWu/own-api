@@ -5,6 +5,7 @@ import { createApp } from './app.ts';
 import { store, getDataDir } from './store.ts';
 import { gcRpmWindows } from './usage.ts';
 import { envAny, openBrowser } from './bootstrap.ts';
+import { createHandoffTicket } from './admin.ts';
 
 const PORT = Number(envAny(['OWN_API_PORT', 'PORT']) || 8787);
 const HOST = envAny(['OWN_API_HOST', 'HOST']) || '127.0.0.1';
@@ -41,7 +42,8 @@ function listen(port: number) {
     } catch (err) {
       console.error('  (last-session.json 写入失败，桌面壳将无法自动获取令牌：' + String((err as any)?.message || err) + ')');
     }
-    if (envAny(['OWN_API_OPEN_BROWSER']) === '1') openBrowser(`${base}/#token=${encodeURIComponent(s.adminToken)}`);
+    // URL 不再携带长期令牌：60s 一次性交接票据，页面 POST /api/auth/handoff 换回（审查 A-M）
+    if (envAny(['OWN_API_OPEN_BROWSER']) === '1') openBrowser(`${base}/#handoff=${createHandoffTicket()}`);
   });
   srv.on('error', (err: any) => {
     if (err?.code === 'EADDRINUSE' && attempt < 8) {

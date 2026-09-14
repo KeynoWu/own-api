@@ -117,7 +117,12 @@ const el = (tag, attrs = {}, ...kids) => {
   return n;
 };
 // 管理令牌只从本地存储取：不走 URL，避免令牌进地址栏 / 浏览历史 / 任何访问日志
-{ const h = new URLSearchParams(location.hash.slice(1)); const t = h.get('token'); if (t) { localStorage.setItem('lm_token', t); history.replaceState(null, '', location.pathname); } } // 双击启动带 #token= 直达
+{ const h = new URLSearchParams(location.hash.slice(1)); const t = h.get('token'); if (t) { localStorage.setItem('lm_token', t); history.replaceState(null, '', location.pathname); }
+  const hd = h.get('handoff'); // 60s 一次性交接票据：换回真令牌后立刻清 hash，长期令牌不再进历史/日志
+  if (hd) { history.replaceState(null, '', location.pathname);
+    fetch('/api/auth/handoff', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: hd }) })
+      .then((r) => (r.ok ? r.json() : null)).then((j) => { if (j && j.token) { localStorage.setItem('lm_token', j.token); location.reload(); } }).catch(() => {});
+  } } // 双击启动带 #handoff=（旧版 #token= 仍兼容）
 let TOKEN = localStorage.getItem('lm_token') || '';
 const api = async (path, opt = {}) => {
   const res = await fetch(path, { ...opt, headers: { 'content-type': 'application/json', 'x-admin-token': TOKEN, ...(opt.headers || {}) } });
@@ -665,7 +670,7 @@ views.settings = async () => {
   const ret = f('日志保留条数', 'logRetention', s.logRetention);
   box.append(el('h2', {}, '安全'));
   box.append(el('label', {}, '管理令牌'));
-  const tok = el('input', { value: '', placeholder: s.adminToken ? '••••••••（留空表示不修改）' : '尚未设置' });
+  const tok = el('input', { value: '', placeholder: s.adminTokenSet || s.adminToken ? '••••••••（已保存，出于安全不再回显；输入新值可替换）' : '尚未设置' });
   tok.style.width = '100%';
   box.append(tok, el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, '至少 8 个字符；改动会写进 data/db.json（文件权限 0600），也可用 LLM_ADMIN_TOKEN 固定。'));
   const dbg = el('input', { type: 'checkbox', ...(s.debugHeaders ? { checked: '' } : {}) });

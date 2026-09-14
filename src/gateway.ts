@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
-import { store, maskKey, newId } from './store.ts';
+import { store, maskKey, newId, scrubSecret } from './store.ts';
+import { failureAllow, failureClear } from './ratelimit.ts';
 import {
   anthropicToOpenaiRequest,
   anthropicToOpenaiResponse,
@@ -107,8 +108,10 @@ function debugHeaders(enabled: boolean, info: { channel: Channel; key: string; p
 
 // ---------------------------------------------------------------- 路由解析
 
-function resolveRoute(modelName: string): Resolved | { error: string } {
+function resolveRoute(modelName: string, vk: VirtualKey): Resolved | { error: string } {
   const route = store.findModelByName(modelName.toLowerCase());
+  // 无权访问的 key 拿"未配置路由"同一文案——已停用/渠道名等内部状态不再成为 ACL 探针（审查 A-M 枚举）
+  if (route && !allowedForKey(vk, route.publicName)) return { error: routeNotFoundMsg(modelName, vk) };
   if (route) {
     const channel = store.getChannel(route.channelId);
     if (!channel) return { error: `model "${modelName}" 绑定的渠道不存在` };
@@ -131,10 +134,13 @@ function resolveRoute(modelName: string): Resolved | { error: string } {
       return { channel, upstreamModel: modelName, protocol: channel.protocol, fallback: true };
     }
   }
-  const known = store.listModels().filter((m) => m.enabled).map((m) => m.publicName);
-  return {
-    error: `model "${modelName}" 未配置路由。${known.length ? `可用模型：${known.join(', ')}` : '当前没有任何已启用的模型路由。'}`,
-  };
+  return { error: routeNotFoundMsg(modelName, vk) };
+}
+
+function routeNotFoundMsg(modelName: string, vk: VirtualKey) {
+  // 枚举过滤：这把 key 无权访问的模型名不出现在"可用模型"里（审查 A-M 枚举）
+  const known = store.listModels().filter((m) => m.enabled && allowedForKey(vk, m.publicName)).map((m) => m.publicName);
+  return `model "${modelName}" 未配置路由。${known.length ? `可用模型：${known.join(', ')}` : '当前没有任何已启用的模型路由。'}`;
 }
 
 function allowedForKey(vk: VirtualKey, publicName: string) {
@@ -180,7 +186,8 @@ function hasCacheControlKey(v: unknown, depth = 0): boolean {
 
 /** C17 硬底线兜底（S8）：上游若把收到的 key echo 进错误体，进 retries/日志/响应体前替换为掩码 */
 function scrubOut(s: string, k: string) {
-  return k && s.includes(k) ? s.split(k).join(maskKey(k)) : s;
+  // 编码变体（URL 编码/base64）一并遮罩，逻辑收敛到 store.scrubSecret 与 admin 共用
+  return scrubSecret(s, k);
 }
 
 /** 上游"prompt 超出上下文窗口"类 400：换更大窗口的候选有意义（C10） */
@@ -621,9 +628,13 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
   const client: 'openai' | 'anthropic' = wire === 'anthropic' ? 'anthropic' : 'openai';
 
   const rawKey = extractClientKey(c);
+  const authBucket = `vkey:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
+  const authRl = failureAllow(authBucket, 30, 60_000); // 每来源 60s 内至多 30 次鉴权失败，防公钥爆破（审查 A-M）
+  if (!authRl.ok) return fail(c, wire, 429, 'too many failed auth attempts', { 'retry-after': String(authRl.retryAfterSec) });
   if (!rawKey) return fail(c, wire, 401, 'missing api key（请在 Authorization: Bearer <key> 或 x-api-key 中携带统一 key）');
   const vkey = store.findVKey(rawKey);
   if (!vkey) return fail(c, wire, 401, 'invalid api key');
+  failureClear(authBucket);
   if (!vkey.enabled) return fail(c, wire, 403, 'api key disabled');
 
   // 限流在任何 await 之前准入：否则并发请求会在计数落地前一起穿过
@@ -706,7 +717,7 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
     }
 
     // ---------------- 既有单候选路径（行为零回归：无链预算、超时取渠道自身值） ----------------
-    const resolved = resolveRoute(requestedModel);
+    const resolved = resolveRoute(requestedModel, vkey);
     if ('error' in resolved) {
       finalize({ status: 404, error: resolved.error });
       return fail(c, wire, 404, resolved.error);
@@ -821,8 +832,19 @@ async function runAuto(ctx: AutoRunCtx) {
   const evals = evaluateCandidates(autoRoute, vkey, chatBody, wire, wantsStream, inputEst);
   const survivors = evals.filter((e): e is SurvivingEval => e.ok);
   if (!survivors.length) {
-    const reasons = evals.map((e) => `${e.name}：${e.reason}`).join('；');
-    return fail4(404, `auto "${autoName}" 没有满足本请求约束的候选${evals.length ? `（${reasons}）` : '（candidates 为空）'}`);
+    // 理由保留（运维排障刚需）但按 key 脱敏（审查 A-L 拓扑外泄）：未授权候选名退化为序号（不得成为 ACL 探针），
+    // 渠道名一律抹掉——渠道命名是内部拓扑
+    const detail = evals.length
+      ? `（${evals
+          .map((e, i) => {
+            const unauth = e.reason.includes('该 key 未授权此候选');
+            const name = unauth ? `候选${i + 1}` : e.name;
+            const reason = e.reason.replace(/渠道「[^」]*」/g, '渠道').replace(/该 key 未授权此候选/, '本 key 未授权');
+            return `${e ? '' : ''}${name}：${reason}`;
+          })
+          .join('；')}）`
+      : '（candidates 为空）';
+    return fail4(404, `auto "${autoName}" 没有满足本请求约束的候选${detail}`);
   }
 
   // B5 配额预占：输入估算 + max(存活候选 maxOutputTokens, 请求 max_tokens)。
@@ -1093,9 +1115,13 @@ export function estimateInputTokens(body: any): number {
 /** GET /v1/models —— 对外只暴露已配置且该 key 有权访问的模型；auto 条目按 §5.2 契约合成 */
 export function listModels(c: Context) {
   const rawKey = extractClientKey(c);
+  const authBucket = `vkey:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
+  const authRl = failureAllow(authBucket, 30, 60_000);
+  if (!authRl.ok) return fail(c, 'openai', 429, 'too many failed auth attempts', { 'retry-after': String(authRl.retryAfterSec) });
   if (!rawKey) return fail(c, 'openai', 401, 'missing api key');
   const vkey = store.findVKey(rawKey);
   if (!vkey) return fail(c, 'openai', 401, 'invalid api key');
+  failureClear(authBucket);
   if (!vkey.enabled) return fail(c, 'openai', 403, 'api key disabled');
   const rl = admitRequest(vkey.id);
   if (!rl.ok) return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);

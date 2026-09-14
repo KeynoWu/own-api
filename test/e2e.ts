@@ -115,7 +115,12 @@ check('错误 key -> 401', wrongKey.status === 401);
 const unknownModel = await api('/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${VKEY}` }, body: JSON.stringify({ model: 'no-such-model', messages: [] }) });
 check('未配置模型 -> 404 且提示可用列表', unknownModel.status === 404 && /可用模型/.test(JSON.stringify(unknownModel.body)), JSON.stringify(unknownModel.body));
 const notAllowed = await api('/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${limited.key}` }, body: JSON.stringify({ model: 'claude-sonnet', messages: [] }) });
-check('key 未授权该模型 -> 403', notAllowed.status === 403, String(notAllowed.status));
+// 新契约（审查 A-M 枚举防护）：无权模型与未知模型不可区分，统一 404 未配置路由；可用列表只含该 key 有权的模型
+check(
+  'key 未授权该模型 -> 404 与未知模型不可区分（枚举防护）',
+  notAllowed.status === 404 && /未配置路由/.test(JSON.stringify(notAllowed.body)) && !/可用模型：.*claude-sonnet/.test(JSON.stringify(notAllowed.body)),
+  `${notAllowed.status} ${JSON.stringify(notAllowed.body).slice(0, 120)}`,
+);
 
 // ================================================================ 2. 同协议
 section('2. 同协议路由（OpenAI -> OpenAI）');

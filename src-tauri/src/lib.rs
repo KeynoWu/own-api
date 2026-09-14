@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
@@ -12,6 +13,11 @@ use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
 
 pub struct Sidecar(pub Mutex<Option<CommandChild>>);
+
+/// Mutex 中毒不 panic：任何回调 panic 过的锁仍要能把侧车句柄取出来收尾
+fn lock_slot<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn data_dir() -> PathBuf {
     for k in ["OWN_API_DATA_DIR", "LLM_DATA_DIR"] {
@@ -50,6 +56,46 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// 向服务端取一次性交接票据（loopback 明文 HTTP）。成功返回 URL 里只带 60s 票据的地址；
+/// 失败返回 None 由调用方回退旧式 #token=（审查 A-M：长期令牌不进浏览历史/同步/代理日志）
+fn handoff_url(port: u16, token: &str) -> Option<String> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    s.set_read_timeout(Some(Duration::from_millis(800))).ok()?;
+    s.set_write_timeout(Some(Duration::from_millis(800))).ok()?;
+    let req = format!(
+        "POST /api/auth/handoff/ticket HTTP/1.1\r\nHost: 127.0.0.1\r\nx-admin-token: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        token
+    );
+    s.write_all(req.as_bytes()).ok()?;
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).ok()?;
+    let i = buf.find("\"ticket\":\"")? + 10;
+    let rest = &buf[i..];
+    let j = rest.find('"')?;
+    Some(format!(
+        "http://127.0.0.1:{}/#handoff={}",
+        port,
+        &rest[..j]
+    ))
+}
+
+/// 优雅停机：POST /api/shutdown（loopback + 管理令牌）。返回 true 仅代表请求已送达
+fn graceful_shutdown(port: u16, token: &str) -> bool {
+    if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+        let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
+        let req = format!(
+            "POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nx-admin-token: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            token
+        );
+        if s.write_all(req.as_bytes()).is_ok() {
+            let mut buf = [0u8; 64];
+            let _ = s.read(&mut buf);
+            return true;
+        }
+    }
+    false
+}
+
 /// 无 AppHandle 依赖的系统级动作（可安全离开主线程）
 fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
@@ -75,29 +121,15 @@ fn open_console_now() -> Result<(), String> {
     if !healthy(port) {
         return Err(format!("port {port} down"));
     }
-    open_url(&format!("http://127.0.0.1:{}/#token={}", port, urlencode(&token)));
+    let url = handoff_url(port, &token)
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/#token={}", port, urlencode(&token)));
+    open_url(&url);
     Ok(())
 }
 
-/// 主线程调用：健康则直接开；否则拉侧车并交给无状态线程等待就绪后开浏览器
-fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
-    if open_console_now().is_ok() {
-        return;
-    }
-    let sidecar = app
-        .shell()
-        .sidecar("own-api")
-        .and_then(|c| c.env("OWN_API_PPID", std::process::id().to_string()).spawn());
-    match sidecar {
-        Ok((_rx, child)) => {
-            *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
-        }
-        Err(e) => {
-            eprintln!("[own-api] 侧车启动失败：{e}");
-            return;
-        }
-    }
-    std::thread::spawn(|| {
+/// 等待就绪后开控制台；超时且确认服务没活着则释放槽位，让下一次托盘点击能重新拉起
+fn wait_ready<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
         for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(250));
             if open_console_now().is_ok() {
@@ -105,7 +137,47 @@ fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
             }
         }
         eprintln!("[own-api] 30 秒内服务未就绪");
+        let dead = match read_session() {
+            Some((port, _)) => !healthy(port),
+            None => true,
+        };
+        if dead {
+            let state = app.state::<Sidecar>();
+            if let Some(child) = lock_slot(&state.0).take() {
+                let _ = child.kill();
+            }
+        }
     });
+}
+
+/// 主线程调用：健康则直接开；否则拉侧车并交给无状态线程等待就绪后开浏览器
+fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
+    if open_console_now().is_ok() {
+        return;
+    }
+    {
+        // 审查 E-M（桌面双 spawn 竞态）：槽位有人就不再拉第二份——两份进程共写一份
+        // db.json 会 last-writer-wins 互踩；服务端单实例锁是第二道防线，这里是第一道。
+        let state = app.state::<Sidecar>();
+        if lock_slot(&state.0).is_some() {
+            wait_ready(app.clone());
+            return;
+        }
+    }
+    let sidecar = app
+        .shell()
+        .sidecar("own-api")
+        .and_then(|c| c.env("OWN_API_PPID", std::process::id().to_string()).spawn());
+    match sidecar {
+        Ok((_rx, child)) => {
+            *lock_slot(&app.state::<Sidecar>().0) = Some(child);
+        }
+        Err(e) => {
+            eprintln!("[own-api] 侧车启动失败：{e}");
+            return;
+        }
+    }
+    wait_ready(app.clone());
 }
 
 pub fn run() {
@@ -114,7 +186,6 @@ pub fn run() {
             ensure_running(app);
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .manage(Sidecar(Mutex::new(None)))
         .setup(|app| {
@@ -170,7 +241,13 @@ pub fn run() {
         .expect("own-api 桌面壳构建失败")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(child) = app.state::<Sidecar>().0.lock().unwrap().take() {
+                if let Some(child) = lock_slot(&app.state::<Sidecar>().0).take() {
+                    // SIGKILL 前先到服务侧走一次优雅停机：落盘 + 摘空闲连接，400ms 防抖窗口里的数据不再赌运气
+                    if let Some((port, token)) = read_session() {
+                        if graceful_shutdown(port, &token) {
+                            std::thread::sleep(Duration::from_millis(400));
+                        }
+                    }
                     let _ = child.kill();
                 }
             }

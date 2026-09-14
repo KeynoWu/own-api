@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { store, maskKey } from './store.ts';
+import { store, maskKey, scrubSecret } from './store.ts';
+import { failureAllow, failureClear } from './ratelimit.ts';
 import { forgetQuota } from './usage.ts';
 import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
@@ -15,7 +16,27 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 连通测试错误体与 gateway 的 scrubOut 同口径：上游 echo key 时先掩码再回显（二轮建议） */
 function scrubbedError(text: string, key: string, status: number) {
   const s = extractUpstreamError(text, status);
-  return key && s.includes(key) ? s.split(key).join(maskKey(key)) : s;
+  return scrubSecret(s, key);
+}
+
+/** 近似回环判定：经反向代理（带 XFF）一律不算本机——reveal 明文与令牌交接只在直连本机时开放 */
+function isLocalish(c: { req: { header: (n: string) => string | undefined } }) {
+  if (c.req.header('x-forwarded-for') || c.req.header('forwarded')) return false;
+  const host = (c.req.header('host') || '').split(':')[0].replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]' || host.endsWith('.local');
+}
+
+/**
+ * 一次性交接票据（审查 A-M：长期 admin_token 进 URL fragment 会落浏览历史/同步/代理日志）。
+ * 桌面壳与 openBrowser 改为：本机取票据 → URL 只带 60s 一次性票据 → 页面 POST 换回真令牌。
+ */
+const handoffTickets = new Map<string, number>();
+export function createHandoffTicket(): string {
+  const now = Date.now();
+  for (const [t, exp] of handoffTickets) if (exp <= now) handoffTickets.delete(t);
+  const t = randomBytes(16).toString('base64url');
+  handoffTickets.set(t, now + 60_000);
+  return t;
 }
 
 function safeEq(a: string, b: string) {
@@ -25,23 +46,43 @@ function safeEq(a: string, b: string) {
 export function createAdmin(): Hono {
   const app = new Hono();
 
+  // 一次性票据换令牌：仅回环、60s、单次消费——注册在鉴权中间件之前（豁免）
+  app.post('/auth/handoff', async (c) => {
+    const b = await c.req.json().catch(() => ({} as any));
+    const t = typeof b?.ticket === 'string' ? b.ticket : '';
+    const exp = handoffTickets.get(t);
+    handoffTickets.delete(t); // 一次性：无论成败即毁
+    if (!exp || exp < Date.now() || !isLocalish(c)) return c.json({ error: 'invalid or expired handoff ticket' }, 401);
+    return c.json({ token: store.getSettings().adminToken });
+  });
+
   // ---------- 管理台鉴权 ----------
   // /logs/stream 需要 EventSource（无法带自定义头），用短期 SSE 订阅令牌代替长期 admin_token 进 URL
   const sseTickets = new Map<string, number>(); // ticket -> expiresAt
-  const TICKET_TTL = 60 * 60 * 1000;
+  const TICKET_TTL = 10 * 60 * 1000; // 60min → 10min（审查 A-L：SSE 票据窗口收窄，重连走 mint 接口重取）
   app.use('*', async (c, next) => {
     if (c.req.method === 'OPTIONS') return next();
     const expect = store.getSettings().adminToken;
     if (!expect) {
       return c.json({ error: 'unauthorized', hint: '管理令牌未配置，请设置 LLM_ADMIN_TOKEN' }, 401);
     }
-    if (safeEq(c.req.header('x-admin-token') || '', expect)) return next();
+    // 每来源 60s 内至多 20 次鉴权失败——令牌爆破不再零成本（审查 A-M；best-effort，本机直连 XFF 可自报）
+    const bucket = `adm:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
+    const rl = failureAllow(bucket, 20, 60_000);
+    if (!rl.ok) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(rl.retryAfterSec) });
+    if (safeEq(c.req.header('x-admin-token') || '', expect)) {
+      failureClear(bucket);
+      return next();
+    }
     // 仅 /logs/stream 允许 query 短令牌；其它路径一律要求头
     const path = c.req.path.replace(/^\/api/, '');
     if (path === '/logs/stream') {
       const ticket = c.req.query('ticket');
       const exp = ticket ? sseTickets.get(ticket) : undefined;
-      if (exp && exp > Date.now()) return next();
+      if (exp && exp > Date.now()) {
+        failureClear(bucket);
+        return next();
+      }
     }
     return c.json({ error: 'unauthorized', hint: '缺少或错误的 x-admin-token' }, 401);
   });
@@ -93,7 +134,8 @@ export function createAdmin(): Hono {
 
   // ---------- channels ----------
   app.get('/channels', (c) => {
-    const reveal = c.req.query('reveal') === '1';
+    // reveal=1 仅本机回环生效：LAN 里别的路由器口不能再顺走上游 key 明文（审查 A-M）
+    const reveal = c.req.query('reveal') === '1' && isLocalish(c);
     return c.json(store.listChannels().map((ch) => maskChannel(ch, reveal)));
   });
 
@@ -298,7 +340,7 @@ export function createAdmin(): Hono {
 
   // ---------- virtual keys ----------
   app.get('/vkeys', (c) => {
-    const reveal = c.req.query('reveal') === '1';
+    const reveal = c.req.query('reveal') === '1' && isLocalish(c); // 同 channels：明文仅本机
     const quotas = quotaSnapshot();
     return c.json(
       store.listVKeys().map((k) => ({
@@ -386,12 +428,18 @@ export function createAdmin(): Hono {
   app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24))));
 
   // ---------- settings ----------
-  app.get('/settings', (c) => c.json(store.getSettings()));
+  // 管理令牌不再随设置回显（审查 A-M：GET /settings 整包吐 adminToken 让任何 XSS 一步拿权）。
+  // 前端已登录即已持有令牌；配置页只看 adminTokenSet。
+  const publicSettings = (s: any) => {
+    const { adminToken, ...rest } = s;
+    return { ...rest, adminTokenSet: !!adminToken };
+  };
+  app.get('/settings', (c) => c.json(publicSettings(store.getSettings())));
   app.patch('/settings', async (c) => {
     const b = await c.req.json().catch(() => ({} as any));
     const { settings, applied, rejected } = store.applySettings(b);
     if (!applied.length && rejected.length) return c.json({ error: '所有设置项都未通过校验', rejected }, 400);
-    return c.json({ ...settings, _applied: applied, _rejected: rejected });
+    return c.json({ ...publicSettings(settings), _applied: applied, _rejected: rejected });
   });
 
   // ---------- 客户端接入示例 ----------
