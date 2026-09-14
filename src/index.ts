@@ -5,7 +5,7 @@ import { createApp } from './app.ts';
 import { store, getDataDir } from './store.ts';
 import { gcRpmWindows } from './usage.ts';
 import { envAny, openBrowser } from './bootstrap.ts';
-import { createHandoffTicket } from './admin.ts';
+import { createHandoffTicket, setShutdownHook } from './admin.ts';
 
 const PORT = Number(envAny(['OWN_API_PORT', 'PORT']) || 8787);
 const HOST = envAny(['OWN_API_HOST', 'HOST']) || '127.0.0.1';
@@ -82,6 +82,8 @@ function shutdown(reason: string) {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => shutdown(`收到 ${sig}`));
 }
+// 桌面壳退出先到这里优雅停机（落盘+关连接），拿不到时才退化为 SIGKILL
+setShutdownHook(() => shutdown('桌面壳请求停机'));
 
 // 桌面看护：OWN_API_PPID 由桌面壳传入；壳没了（含崩溃/强杀）服务绝不孤儿驻留。
 // 2s 轮询存在性；PID 复用在个人单机语境按可忽略处理

@@ -2,6 +2,7 @@
  * 桌面发行地基：环境前缀、数据目录、浏览器拉起。
  * 纯函数无副作用（store 在 import 期就调 resolveDataDir，这里绝不能藏 IO）。
  */
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -30,8 +31,7 @@ export function resolveDataDir(cwd: string = process.cwd()): string {
 /** 拉起系统默认浏览器；失败静默——它绝不能把服务本身带崩 */
 export function openBrowser(url: string): void {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { spawn } = require('node:child_process') as typeof import('node:child_process');
+    // 静态 import：tsx 文件态没有注入 globalThis.require，旧写法在 npm start 下恒静默失败（审查 E-M 实验实证）
     const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
     const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
     const child = spawn(cmd, args, { stdio: 'ignore', detached: true });

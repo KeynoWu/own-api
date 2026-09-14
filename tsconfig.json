@@ -8,7 +8,7 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
-    "strict": false,
+    "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node"],

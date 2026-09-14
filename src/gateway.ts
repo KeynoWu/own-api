@@ -837,10 +837,11 @@ async function runAuto(ctx: AutoRunCtx) {
     const detail = evals.length
       ? `（${evals
           .map((e, i) => {
-            const unauth = e.reason.includes('该 key 未授权此候选');
+            const raw = e.reason ?? '未知原因';
+            const unauth = raw.includes('该 key 未授权此候选');
             const name = unauth ? `候选${i + 1}` : e.name;
-            const reason = e.reason.replace(/渠道「[^」]*」/g, '渠道').replace(/该 key 未授权此候选/, '本 key 未授权');
-            return `${e ? '' : ''}${name}：${reason}`;
+            const reason = raw.replace(/渠道「[^」]*」/g, '渠道').replace(/该 key 未授权此候选/, '本 key 未授权');
+            return `${name}：${reason}`;
           })
           .join('；')}）`
       : '（candidates 为空）';

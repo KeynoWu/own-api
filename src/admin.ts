@@ -31,6 +31,11 @@ function isLocalish(c: { req: { header: (n: string) => string | undefined } }) {
  * 桌面壳与 openBrowser 改为：本机取票据 → URL 只带 60s 一次性票据 → 页面 POST 换回真令牌。
  */
 const handoffTickets = new Map<string, number>();
+/** index.ts 注入优雅停机动作（admin 不反向依赖 index） */
+let shutdownHookFn: (() => void) | null = null;
+export function setShutdownHook(fn: () => void) {
+  shutdownHookFn = fn;
+}
 export function createHandoffTicket(): string {
   const now = Date.now();
   for (const [t, exp] of handoffTickets) if (exp <= now) handoffTickets.delete(t);
@@ -45,6 +50,17 @@ function safeEq(a: string, b: string) {
 
 export function createAdmin(): Hono {
   const app = new Hono();
+
+  // 桌面壳优雅停机：loopback + 管理令牌双闸（豁免中间件，自带校验）
+  app.post('/shutdown', async (c) => {
+    if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
+    const expect = store.getSettings().adminToken;
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) return c.json({ error: 'unauthorized' }, 401);
+    if (!shutdownHookFn) return c.json({ error: 'shutdown hook 未注册' }, 501);
+    setTimeout(() => shutdownHookFn && shutdownHookFn(), 30); // 先让本响应冲刷出去
+    return c.json({ ok: true, note: 'shutting down' });
+  });
+  app.get('/healthz', (c) => c.json({ ok: true })); // 就绪探针（豁免区：无鉴权、无数据）
 
   // 一次性票据换令牌：仅回环、60s、单次消费——注册在鉴权中间件之前（豁免）
   app.post('/auth/handoff', async (c) => {

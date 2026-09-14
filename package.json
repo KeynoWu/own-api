@@ -12,6 +12,7 @@
     "test": "tsx test/e2e.ts",
     "test:hard": "tsx test/hardening.ts",
     "test:all": "tsx test/e2e.ts && tsx test/hardening.ts",
+    "typecheck": "tsc --noEmit",
     "gen:web": "node scripts/gen-web-html.mjs",
     "build:sea": "node scripts/build-sea.mjs",
     "desktop:prepare": "node scripts/build-sea.mjs && node scripts/prepare-desktop.mjs",
@@ -30,6 +31,6 @@
     "typescript": "^5.7.3"
   },
   "engines": {
-    "node": ">=20.11"
+    "node": ">=20.12"
   }
 }

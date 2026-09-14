@@ -478,7 +478,7 @@ class Store {
     const auto: AutoRoute = {
       id: newId('auto'),
       publicName,
-      candidates,
+      candidates: candidates ?? [],
       stickyTtlMs: ttl,
       enabled: input?.enabled !== false,
       createdAt: Date.now(),
