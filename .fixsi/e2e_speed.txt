@@ -1,0 +1,48 @@
+// ============ 17. 模型速度排行（speed-insights v1.1 钉） ============
+{
+  const usage = await import('../src/usage.ts');
+  let spdN = 0;
+  const synth = (p: Partial<any>) => store.pushLog({
+    id: 'spd-' + ++spdN, ts: Date.now(), path: '/v1/chat/completions', endpoint: 'chat', requestedModel: p.requestedModel || p.routedTo || p.publicName || '',
+    status: p.ok === false ? (p.status || 500) : 200, ok: p.ok !== false, stream: p.stream === true, latencyMs: p.latencyMs || 100,
+    attempts: p.attempts || 1, promptTokens: 1, completionTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, ...p,
+  } as any);
+  // 专享命名键（共享库卫生）：数值断言只认 spd-* 行
+  const ttfts = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240];
+  const lats = ttfts.map((x) => x * 4);
+  for (let i = 0; i < 24; i++) synth({ routedTo: 'spd-syn', stream: true, ttftMs: ttfts[i], latencyMs: lats[i] });
+  synth({ routedTo: 'spd-fo', stream: false, latencyMs: 500, attempts: 3 });
+  synth({ routedTo: 'spd-err', ok: false, status: 500, latencyMs: 80, stream: false });
+  synth({ routedTo: 'spd-cancel', ok: false, status: 499, latencyMs: 60, stream: false });
+  synth({ requestedModel: 'spd-auto-x', publicName: 'spd-cand-z', chainAttempts: [{ name: 'spd-cand-z', ok: false }], ok: false, status: 502, latencyMs: 90 });
+  synth({ publicName: 'spd-tieA', stream: true, ttftMs: 300, latencyMs: 900 }); synth({ publicName: 'spd-tieA', stream: true, ttftMs: 300, latencyMs: 900 });
+  synth({ publicName: 'spd-tieB', stream: true, ttftMs: 300, latencyMs: 900 });
+  synth({ ok: false, status: 429, latencyMs: 1, requestedModel: '' });
+  const rep: any = usage.buildSpeedStats(0);
+  const find = (rows: any[], k: string) => rows.find((r) => r.key === k);
+  const s50 = ttfts.slice().sort((a, b) => a - b)[Math.floor(24 * 0.5)];
+  const s95 = ttfts.slice().sort((a, b) => a - b)[Math.floor(24 * 0.95)];
+  const syn = find(rep.streamRows, 'spd-syn');
+  check('SI P50/P95 与 benchmark 精确（syn+index 口径）', !!syn && syn.ttftP50Ms === s50 && syn.ttftP95Ms === s95 && rep.benchmark.streamP50Ms !== undefined, JSON.stringify(syn && { p50: syn.ttftP50Ms, p95: syn.ttftP95Ms }) + ' b=' + rep.benchmark.streamP50Ms);
+  const synL = find(rep.latencyRows, 'spd-syn');
+  check('SI 延迟组双表分装且 avg 正确', !!synL && synL.latP50Ms === lats[Math.floor(24 * 0.5)] && synL.avgLatencyMs === Math.round(ttfts.reduce((s, x) => s + x, 0) * 4 / 24), JSON.stringify(synL && { p50: synL.latP50Ms, avg: synL.avgLatencyMs }));
+  const fo = find(rep.latencyRows, 'spd-fo');
+  check('SI attempts>1 剔出延迟组并进 failoverRate、排序垫后', !!fo && fo.firstAttemptN === 0 && fo.failoverRate === 1 && latencyIdxLess(rep, synL, fo), JSON.stringify(fo));
+  function latencyIdxLess(r: any, a: any, b: any) { return r.latencyRows.indexOf(a) < r.latencyRows.indexOf(b); }
+  const cancel = find(rep.latencyRows, 'spd-cancel');
+  check('SI 499 拆列：cancels=1 且 errors=0 不进速度样本', !!cancel && cancel.cancels === 1 && cancel.errors === 0 && cancel.firstAttemptN === 0 && !find(rep.streamRows, 'spd-cancel'), JSON.stringify(cancel));
+  const err = find(rep.latencyRows, 'spd-err');
+  check('SI 非 499 失败进 errors', !!err && err.errors === 1 && err.cancels === 0, JSON.stringify(err));
+  const ax = find(rep.latencyRows, 'spd-auto-x');
+  check('SI auto 链败归 auto 名（三分支归键），不归末位候选', !!ax && !find(rep.latencyRows, 'spd-cand-z'), JSON.stringify(ax && ax.key));
+  check('SI 未归因行单独返回（429 合成样本入内）', !!rep.unattributed && rep.unattributed.key === '-' && rep.unattributed.requests >= 1, JSON.stringify(rep.unattributed));
+  const idxA = rep.streamRows.findIndex((r: any) => r.key === 'spd-tieA');
+  const idxB = rep.streamRows.findIndex((r: any) => r.key === 'spd-tieB');
+  check('SI tie-break：同 P50 按 requests 降序、再 key 升序', idxA >= 0 && idxA === idxB - 1, idxA + '/' + idxB);
+  const cl1: any = (await api('/api/stats/speed?hours=-1', { headers: ADMIN })).body;
+  const cl2: any = (await api('/api/stats/speed?hours=abc', { headers: ADMIN })).body;
+  const cl3: any = (await api('/api/stats/speed?hours=1000000000000', { headers: ADMIN })).body;
+  check('SI hours 归一钳制（-1→0全窗 / abc→24 / 1e12→87600）', cl1?.window?.hours === 0 && cl2?.window?.hours === 24 && cl3?.window?.hours === 87600, [cl1?.window?.hours, cl2?.window?.hours, cl3?.window?.hours].join('/'));
+  const noauth = await fetch(BASE + '/api/stats/speed');
+  check('SI 无令牌 401', noauth.status === 401, String(noauth.status));
+}

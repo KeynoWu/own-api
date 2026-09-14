@@ -238,3 +238,92 @@ export function buildStats(rangeHours = 24): StatsSummary {
     p95Latency: pct(0.95),
   };
 }
+
+// ---------- 模型速度排行（docs/speed-insights-design.md v1.1） ----------
+export interface SpeedRow {
+  key: string;
+  requests: number;
+  errors: number;  // 非 499 失败——上游真实可靠性（DR-SI-7）
+  cancels: number; // 499——多为客户端超时/主动取消，非上游故障
+  streamN: number;
+  ttftP50Ms?: number;
+  ttftP95Ms?: number;
+  firstAttemptN: number;
+  latP50Ms?: number;
+  latP95Ms?: number;
+  avgLatencyMs?: number;
+  failoverRate: number; // 速度样本中 attempts>1 占比（换候选/换 key 税，DR-SI-5）
+  lastTs: number;
+}
+export interface SpeedReport {
+  window: { from: number; to: number; hours: number };
+  logsInWindow: number;
+  retention: number;
+  oldestTs: number;
+  benchmark: { streamP50Ms?: number; latP50Ms?: number }; // 高亮唯一基准，后端单源（DR-SI-9）
+  streamRows: SpeedRow[];
+  latencyRows: SpeedRow[];
+  unattributed: SpeedRow | null;
+}
+
+export function buildSpeedStats(rawHours: number = 24): SpeedReport {
+  const q = Number(rawHours); // DR-SI-8：归一钳制（NaN→24，clamp 0..87600），不 400
+  const hours = Number.isFinite(q) ? Math.min(Math.max(Math.trunc(q), 0), 87600) : 24;
+  const to = Date.now();
+  const from = hours > 0 ? to - hours * 3600_000 : 0;
+  const logs = store.db.logs.filter((l) => l.ts >= from);
+  // 归一键与 byRoutedTo 逐字同键（DR-SI-3）：两页数字可互相对账；auto 链败归 auto 名而非末位候选
+  const keyOf = (l: RequestLog) => l.routedTo || (l.chainAttempts?.length ? l.requestedModel : l.publicName) || '-';
+  const pctl = (arr: number[], p: number) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : undefined);
+  interface Agg { requests: number; okN: number; errors: number; cancels: number; failovers: number; ttfts: number[]; lats: number[]; lastTs: number }
+  const map = new Map<string, Agg>();
+  const allTtfts: number[] = [];
+  const allLats: number[] = [];
+  for (const l of logs) {
+    const k = keyOf(l) || '-';
+    let a = map.get(k);
+    if (!a) map.set(k, (a = { requests: 0, okN: 0, errors: 0, cancels: 0, failovers: 0, ttfts: [], lats: [], lastTs: 0 }));
+    a.requests++;
+    if (l.ts > a.lastTs) a.lastTs = l.ts;
+    if (l.ok) {
+      a.okN++;
+      if (l.stream && typeof l.ttftMs === 'number') { a.ttfts.push(l.ttftMs); allTtfts.push(l.ttftMs); }
+      if (l.attempts === 1) { a.lats.push(l.latencyMs); allLats.push(l.latencyMs); } else a.failovers++;
+    } else if (l.status === 499) a.cancels++;
+    else a.errors++;
+  }
+  const row = (key: string, a: Agg): SpeedRow => {
+    const ttfts = [...a.ttfts].sort((x, y) => x - y);
+    const lats = [...a.lats].sort((x, y) => x - y);
+    const r: SpeedRow = { key, requests: a.requests, errors: a.errors, cancels: a.cancels, streamN: ttfts.length, firstAttemptN: lats.length, failoverRate: a.okN ? Math.round((a.failovers / a.okN) * 1000) / 1000 : 0, lastTs: a.lastTs };
+    if (ttfts.length) { r.ttftP50Ms = pctl(ttfts, 0.5); r.ttftP95Ms = pctl(ttfts, 0.95); }
+    if (lats.length) { r.latP50Ms = pctl(lats, 0.5); r.latP95Ms = pctl(lats, 0.95); r.avgLatencyMs = Math.round(lats.reduce((s, x) => s + x, 0) / lats.length); }
+    return r;
+  };
+  const rows = [...map.entries()].map(([k, a]) => row(k, a));
+  const streamRows = rows.filter((r) => r.streamN > 0);
+  streamRows.sort((x, y) => ((x.ttftP50Ms ?? 0) - (y.ttftP50Ms ?? 0)) || (y.requests - x.requests) || x.key.localeCompare(y.key));
+  const latencyRows = rows.filter((r) => r.key !== '-');
+  latencyRows.sort((x, y) => {
+    if (x.latP50Ms !== undefined && y.latP50Ms !== undefined) return (x.latP50Ms - y.latP50Ms) || (y.requests - x.requests) || x.key.localeCompare(y.key);
+    if (x.latP50Ms !== undefined) return -1;
+    if (y.latP50Ms !== undefined) return 1;
+    return (y.lastTs - x.lastTs) || x.key.localeCompare(y.key); // 无速度样本行垫底（lastTs 降序）
+  });
+  const benchmark: SpeedReport['benchmark'] = {};
+  const bs = [...allTtfts].sort((x, y) => x - y);
+  const bl = [...allLats].sort((x, y) => x - y);
+  if (bs.length) benchmark.streamP50Ms = pctl(bs, 0.5);
+  if (bl.length) benchmark.latP50Ms = pctl(bl, 0.5);
+  const ua = map.get('-');
+  return {
+    window: { from, to, hours },
+    logsInWindow: logs.length,
+    retention: store.db.settings.logRetention,
+    oldestTs: logs.length ? logs[0].ts : 0,
+    benchmark,
+    streamRows,
+    latencyRows,
+    unattributed: ua ? row('-', ua) : null,
+  };
+}
