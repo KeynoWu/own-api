@@ -1,6 +1,0 @@
-// ============ 18. 速度空窗（clearLogs 放最末，不伤任何 log 依赖断言） ============
-{
-  const del = await api('/api/logs', { method: 'DELETE', headers: ADMIN });
-  const rep: any = (await api('/api/stats/speed?hours=0', { headers: ADMIN })).body;
-  check('SI 空窗 200 且三集合全空不 500', del.status === 200 && rep && rep.streamRows.length === 0 && rep.latencyRows.length === 0 && rep.unattributed === null && rep.logsInWindow === 0 && rep.oldestTs === 0, JSON.stringify(rep && { n: rep.logsInWindow }));
-}

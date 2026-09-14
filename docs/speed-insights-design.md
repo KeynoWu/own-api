@@ -1,6 +1,6 @@
 # 模型速度排行 — 设计 v1.1（方案，未实现）
 
-> 状态：**方案评审修订稿**（v1.1，2026-09-14；v1→v1.1 吸收六路联合评审 + 两项用户裁决：错误率拆两列、流式/非流式拆两表）。
+> 状态：**已实现（2026-09-14）**（v1.1 按稿落地；守护断言：test/e2e.ts §17-18 与 §21 前后、test/hardening.ts「SI-2 DOM 钉」；实现与稿面无偏差，hours 钳制/两表分装/benchmark 单源均按 DR 执行）。
 > 受众背景（全部取舍的前提）：员工本机各跑一个桌面实例，聚合公司内部多个模型端点；
 > 「有的模型慢/效率低」是**常态而非故障**——本页回答"哪个模型慢、慢多少"，支撑手动调整 auto 候选权重的决策。
 >
@@ -158,8 +158,8 @@ interface SpeedReport {
 
 ## 8. 实现后同步面（实现 PR 的 checklist）
 
-- [ ] 状态行「方案评审中」→「已实现（YYYY-MM-DD）」+ 守护断言标注 e2e 节号
-- [ ] README 核心能力表加行并链本文；「目录」节如有新文件同步
-- [ ] CHANGELOG 下一版本节补条目（用户语言）
-- [ ] README「自测」计数随实现轮次修正
-- [ ] `npm run gen:web` 同步 + WEB_HTML 同步钉保持绿；DOM 桩新钉进 hardening
+- [x] 状态行已翻（e2e §17-18 / hardening SI DOM 钉）
+- [x] README 能力表已加行并链本文
+- [x] CHANGELOG Unreleased 节已补
+- [x] 自测计数已更新（211+141）
+- [x] gen:web 已同步；DOM 钉入 hardening（renderSpeedTab 抽源钉）

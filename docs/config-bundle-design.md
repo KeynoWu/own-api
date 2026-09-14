@@ -1,6 +1,6 @@
 # 渠道与路由快速导入（Config Bundle）— 设计 v2.1（方案，未实现）
 
-> 状态：**方案评审修订稿**（v2.1，2026-09-14；v2→v2.1 吸收六路联合评审——代码事实/数据模型/安全/产品交互/可测试性/演进运维）。
+> 状态：**已实现（2026-09-14）**（v2.1 按稿落地；守护断言：test/e2e.ts §19-21、test/hardening.ts「CB-1/CB-3 DOM 钉」；§10 checklist 随实现 PR 勾销）。
 > 受众定位：员工本机各跑一个桌面实例，公司发 N 个模型端点 + 每人自己的 token。
 > v1→v2 的关键修正：**bundle 里没有密钥，密钥由用户导入时/导入后手动填入**——
 > 每个人的 token 不一样，导出来自别人 bundle 的 key 是有害无益的。
@@ -259,9 +259,9 @@ conflict 条目，不炸整包）、extraHeaders 走 `sanitizeExtraHeaders`—�
 
 ## 10. 实现后同步面（实现 PR 的 checklist）
 
-- [ ] 状态行「方案评审中」→「已实现（YYYY-MM-DD）」+ 守护断言标注 e2e 节号（先例 model-auto 文头）
-- [ ] README 核心能力表加行并链本文；「目录」节补新增文件
-- [ ] CHANGELOG 下一版本节补条目（用 v0.1.6 节的用户语言风格）
-- [ ] README「自测」计数随实现轮次修正
-- [ ] 动过 web/index.html：`npm run gen:web` 同步 + e2e 的 WEB_HTML 同步钉保持绿
-- [ ] model-auto-design.md §4.1 ①-b「硬过滤」措辞按实现订正（§4.1 末段已记）
+- [x] 状态行已翻（e2e §19-21 / hardening DOM 钉）
+- [x] README 能力表已加行并链本文；目录补 src/config-bundle.ts
+- [x] CHANGELOG Unreleased 节已补（含 speed 合并条目）
+- [x] 自测计数已更新（211+141）
+- [x] gen:web 已同步，WEB_HTML 同步钉绿
+- [ ] model-auto-design.md §4.1 ①-b「硬过滤」措辞订正（留给 model-auto 侧下一轮，非本 PR 阻塞项）

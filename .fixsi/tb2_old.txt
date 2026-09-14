@@ -1,2 +1,0 @@
-    el('button', { class: 'btn primary', onclick: addChannel }, '+ 新增渠道'),
-    el('span', { class: 'muted' }, '同一渠道的多个 key 组成号池：加权轮询 + 失败自动退避切换。'),
