@@ -1,5 +1,8 @@
 # own-api
 
+[![官网](https://img.shields.io/badge/%F0%9F%8C%90_%E5%AE%98%E7%BD%91-own--api_%E8%90%BD%E5%9C%B0%E9%A1%B5-38BDF8)](https://keynowu.github.io/own-api/)
+[![下载](https://img.shields.io/github/v/release/KeynoWu/own-api?label=%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E5%8C%85&color=22c55e)](https://github.com/KeynoWu/own-api/releases)
+
 本地大模型管理器 + 统一代理网关（号池）。
 
 一个进程同时提供 **管理台** 和 **统一代理入口**：所有 agent 只配置同一个 base_url + 同一个 key，
