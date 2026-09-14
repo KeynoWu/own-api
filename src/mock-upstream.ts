@@ -38,6 +38,7 @@ const app = new Hono();
 app.get('/v1/models', (c) => c.json({ object: 'list', data: ['mock-gpt-5', 'mock-gpt-mini', 'mock-o3'].map((id) => ({ id, object: 'model' })) }));
 app.get('/v1/messages/models', (c) => c.json({ data: [{ id: 'mock-claude-sonnet' }, { id: 'mock-claude-opus' }] }));
 app.get('/v1/messages', (c) => c.json({ data: [{ id: 'mock-claude-sonnet' }] }));
+app.get('/internal-leak', (c) => c.json({ leaked: 'ssrf-canary-42' })); // SSRF 钉金丝雀：只有跟随重定向才读得到
 
 // ---------------- OpenAI ----------------
 app.post('/v1/chat/completions', async (c) => {
@@ -46,6 +47,7 @@ app.post('/v1/chat/completions', async (c) => {
   hits.set(String(body.model), (hits.get(String(body.model)) || 0) + 1); // 触达即计数：必须早于 delay/失败分支
   const bad = fail(key);
   if (bad) return c.json(bad.body, bad.status as any, bad.retryAfter ? { 'retry-after': bad.retryAfter } : {});
+  if (body.model === 'mock-redirect') return c.redirect('/internal-leak', 302); // SSRF 闸钉：网关必须拒跟
   if (body.model === 'mock-toolong')
     return c.json({ error: { message: "This model's maximum context length is 1000 tokens. However, your messages resulted in 5000 tokens.", type: 'invalid_request_error' } }, 400 as any);
   if (body.model === 'mock-dirty-str') {

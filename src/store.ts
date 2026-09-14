@@ -27,7 +27,7 @@ function n(v: string | undefined, d: number) {
 
 function defaultSettings(): Settings {
   return {
-    adminToken: envAny(['OWN_API_ADMIN_TOKEN', 'LLM_ADMIN_TOKEN']) || `admin-${randomBytes(9).toString('base64url')}`,
+    adminToken: envAny(['OWN_API_ADMIN_TOKEN', 'LLM_ADMIN_TOKEN']) || `admin-${randomBytes(18).toString('base64url')}`,
     defaultUpstreamTimeoutMs: n(envAny(['OWN_API_UPSTREAM_TIMEOUT', 'LLM_UPSTREAM_TIMEOUT']), 300_000),
     upstreamIdleTimeoutMs: n(envAny(['OWN_API_IDLE_TIMEOUT', 'LLM_IDLE_TIMEOUT']), 120_000),
     maxBodyBytes: n(envAny(['OWN_API_MAX_BODY_BYTES', 'LLM_MAX_BODY_BYTES']), 64 * 1024 * 1024),

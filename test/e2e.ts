@@ -739,6 +739,11 @@ section('15. 修复战役回归断言（审查报告契约固化）');
 {
   const bad = await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 123, channelId: 'ch-x', upstreamModel: 'm' }) });
   check('POST /models publicName 非字符串 -> 400（此前 500）', bad.status === 400, String(bad.status));
+  const chR: any = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'redir-ch', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'openai', keys: ['k-ok-main'] }) })).body;
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'redir-me', channelId: chR.id, upstreamModel: 'mock-redirect' }) });
+  const rRed: any = await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer ' + VKEY, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'redir-me', messages: [{ role: 'user', content: 'x' }] }) });
+  const redTxt = JSON.stringify(rRed.body);
+  check('SSRF 闸：上游 302 被拒——不跟随且内网金丝雀不可达', rRed.status !== 200 && redTxt.indexOf('ssrf-canary-42') === -1, String(rRed.status) + ' ' + redTxt.slice(0, 90));
 }
 {
   const p = (await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ debugHeaders: 'false' }) })).body;

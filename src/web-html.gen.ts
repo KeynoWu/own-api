@@ -109,7 +109,7 @@ const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'class') n.className = v;
-    else if (k === 'html') n.innerHTML = v;
+    // html 键已摘除（安全审计）：全页零使用的 innerHTML 原语，不留误用入口
     else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
     else if (v !== null && v !== undefined) n.setAttribute(k, v);
   }

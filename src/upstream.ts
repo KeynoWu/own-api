@@ -131,12 +131,20 @@ export async function callUpstream(opts: {
   };
 
   try {
+    // SSRF 闸（安全审计）：manual + 显式拒绝 3xx——恶意/被劫上游不得借重定向把网关当跳板打内网/元数据地址
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(opts.body),
       signal: ac.signal,
+      redirect: 'manual',
     });
+    if (res.status >= 300 && res.status < 400) {
+      disarm();
+      dispose();
+      const loc = String(res.headers.get('location') || '').slice(0, 200);
+      return { status: 502, headers: res.headers, body: null, contentType: '', errorText: `上游重定向被拒（${res.status} → ${loc}）：网关不跟随 3xx`, dispose, abort, getStreamError: () => streamError };
+    }
 
     if (!res.ok) {
       // 审查 P3：错误体下载不得骑在响应头计时器里（慢速错误体会被误判成头超时，
