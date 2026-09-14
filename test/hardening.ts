@@ -756,6 +756,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
       }
     }
     check('OWN_API_PPID 父进程消失 -> 服务自灭（桌面壳崩溃不残留孤儿）', ghostExited, `exit=${ghost.exitCode} sig=${ghost.signalCode}`);
+    try { fs2.rmSync(ghostDir, { recursive: true, force: true }); } catch {}
   }
   const sessModeOk = process.platform === 'win32' || (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0;
   check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && sessModeOk, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
@@ -793,7 +794,6 @@ section('14. 信息暴露、usage 口径与主键完整性');
   blocker.close();
   // R5-6：临时数据目录不再越积越大——每个 spawn 块收尾自清
   try { fs2.rmSync(bootDir, { recursive: true, force: true }); } catch {}
-  try { fs2.rmSync(ghostDir, { recursive: true, force: true }); } catch {}
 }
 
 // ---------- 模块合并：v2 双表旧库自动迁移单表（真 spawn 证明升级路径不空库） ----------
