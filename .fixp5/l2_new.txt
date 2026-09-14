@@ -1,0 +1,5 @@
+if (TOKEN) api('/api/overview').then(() => boot()).catch((e) => {
+  // L2：只有 401 才清本地凭据——网络抖动/服务重启不再无故丢登录态
+  if (e && e.status === 401) { localStorage.removeItem('lm_token'); TOKEN = ''; }
+  else boot();
+});

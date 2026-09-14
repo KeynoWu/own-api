@@ -1,0 +1,1 @@
+    const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚

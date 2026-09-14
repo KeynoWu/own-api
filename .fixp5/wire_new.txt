@@ -1,0 +1,1 @@
+          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : l.wire ? 'OpenAI' : '-')));

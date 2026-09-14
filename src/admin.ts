@@ -133,7 +133,6 @@ export function createAdmin(): Hono {
   app.get('/overview', (c) => {
     const s = store.getSettings();
     const stats = buildStats(24);
-    void s;
     return c.json({
       channels: store.listChannels().map((ch) => ({
         id: ch.id,
@@ -151,6 +150,8 @@ export function createAdmin(): Hono {
       vkeys: store.listVKeys().length,
       stats,
       logs: store.db.logs.length,
+      // P5(H2)：暴露保留上限，前端在日志被裁剪时挂统计截断警示（此前是静默的）
+      logRetention: s.logRetention,
     });
   });
 

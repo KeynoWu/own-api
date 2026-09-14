@@ -1,0 +1,12 @@
+let timer = null;
+function go(v) {
+  clearInterval(timer);
+  if (v !== 'logs' && es) { es.close(); es = null; }
+  location.hash = v;
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  $('#app').innerHTML = '';
+  $('#app').append(views.loading());
+  Promise.resolve(views[v]())
+    .then((node) => { $('#app').innerHTML = ''; $('#app').append(node); })
+    .catch((e) => { $('#app').innerHTML = ''; $('#app').append(el('div', { class: 'card err-text' }, e.message)); });
+}

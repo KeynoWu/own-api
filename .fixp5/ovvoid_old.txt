@@ -1,0 +1,2 @@
+    const stats = buildStats(24);
+    void s;

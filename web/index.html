@@ -125,7 +125,7 @@ const el = (tag, attrs = {}, ...kids) => {
 let TOKEN = localStorage.getItem('lm_token') || '';
 const api = async (path, opt = {}) => {
   const res = await fetch(path, { ...opt, headers: { 'content-type': 'application/json', 'x-admin-token': TOKEN, ...(opt.headers || {}) } });
-  if (res.status === 401) { throw new Error('管理令牌无效，请重新输入'); }
+    if (res.status === 401) { const err = new Error('管理令牌无效，请重新输入'); err.status = 401; throw err; }
   const txt = await res.text();
   let body; try { body = txt ? JSON.parse(txt) : {}; } catch { body = { raw: txt }; }
   if (!res.ok) throw new Error(body?.error?.message || body?.error || `HTTP ${res.status}`);
@@ -230,22 +230,30 @@ function form(title, fields, onSubmit) {
   dlg.append(el('h3', {}, title), body, el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' },
     el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
     el('button', { class: 'btn primary', onclick: submit }, '保存')));
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal(); // M1：表单叠开时旧弹窗仍处 open，showModal 抛 InvalidStateError 吞掉整个入口
 }
 
 // ---------------- 路由 ----------------
 const views = {};
 let timer = null;
+let viewGen = 0;
 function go(v) {
+  const gen = ++viewGen; // M4：视图代际守卫——慢视图的过期响应不得覆盖新视图
   clearInterval(timer);
   if (v !== 'logs' && es) { es.close(); es = null; }
   location.hash = v;
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
   $('#app').innerHTML = '';
   $('#app').append(views.loading());
-  Promise.resolve(views[v]())
-    .then((node) => { $('#app').innerHTML = ''; $('#app').append(node); })
-    .catch((e) => { $('#app').innerHTML = ''; $('#app').append(el('div', { class: 'card err-text' }, e.message)); });
+  Promise.resolve((views[v] || views.overview)()) // L1：未知 hash 回落概览，不再白屏炸掉
+    .then((node) => { if (gen !== viewGen) return; $('#app').innerHTML = ''; $('#app').append(node); })
+    .catch((e) => {
+      if (gen !== viewGen) return;
+      $('#app').innerHTML = '';
+      $('#app').append(el('div', { class: 'card err-text' }, e.message));
+      // M4：失败分支同样重挂刷新计时——瞬时抖动不该让挂机页失去自愈
+      if (v === 'overview' && ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
+    });
 }
 
 views.loading = () => el('div', { class: 'muted' }, '加载中…');
@@ -318,7 +326,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
   views.overview = async () => {
     const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
     const box = el('div');
-    const from = Date.now() - ovSt.hours * 3600e3;
+    const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
     let logs = allLogs.filter((l) => l.ts >= from);
     const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
     if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
@@ -332,6 +340,9 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
         sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
         sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
       )));
+    if (o.logRetention && allLogs.length >= o.logRetention) {
+      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'));
+    }
     const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
     const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
     const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
@@ -395,7 +406,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
           el('td', { class: 'mono' }, money(l.costUsd)),
           el('td', { class: 'mono muted' }, l.latencyMs + 'ms' + (l.ttftMs ? ' / ' + l.ttftMs + 'ms' : '')),
           el('td', {}, el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status))),
-          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : 'OpenAI')));
+          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : l.wire ? 'OpenAI' : '-')));
       }
       if (!rows.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
       box.append(t);
@@ -482,8 +493,8 @@ views.models = async () => {
     if (new Set(candidates.map((c) => c.routeId)).size !== candidates.length) throw new Error('候选模型不能重复');
     if (candidates.some((c) => !Number.isFinite(c.weight) || c.weight < 0)) throw new Error('权重须为 ≥0 的数字');
     if (!candidates.length) throw new Error('至少填一个候选');
-    const body = a ? { publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined }
-      : { type: 'auto', publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined };
+    const body = a ? { publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || '' }
+      : { type: 'auto', publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || '' };
     return api(a ? '/api/routes/' + a.id : '/api/routes', { method: a ? 'PATCH' : 'POST', body: JSON.stringify(body) })
       .then((r) => { if (r && r.error) throw new Error(r.error); toast('已保存'); go('models'); });
   });
@@ -654,7 +665,7 @@ views.vkeys = async () => {
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: () => form('创建对外 Key', [
       { name: 'name', label: '名称（如 claude-code / codex / 团队 A）' },
-      { name: 'allowed', label: '允许的模型（逗号分隔，留空 = 全部）', full: true },
+      { name: 'allowed', label: '允许的模型（逗号分隔，留空 = 全部；按对外名匹配，auto 路由名同样可填）', full: true },
       { name: 'rpmLimit', label: 'RPM 上限（0 = 不限）', type: 'number' },
       { name: 'dailyTokenLimit', label: '每日 token 上限（0 = 不限）', type: 'number' },
     ], (v) => api('/api/vkeys', { method: 'POST', body: JSON.stringify({
@@ -742,13 +753,30 @@ views.logs = async () => {
   };
   if (es) es.close();
   es = null;
-  const tk = await api('/api/logs/stream/ticket', { method: 'POST' }).catch(() => null);
-  if (tk?.ticket) {
-    es = new EventSource(`/api/logs/stream?ticket=${encodeURIComponent(tk.ticket)}`);
-    es.onmessage = (m) => {
-      try { JSON.parse(m.data).forEach((l) => { if (!onlyErr || !l.ok) list.prepend(render(l)); }); } catch {}
+  // M3：SSE 首帧快照与屏上已有条目按 seq 去重——竞态窗口内不再双份渲染
+  const seenSeq = new Set(first.map((l) => l.seq));
+  const onSseMsg = (m) => {
+    try {
+      JSON.parse(m.data).forEach((l) => {
+        if (l.seq != null && seenSeq.has(l.seq)) return;
+        seenSeq.add(l.seq);
+        if (!onlyErr || !l.ok) list.prepend(render(l));
+      });
+    } catch {}
+  };
+  let sseTry = 0;
+  const connectSse = (ticket) => {
+    if (es) { es.close(); es = null; }
+    es = new EventSource('/api/logs/stream?ticket=' + encodeURIComponent(ticket));
+    es.onmessage = onSseMsg;
+    es.onerror = () => {
+      // L5：票据过期后 EventSource 拿旧 URL 无限重连（401 死循环）——重发票据再接，至多两次
+      if (sseTry++ >= 2 || !list.isConnected) { if (es) { es.close(); es = null; } return; }
+      api('/api/logs/stream/ticket', { method: 'POST' }).then((t2) => { if (t2 && t2.ticket && list.isConnected) connectSse(t2.ticket); }).catch(() => {});
     };
-  }
+  };
+  const tk = await api('/api/logs/stream/ticket', { method: 'POST' }).catch(() => null);
+  if (tk && tk.ticket) connectSse(tk.ticket);
 
   box.append(el('div', { class: 'toolbar' },
     el('label', { class: 'row', style: 'gap:6px' }, el('input', { type: 'checkbox', onchange: (e) => { onlyErr = e.target.checked; reload(); } }), el('span', { class: 'muted' }, '只看失败')),
@@ -839,7 +867,11 @@ function boot() {
   api('/healthz').then((h) => { $('#hdr-sub').textContent = `${h.channels} 渠道 · ${h.models} 模型 · ${h.vkeys} 对外 key`; });
 }
 
-if (TOKEN) api('/api/overview').then(() => boot()).catch(() => { localStorage.removeItem('lm_token'); TOKEN = ''; });
+if (TOKEN) api('/api/overview').then(() => boot()).catch((e) => {
+  // L2：只有 401 才清本地凭据——网络抖动/服务重启不再无故丢登录态
+  if (e && e.status === 401) { localStorage.removeItem('lm_token'); TOKEN = ''; }
+  else boot();
+});
 </script>
 </body>
 </html>

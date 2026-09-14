@@ -1,0 +1,20 @@
+let timer = null;
+let viewGen = 0;
+function go(v) {
+  const gen = ++viewGen; // M4：视图代际守卫——慢视图的过期响应不得覆盖新视图
+  clearInterval(timer);
+  if (v !== 'logs' && es) { es.close(); es = null; }
+  location.hash = v;
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  $('#app').innerHTML = '';
+  $('#app').append(views.loading());
+  Promise.resolve((views[v] || views.overview)()) // L1：未知 hash 回落概览，不再白屏炸掉
+    .then((node) => { if (gen !== viewGen) return; $('#app').innerHTML = ''; $('#app').append(node); })
+    .catch((e) => {
+      if (gen !== viewGen) return;
+      $('#app').innerHTML = '';
+      $('#app').append(el('div', { class: 'card err-text' }, e.message));
+      // M4：失败分支同样重挂刷新计时——瞬时抖动不该让挂机页失去自愈
+      if (v === 'overview' && ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
+    });
+}
