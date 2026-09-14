@@ -151,6 +151,7 @@ const clock = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false });
 const proto = (p) => el('span', { class: 'pill ' + (p === 'anthropic' ? 'ant' : 'oai') }, p === 'anthropic' ? 'Anthropic' : 'OpenAI');
 
 // ---------------- 弹窗表单 ----------------
+let formSeq = 0;
 function form(title, fields, onSubmit) {
   const dlg = $('#dlg');
   const inputs = {};
@@ -221,16 +222,19 @@ function form(title, fields, onSubmit) {
     }
   }
 
+  const myForm = ++formSeq; // 表单叠开（类型选择→具体表单）时的本实例标识
   const submit = async () => {
     const vals = {};
     for (const f of fields) vals[f.name] = f.type === 'cands' ? inputs[f.name].__get() : inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
-    try { await onSubmit(vals); dlg.close(); } catch (e) { toast(e.message, true); }
+    try { await onSubmit(vals); if (dlg.__form === myForm) dlg.close(); } catch (e) { toast(e.message, true); }
   };
+  if (dlg.open) dlg.close(); // 叠开先退旧场再入幕
+  dlg.__form = myForm;
   dlg.innerHTML = '';
   dlg.append(el('h3', {}, title), body, el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' },
     el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
     el('button', { class: 'btn primary', onclick: submit }, '保存')));
-  if (!dlg.open) dlg.showModal(); // M1：表单叠开时旧弹窗仍处 open，showModal 抛 InvalidStateError 吞掉整个入口
+  dlg.showModal(); // M1（修订）：先 close 化解旧 InvalidStateError；上一版「已开则跳过」反而把刚打开的新表单关掉
 }
 
 // ---------------- 路由 ----------------
