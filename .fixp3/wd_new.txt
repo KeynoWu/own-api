@@ -1,0 +1,17 @@
+        const watchdogMs = a.headTimeoutMs + a.idleTimeoutMs * 8;
+        let wd: ReturnType<typeof setTimeout> | undefined;
+        // 审查 P3：绝对时限改进度时限——每个 chunk 过境即重挂。合法慢流（超长生成
+        // 超过 head+8×idle）不再被误杀；下游冻结/半开照旧在 8×idle 静默后被掐。
+        const armWd = () => {
+          if (wd) clearTimeout(wd);
+          wd = setTimeout(() => {
+            wd = undefined;
+            // 修复（审查 M1）：dispose 从不 abort、还拆掉断开桥 → 上游被无限钉住。改为真 abort 掐断上游；
+            // finished 兜底记账（pump 停摆时错误无处抛出）——finalize 幂等，pump 醒来再 fire 也只记一次。
+            const werr = new Error(`流 ${Math.round(watchdogMs / 1000)}s 无任何数据推进（下游疑似停读/半开）`);
+            up.abort(werr.message);
+            finished(werr);
+          }, watchdogMs);
+          wd.unref?.();
+        };
+        armWd();

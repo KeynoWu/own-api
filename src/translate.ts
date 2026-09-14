@@ -515,6 +515,7 @@ export function legacyToChatRequest(body: any): any {
   const messages = Array.isArray(body.messages) && body.messages.length ? body.messages : undefined;
   out.messages = messages || [{ role: 'user', content }];
   if (body.max_tokens !== undefined && out.max_completion_tokens === undefined) out.max_completion_tokens = body.max_tokens;
+  delete out.max_tokens; // 裁决（P3）：换算后必删旧字段——推理模型族双字段并发 400（本函数注释同款理由）
   return out;
 }
 

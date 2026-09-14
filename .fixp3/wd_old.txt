@@ -1,0 +1,10 @@
+        const watchdogMs = a.headTimeoutMs + a.idleTimeoutMs * 8;
+        let wd: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+          wd = undefined;
+          // 修复（审查 M1）：dispose 从不 abort、还拆掉断开桥 → 上游被无限钉住。改为真 abort 掐断上游；
+          // finished 兜底记账（pump 停摆时错误无处抛出）——finalize 幂等，pump 醒来再 fire 也只记一次。
+          const werr = new Error(`流绝对时限 ${Math.round(watchdogMs / 1000)}s 到达（下游疑似停读/半开）`);
+          up.abort(werr.message);
+          finished(werr);
+        }, watchdogMs);
+        wd.unref?.();

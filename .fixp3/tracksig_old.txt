@@ -1,0 +1,2 @@
+  errorFrame: (msg: string) => string,
+): ReadableStream<Uint8Array> {

@@ -483,6 +483,9 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
         // **永不补发事件**（node 实测），裸挂监听器恰好治不到 M5 宣称要治的场景；
         // 且 node-server 对 destroyed writable 直接 return（不 pull 不 cancel）。必须先复查。
         if (c.req.raw.signal.aborted) {
+          // 审查 P3：dispose 只拆计时器与桥——已建立的上游响应体不 cancel，会挂到空闲超时；
+          // 先 abort 掐断上游体，再 dispose 拆桥
+          up.abort('客户端在嗅探窗口已断开');
           up.dispose();
           return { kind: 'client_abort' };
         }
@@ -493,15 +496,22 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
         // 提交点挂绝对时限 watchdog（默认 ~head+8×idle，刻意宽松到正常流远不可达），
         // 触发即掐上游并记 502，杜绝被冻结客户端无限期钉住预占/日志/连接
         const watchdogMs = a.headTimeoutMs + a.idleTimeoutMs * 8;
-        let wd: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-          wd = undefined;
-          // 修复（审查 M1）：dispose 从不 abort、还拆掉断开桥 → 上游被无限钉住。改为真 abort 掐断上游；
-          // finished 兜底记账（pump 停摆时错误无处抛出）——finalize 幂等，pump 醒来再 fire 也只记一次。
-          const werr = new Error(`流绝对时限 ${Math.round(watchdogMs / 1000)}s 到达（下游疑似停读/半开）`);
-          up.abort(werr.message);
-          finished(werr);
-        }, watchdogMs);
-        wd.unref?.();
+        let wd: ReturnType<typeof setTimeout> | undefined;
+        // 审查 P3：绝对时限改进度时限——每个 chunk 过境即重挂。合法慢流（超长生成
+        // 超过 head+8×idle）不再被误杀；下游冻结/半开照旧在 8×idle 静默后被掐。
+        const armWd = () => {
+          if (wd) clearTimeout(wd);
+          wd = setTimeout(() => {
+            wd = undefined;
+            // 修复（审查 M1）：dispose 从不 abort、还拆掉断开桥 → 上游被无限钉住。改为真 abort 掐断上游；
+            // finished 兜底记账（pump 停摆时错误无处抛出）——finalize 幂等，pump 醒来再 fire 也只记一次。
+            const werr = new Error(`流 ${Math.round(watchdogMs / 1000)}s 无任何数据推进（下游疑似停读/半开）`);
+            up.abort(werr.message);
+            finished(werr);
+          }, watchdogMs);
+          wd.unref?.();
+        };
+        armWd();
         const trackFinished = (err?: any, kind?: 'cancel') => {
           if (wd) {
             clearTimeout(wd);
@@ -510,7 +520,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
           finished(err, kind);
         };
         a.onCommitted(); // 提交点：粘性/审计在此定格（§8-1：此后不可能再换候选）
-        return { kind: 'response', res: c.body(track(out, trackFinished, errorFrame), 200, {
+        return { kind: 'response', res: c.body(track(out, trackFinished, errorFrame, armWd), 200, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache, no-transform',
           'x-accel-buffering': 'no',
@@ -576,6 +586,7 @@ function track(
   stream: ReadableStream<Uint8Array>,
   onDone: (err?: any, kind?: 'cancel') => void,
   errorFrame: (msg: string) => string,
+  onProgress?: () => void, // 审查 P3：看门狗进度心跳
 ): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
   let fired = false;
@@ -600,6 +611,7 @@ function track(
           fire();
           controller.close();
         } else if (value !== undefined) {
+          onProgress?.();
           controller.enqueue(value);
         }
       } catch (err: any) {
@@ -647,6 +659,8 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
   // 请求体上限：不设限的话一个超大 body 就能把进程内存吃光
   const declared = Number(c.req.header('content-length') || 0);
   if (declared && declared > settings.maxBodyBytes) {
+    // 审查 P3：门槛前的 413/400 也要进审计，否则控制台对流言扫描/滥用永远失明
+    pushLog(baseLog(t0, vkey, c, wire, op), { status: 413, ok: false, error: 'declared content-length too large' });
     return fail(c, wire, 413, `request body too large (${declared} > ${settings.maxBodyBytes} bytes)`);
   }
 
@@ -685,7 +699,10 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
 
   // C5（二轮）：model 落库必须限长——64MB 的 model 字段会经全量 stringify 冻结事件循环
   const requestedModel = String(body.model || '').slice(0, 256);
-  if (!requestedModel) return fail(c, wire, 400, 'missing "model" field');
+  if (!requestedModel) {
+    pushLog(baseLog(t0, vkey, c, wire, op), { status: 400, ok: false, error: 'missing model field' });
+    return fail(c, wire, 400, 'missing "model" field');
+  }
 
   const log = baseLog(t0, vkey, c, wire, op);
   log.requestedModel = requestedModel;

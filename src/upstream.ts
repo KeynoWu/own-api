@@ -59,6 +59,26 @@ export interface UpstreamResult {
  *  - 空闲超时：流式响应体连续 idleMs 没有任何字节即中断
  * 只给响应头设超时是不够的——上游 200 后卡死会让客户端永久挂起。
  */
+/** 小文本限读（错误体，审查 P3）：超上限即 cancel，不整段下载 */
+async function readCapped(body: ReadableStream<Uint8Array> | null, cap: number): Promise<string> {
+  if (!body) return '';
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let s = '';
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value?.byteLength ?? 0;
+    s += dec.decode(value, { stream: true });
+    if (n >= cap) {
+      await reader.cancel().catch(() => {});
+      break;
+    }
+  }
+  return s + dec.decode();
+}
+
 export async function callUpstream(opts: {
   channel: Channel;
   apiKey: string;
@@ -117,7 +137,11 @@ export async function callUpstream(opts: {
     });
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      // 审查 P3：错误体下载不得骑在响应头计时器里（慢速错误体会被误判成头超时，
+      // 语义错位）；换挂空闲超时并限读 8KB——故障上游再也拖不动连接
+      disarm();
+      arm(opts.idleTimeoutMs > 0 ? opts.idleTimeoutMs : 10_000, '上游错误体读取空闲超时');
+      const text = await readCapped(res.body, 8192).catch(() => '');
       dispose();
       return {
         status: res.status,

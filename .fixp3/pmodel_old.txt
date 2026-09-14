@@ -1,0 +1,1 @@
+  if (!requestedModel) return fail(c, wire, 400, 'missing "model" field');

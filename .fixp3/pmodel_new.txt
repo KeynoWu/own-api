@@ -1,0 +1,4 @@
+  if (!requestedModel) {
+    pushLog(baseLog(t0, vkey, c, wire, op), { status: 400, ok: false, error: 'missing model field' });
+    return fail(c, wire, 400, 'missing "model" field');
+  }

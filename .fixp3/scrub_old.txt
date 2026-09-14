@@ -1,0 +1,3 @@
+  const b64 = Buffer.from(k, 'utf8').toString('base64');
+  variants.add(b64);
+  variants.add(b64.replace(/=+$/, ''));

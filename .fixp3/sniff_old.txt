@@ -1,0 +1,4 @@
+        if (c.req.raw.signal.aborted) {
+          up.dispose();
+          return { kind: 'client_abort' };
+        }

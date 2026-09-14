@@ -1,0 +1,2 @@
+  if (body.max_tokens !== undefined && out.max_completion_tokens === undefined) out.max_completion_tokens = body.max_tokens;
+  return out;

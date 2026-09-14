@@ -917,6 +917,22 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('scrubSecret 遮罩原文+URL编码+base64（含去padding）四变体', !out.includes(encv) && !out.includes(b64) && !out.includes(k) && !out.includes(b64np), out.slice(0, 80));
 }
 {
+  const { scrubSecret } = await import('../src/store.ts');
+  const k = 'sk-lm-TESTKEY0123456789abcdef';
+  const b64u = Buffer.from(k).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const lowPct = encodeURIComponent(k).replace(/%([0-9A-F]{2})/g, (_m: string, h: string) => '%' + h.toLowerCase());
+  const out2 = scrubSecret('u=' + b64u + ' p=' + lowPct, k);
+  check('P3 scrubSecret 遮罩 base64url 与小写-%xx 变体', !out2.includes(b64u) && !out2.includes(lowPct) && out2.includes('***'), out2.slice(0, 90));
+}
+{
+  const t: any = await import('../src/translate.ts');
+  const fn = t.legacyToChatRequest ?? t.default?.legacyToChatRequest;
+  const out3 = fn ? fn({ model: 'm', prompt: 'hi', max_tokens: 64 }) : null;
+  check('P3 legacy→chat 换算后双字段不并存（max_tokens 已删）', !!out3 && out3.max_completion_tokens === 64 && out3.max_tokens === undefined, JSON.stringify(out3 && [out3.max_completion_tokens, out3.max_tokens]));
+}
+
+//
+{
   const { anthropicToOpenaiRequest } = await import('../src/translate.ts');
   const userMsg = { role: 'user', content: [{ type: 'text', text: 'hi' }] };
   const r5 = anthropicToOpenaiRequest({ model: 'x', max_tokens: 999, messages: [userMsg] }, { upstreamModel: 'gpt-5-pro', defaultMaxTokens: 1000 });

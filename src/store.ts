@@ -804,6 +804,13 @@ export function scrubSecret(s: string, k: string) {
   const b64 = Buffer.from(k, 'utf8').toString('base64');
   variants.add(b64);
   variants.add(b64.replace(/=+$/, ''));
+  // 审查 P3：base64url（JWT 圈惯例变体）与小写-%xx（日志二次转义后的大小写形态）也进变体集
+  variants.add(b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''));
+  try {
+    variants.add(encodeURIComponent(k).replace(/%([0-9A-F]{2})/g, (_m, h) => '%' + h.toLowerCase()));
+  } catch {
+    /* ignore */
+  }
   for (const v of variants) {
     if (v && out.includes(v)) out = out.split(v).join(mask);
   }

@@ -1,0 +1,3 @@
+        } else if (value !== undefined) {
+          onProgress?.();
+          controller.enqueue(value);

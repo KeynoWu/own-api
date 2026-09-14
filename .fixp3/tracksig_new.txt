@@ -1,0 +1,3 @@
+  errorFrame: (msg: string) => string,
+  onProgress?: () => void, // 审查 P3：看门狗进度心跳
+): ReadableStream<Uint8Array> {

@@ -1,0 +1,3 @@
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      dispose();

@@ -1,0 +1,7 @@
+    if (!res.ok) {
+      // 审查 P3：错误体下载不得骑在响应头计时器里（慢速错误体会被误判成头超时，
+      // 语义错位）；换挂空闲超时并限读 8KB——故障上游再也拖不动连接
+      disarm();
+      arm(opts.idleTimeoutMs > 0 ? opts.idleTimeoutMs : 10_000, '上游错误体读取空闲超时');
+      const text = await readCapped(res.body, 8192).catch(() => '');
+      dispose();

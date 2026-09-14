@@ -1,0 +1,5 @@
+  finish() {
+    const tail = this.text.trim();
+    this.text = '';
+    if (tail) this.scan(tail);
+  }
