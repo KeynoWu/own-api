@@ -115,9 +115,10 @@ function frameTransform(
           onFirst?.();
         }
         buf = normalizeNewlines(buf + dec.decode(chunk, { stream: true }));
-        if (buf.length > MAX_FRAME_BUF) throw new Error('SSE 帧缓冲超上限：上游长时间未给出帧边界');
         const { frames, rest } = drainFrames(buf);
         buf = rest;
+        // F5：上限在 drain 之后判——含完整帧的良构大块不该被误杀，只有迟迟切不出帧才算越界
+        if (buf.length > MAX_FRAME_BUF) throw new Error('SSE 帧缓冲超上限：上游长时间未给出帧边界');
         const emit: Emit = (c) => controller.enqueue(typeof c === 'string' ? enc.encode(c) : c);
         for (const f of frames) {
           const ev = parseFrame(f);
@@ -211,11 +212,17 @@ export function passthroughStream(
           sc.feed(chunk.slice());
           buf += dec.decode(chunk, { stream: true });
           for (;;) {
-            const m = buf.match(/\r?\n\r?\n/);
+            // F1：SSE 规范允许 CR 作行终止符——CR-CR 不切则整条流零字节、buf 无界
+            const m = buf.match(/\r?\n\r?\n|\r\r/);
             if (!m || m.index === undefined) break;
             const frame = buf.slice(0, m.index + m[0].length);
             buf = buf.slice(m.index + m[0].length);
             emitFrame(frame, controller);
+          }
+          if (buf.length > MAX_FRAME_BUF) {
+            // F1：字节保真是本分支契约——超限的原样冲刷（超大帧放弃 scrub），内存与重扫双双有界
+            controller.enqueue(enc.encode(buf));
+            buf = '';
           }
         },
         flush(controller) {
@@ -246,7 +253,11 @@ export function passthroughStream(
       }
       scanUsage(json, protocol, meta);
       // 审查 H1：改写分支同样过掩码——error 帧不属于跨协议路径专属
-      if (json.error && typeof json.error === 'object' && typeof json.error.message === 'string' && meta.scrub) json.error.message = meta.scrub(json.error.message);
+      if (json.error && typeof json.error === 'object' && meta.scrub) {
+        // F2c 对齐零改写分支：message 非字符串（对象/数组）也过 scrub，双分支掩码口径一致
+        if (typeof json.error.message === 'string') json.error.message = meta.scrub(json.error.message);
+        else if (json.error.message !== undefined) json.error.message = meta.scrub(JSON.stringify(json.error.message));
+      }
       else if (typeof json.error === 'string' && meta.scrub) json.error = meta.scrub(json.error);
       if (json.model !== undefined) json.model = modelRewrite.to;
       if (protocol === 'anthropic' && json.type === 'message_start' && json.message) json.message.model = modelRewrite.to;
@@ -257,21 +268,43 @@ export function passthroughStream(
   );
 }
 
-/** error 帧掩码（审查 H1）：帧内含 "error" 才尝试解析 data 行；解析失败/无 message 一律原帧返回 */
+/**
+ * error 帧掩码（审查 H1；R4-F2 补全）：
+ * - data 按 SSE 规范多行合并再解析（上游合法拆行不再是 parse 失败=原帧外发的泄漏面）；
+ * - error 为字符串、error.message 为对象/数组，同样过 scrub（此前只认 {message:string}，
+ *   同一 H1 补丁在零改写/改写两分支间漂移，别名与否竟决定泄不泄漏）。
+ */
 function scrubErrorFrame(frame: string, meta: { scrub?: (s: string) => string }): string {
   if (!meta.scrub || !frame.includes('error')) return frame;
-  return frame.replace(/(data:\s?)([^\r\n]+)/g, (all: string, head: string, payload: string) => {
-    if (payload === '[DONE]') return all;
-    try {
-      const j = JSON.parse(payload);
-      const e = j && j.error;
-      if (!e || typeof e.message !== 'string') return all;
-      e.message = meta.scrub!(e.message);
-      return head + JSON.stringify(j);
-    } catch {
-      return all;
-    }
+  const parts = frame.split(/\r?\n/);
+  const dataIdx: number[] = [];
+  let payload = '';
+  parts.forEach((ln, i) => {
+    const m = ln.match(/^data:[ \t]?(.*)$/);
+    if (m) { dataIdx.push(i); payload += (payload ? '\n' : '') + m[1]; }
   });
+  if (!dataIdx.length || payload === '[DONE]') return frame;
+  try {
+    const j = JSON.parse(payload);
+    const e = j && j.error;
+    if (!e) return frame;
+    if (typeof e === 'string') j.error = meta.scrub(e);
+    else if (typeof e === 'object') {
+      if (typeof e.message === 'string') e.message = meta.scrub(e.message);
+      else if (e.message !== undefined) e.message = meta.scrub(JSON.stringify(e.message));
+      else return frame;
+    } else return frame;
+    const out = JSON.stringify(j).split('\n').map((l) => 'data: ' + l).join('\n');
+    const rebuilt: string[] = [];
+    let wrote = false;
+    parts.forEach((ln, i) => {
+      if (dataIdx.includes(i)) { if (!wrote) { rebuilt.push(out); wrote = true; } return; }
+      rebuilt.push(ln);
+    });
+    return rebuilt.join('\n');
+  } catch {
+    return frame;
+  }
 }
 
 /** 增量旁扫 usage 的行缓冲。每条流必须持有独立实例，不能共享 */
@@ -286,10 +319,10 @@ class UsageSc {
   }
   feed(chunk: Uint8Array) {
     this.text = normalizeNewlines(this.text + this.dec.decode(chunk, { stream: true }));
-    // 旁扫缓冲同样设上限（审查 L8）：超限抛错经 track 转协议内 error 帧，不再无界增长
-    if (this.text.length > MAX_FRAME_BUF) throw new Error('SSE 旁扫缓冲超上限：上游长时间未给出帧边界');
     const { frames, rest } = drainFrames(this.text);
     this.text = rest;
+    // 旁扫缓冲上限（审查 L8；F5 移位）：drain 后仍越界才是真无边界，超限抛错经 track 转协议内 error 帧
+    if (this.text.length > MAX_FRAME_BUF) throw new Error('SSE 旁扫缓冲超上限：上游长时间未给出帧边界');
     for (const f of frames) this.scan(f);
   }
   finish() {

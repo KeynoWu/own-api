@@ -1,2 +1,0 @@
-views.models = async () => {
-  const [routes, channels, rt] = await Promise.all([api('/api/routes'), api('/api/channels'), api('/api/auto-health')]);

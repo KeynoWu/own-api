@@ -1,2 +1,0 @@
-    el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
-    el('button', { class: 'btn primary', onclick: submit }, '保存')));

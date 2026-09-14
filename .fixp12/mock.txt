@@ -1,0 +1,13 @@
+  if (body.model === 'mock-dirty-str') {
+    // P6+(R4-F2) fixture：error 帧三形态——string error / 多行 data 拆分的 message / 对象 message
+    const k = typeof key === 'string' ? key : 'nosuchkey';
+    const frames = [
+      'data: {"error":"upstream leaked ' + k + '"}\n\n',
+      'data: {"error":{"message":\ndata: "split leaked ' + k + '"}}\n\n',
+      'data: {"error":{"message":{"deep":"' + k + '"}}}\n\n',
+    ];
+    return new Response(
+      new ReadableStream({ start(ctrl) { const enc = new TextEncoder(); for (const f of frames) ctrl.enqueue(enc.encode(f)); ctrl.close(); } }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }

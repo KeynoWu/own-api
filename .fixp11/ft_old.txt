@@ -1,0 +1,4 @@
+        buf = normalizeNewlines(buf + dec.decode(chunk, { stream: true }));
+        if (buf.length > MAX_FRAME_BUF) throw new Error('SSE 帧缓冲超上限：上游长时间未给出帧边界');
+        const { frames, rest } = drainFrames(buf);
+        buf = rest;

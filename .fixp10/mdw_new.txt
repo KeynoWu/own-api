@@ -1,3 +1,0 @@
-views.models = async () => {
-  const myGen = viewGen; // F1：同 overview——过期代际不得留下 15s 孤儿定时器
-  const [routes, channels, rt] = await Promise.all([api('/api/routes'), api('/api/channels'), api('/api/auto-health')]);

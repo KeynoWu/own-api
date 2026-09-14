@@ -1,3 +1,0 @@
-  views.overview = async () => {
-    const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
-    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);

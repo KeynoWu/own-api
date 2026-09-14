@@ -1,0 +1,16 @@
+/** error 帧掩码（审查 H1）：帧内含 "error" 才尝试解析 data 行；解析失败/无 message 一律原帧返回 */
+function scrubErrorFrame(frame: string, meta: { scrub?: (s: string) => string }): string {
+  if (!meta.scrub || !frame.includes('error')) return frame;
+  return frame.replace(/(data:\s?)([^\r\n]+)/g, (all: string, head: string, payload: string) => {
+    if (payload === '[DONE]') return all;
+    try {
+      const j = JSON.parse(payload);
+      const e = j && j.error;
+      if (!e || typeof e.message !== 'string') return all;
+      e.message = meta.scrub!(e.message);
+      return head + JSON.stringify(j);
+    } catch {
+      return all;
+    }
+  });
+}

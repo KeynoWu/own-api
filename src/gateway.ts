@@ -417,7 +417,10 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
 
     const routeId = route?.id;
     // W1/§8-4：客户端中途取消 → 独立"取消"终态，双向剔除出健康分分子分母（既不算成功也不算失败）
+    let settleOnce = false; // F3：watchdog 先手 finished、pump catch 再手 fire——终态与候选健康样本只记第一次（注释早承诺，实现没兜住）
     const finished = (err?: any, kind?: 'cancel') => {
+      if (settleOnce) return;
+      settleOnce = true;
       if (kind === 'cancel') {
         a.finalize(
           {

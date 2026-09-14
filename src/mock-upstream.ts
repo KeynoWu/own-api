@@ -48,6 +48,19 @@ app.post('/v1/chat/completions', async (c) => {
   if (bad) return c.json(bad.body, bad.status as any, bad.retryAfter ? { 'retry-after': bad.retryAfter } : {});
   if (body.model === 'mock-toolong')
     return c.json({ error: { message: "This model's maximum context length is 1000 tokens. However, your messages resulted in 5000 tokens.", type: 'invalid_request_error' } }, 400 as any);
+  if (body.model === 'mock-dirty-str') {
+    // P6+(R4-F2) fixture：error 帧三形态——string error / 多行 data 拆分的 message / 对象 message
+    const k = typeof key === 'string' ? key : 'nosuchkey';
+    const frames = [
+      'data: {"error":"upstream leaked ' + k + '"}\n\n',
+      'data: {"error":{"message":\ndata: "split leaked ' + k + '"}}\n\n',
+      'data: {"error":{"message":{"deep":"' + k + '"}}}\n\n',
+    ];
+    return new Response(
+      new ReadableStream({ start(ctrl) { const enc = new TextEncoder(); for (const f of frames) ctrl.enqueue(enc.encode(f)); ctrl.close(); } }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
   if (body.model === 'mock-hugeframe') {
     // P6 fixture：单帧 9MB（无边界巨帧）——MAX_FRAME_BUF 必须截它，不许无界缓冲
     const big = 'x'.repeat(9 * 1024 * 1024);

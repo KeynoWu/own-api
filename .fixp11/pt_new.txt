@@ -1,0 +1,13 @@
+          for (;;) {
+            // F1：SSE 规范允许 CR 作行终止符——CR-CR 不切则整条流零字节、buf 无界
+            const m = buf.match(/\r?\n\r?\n|\r\r/);
+            if (!m || m.index === undefined) break;
+            const frame = buf.slice(0, m.index + m[0].length);
+            buf = buf.slice(m.index + m[0].length);
+            emitFrame(frame, controller);
+          }
+          if (buf.length > MAX_FRAME_BUF) {
+            // F1：字节保真是本分支契约——超限的原样冲刷（超大帧放弃 scrub），内存与重扫双双有界
+            controller.enqueue(enc.encode(buf));
+            buf = '';
+          }

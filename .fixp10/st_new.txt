@@ -1,2 +1,0 @@
-      // F5：protocol 纳入 null=清除（「跟随渠道」的 UI 承诺此前是静默 no-op）
-      if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃

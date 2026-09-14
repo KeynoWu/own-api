@@ -1,1 +1,0 @@
-      publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || null, // F5：「跟随渠道」=null 清除，undefined 会被 JSON 丢键变 no-op

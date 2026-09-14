@@ -1,8 +1,0 @@
-      if (v === 'overview' && ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
-    });
-}
-// F8：行内启停/删除按钮此前无 catch——失败静默像成功。一张全局网兜住所有未处理拒绝（也兜未来的）
-addEventListener('unhandledrejection', (e) => { toast('请求失败：' + ((e.reason && e.reason.message) || String(e.reason)), true); e.preventDefault(); });
-// F10：Back/Forward 此前只改地址栏不换视图（无 hashchange 监听）
-let curView = 'overview';
-addEventListener('hashchange', () => { const v = location.hash.slice(1) || 'overview'; if (v !== curView) go(v); });

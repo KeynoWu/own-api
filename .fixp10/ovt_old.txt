@@ -1,1 +1,0 @@
-    if (ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);

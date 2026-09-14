@@ -1,0 +1,2 @@
+  check('P6 改写分支 9MB 巨帧不原样外发（响应有界）', raw2.length < 1_000_000, String(raw2.length));
+}

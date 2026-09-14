@@ -1,0 +1,5 @@
+        buf = normalizeNewlines(buf + dec.decode(chunk, { stream: true }));
+        const { frames, rest } = drainFrames(buf);
+        buf = rest;
+        // F5：上限在 drain 之后判——含完整帧的良构大块不该被误杀，只有迟迟切不出帧才算越界
+        if (buf.length > MAX_FRAME_BUF) throw new Error('SSE 帧缓冲超上限：上游长时间未给出帧边界');

@@ -1,0 +1,5 @@
+    // F4：先留空位再解码——单个超大 chunk 也只持有 cap 字节，8KB 语义不再是「收到才后悔」
+    const room = Math.max(0, cap - n);
+    s += (value?.byteLength ?? 0) > room ? dec.decode(value!.subarray(0, room), { stream: true }) : dec.decode(value, { stream: true });
+    n += value?.byteLength ?? 0;
+    if (n >= cap) {

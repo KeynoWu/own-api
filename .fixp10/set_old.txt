@@ -1,1 +1,0 @@
-      const res = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });

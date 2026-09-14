@@ -765,6 +765,16 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const raw2 = await (await fetch(BASE + '/v1/chat/completions', { ...hgReq, body: JSON.stringify({ model: 'huge-alias', stream: true, messages: [{ role: 'user', content: 'x' }] }) })).text();
   check('P6 改写分支 9MB 巨帧不原样外发（响应有界）', raw2.length < 1_000_000, String(raw2.length));
 }
+{
+  // P6+(R4-F2)：error 帧形态漂移封堵——string/多行 data/对象 message 三形态 × 双分支全掩
+  const leaky = (raw: string, k: string) => raw.includes(k) || raw.includes(encodeURIComponent(k)) || raw.includes(Buffer.from(k).toString('base64'));
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'mock-dirty-str', channelId: oa.id, upstreamModel: 'mock-dirty-str' }) });
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'dirty-str-alias', channelId: oa.id, upstreamModel: 'mock-dirty-str' }) });
+  for (const [mname, label] of [['mock-dirty-str', '零改写'], ['dirty-str-alias', '改写']] as const) {
+    const raw = await (await fetch(BASE + '/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer ' + VKEY, 'content-type': 'application/json' }, body: JSON.stringify({ model: mname, stream: true, messages: [{ role: 'user', content: 'x' }] }) })).text();
+    check('R4 error 帧三形态双分支掩码（' + label + '）', !leaky(raw, 'k-ok-main') && /\*\*\*/.test(raw), raw.slice(0, 140));
+  }
+}
 
 
 
