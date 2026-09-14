@@ -318,7 +318,12 @@ class Store {
     if (patch.extraHeaders !== undefined && !(typeof patch.extraHeaders === 'object' && patch.extraHeaders !== null && !Array.isArray(patch.extraHeaders))) delete next.extraHeaders;
     // 容器合法 ≠ 值合法：非字符串值丢弃（与 createChannel 同规，审查 C-M3）
     if (next.extraHeaders !== undefined) next.extraHeaders = sanitizeExtraHeaders(patch.extraHeaders);
-    if (typeof next.baseUrl === 'string' && next.baseUrl) next.baseUrl = normalizeBaseUrl(next.baseUrl);
+    // 审查：baseUrl:123/"" 此前直落库——buildUrl 抛错让 GET /channels 全量 500；空串产出相对路径、fetch Invalid URL 反复换 key 冷却整池
+    if (patch.baseUrl !== undefined && (typeof next.baseUrl !== "string" || !next.baseUrl.trim() || !/^https?:\/\//.test(next.baseUrl.trim()))) delete next.baseUrl;
+    else if (typeof next.baseUrl === "string" && next.baseUrl) next.baseUrl = normalizeBaseUrl(next.baseUrl);
+    if (patch.note !== undefined && next.note !== undefined && typeof next.note !== "string") delete next.note;
+    if (patch.testModel !== undefined && next.testModel !== undefined && typeof next.testModel !== "string") delete next.testModel;
+
     // modelList 兼容数组 / “每行一个”字符串，统一归一化，避免字符串直接落库
     if (patch.modelList !== undefined) next.modelList = toStrList(patch.modelList) ?? [];
     Object.assign(ch, next);
@@ -407,6 +412,13 @@ class Store {
   }
   createModel(input: Partial<ModelRoute> & { publicName: string; channelId: string; upstreamModel: string }): { model?: ModelRoute; error?: string } {
     // 模块合并后创建与更新同规撞名校验（auto 名/tags 双向）——此前 POST 可造重名歧义路由
+    // M0-a：创建路径与 PATCH 同规——此前 tags/数字字段裸存，一条 POST tags:"x" 就能让
+    // findModelByName 每请求 TypeError（全局 502）且毒数据落库、重启不愈
+    if (input.tags !== undefined && !(Array.isArray(input.tags) && input.tags.every((t) => typeof t === 'string'))) return { error: 'tags 需为字符串数组' };
+    for (const nk of ['contextWindow', 'maxOutputTokens', 'priceInput', 'priceOutput', 'priceCacheRead', 'priceCacheWrite'] as const) {
+      const v = input[nk];
+      if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return { error: nk + ' 需为 ≥0 的数字' };
+    }
     const taken = this.routeNameTaken(input.publicName.trim());
     if (taken) return { error: taken };
     // W7 语义原样保留：tag 不得遮蔽既有 auto 路由名（旧 admin 校验搬进单表底座）
@@ -446,6 +458,8 @@ class Store {
     for (const k of Object.keys(patch)) {
       if (!UPDATABLE_MODEL_FIELDS.includes(k)) continue;
       const v = (patch as Record<string, unknown>)[k];
+      if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'protocol' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃
+
       if (k === 'protocol' && v !== undefined && v !== 'openai' && v !== 'anthropic') continue;
       if ((k === 'enabled' || k === 'supportsStreaming' || k === 'supportsTools') && typeof v !== 'boolean') continue;
       if ((k === 'publicName' || k === 'channelId' || k === 'upstreamModel') && (typeof v !== 'string' || (k !== 'channelId' && !v.trim()))) continue;

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { store, maskKey, scrubSecret } from './store.ts';
-import { failureAllow, failureClear } from './ratelimit.ts';
+import { clientIp, failureHit, failurePeek } from './ratelimit.ts';
 import { forgetQuota } from './usage.ts';
 import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
@@ -91,24 +91,21 @@ export function createAdmin(): Hono {
     if (!expect) {
       return c.json({ error: 'unauthorized', hint: '管理令牌未配置，请设置 LLM_ADMIN_TOKEN' }, 401);
     }
-    // 每来源 60s 内至多 20 次鉴权失败——令牌爆破不再零成本（审查 A-M；best-effort，本机直连 XFF 可自报）
-    const bucket = `adm:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
-    const rl = failureAllow(bucket, 20, 60_000);
-    if (!rl.ok) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(rl.retryAfterSec) });
-    if (safeEq(c.req.header('x-admin-token') || '', expect)) {
-      failureClear(bucket);
-      return next();
-    }
+    // M0-b 语义重做：只记鉴权失败；成功不增不清（清零=给持任一合法令牌者发洗白通行证，
+    // 且共享桶会被爆破者反向锁死同机合法客户端）。桶键取 socket IP：TCP 上不可伪造，
+    // XFF 自报头逐请求换值即可绕开，不再采信。
+    const bucket = 'adm:' + clientIp(c);
+    const block = failurePeek(bucket, 20);
+    if (block.blocked) return c.json({ error: 'too many failed auth attempts' }, 429, { 'retry-after': String(block.retryAfterSec) });
+    if (safeEq(c.req.header('x-admin-token') || '', expect)) return next();
     // 仅 /logs/stream 允许 query 短令牌；其它路径一律要求头
     const path = c.req.path.replace(/^\/api/, '');
     if (path === '/logs/stream') {
       const ticket = c.req.query('ticket');
       const exp = ticket ? sseTickets.get(ticket) : undefined;
-      if (exp && exp > Date.now()) {
-        failureClear(bucket);
-        return next();
-      }
+      if (exp && exp > Date.now()) return next();
     }
+    failureHit(bucket, 60_000);
     return c.json({ error: 'unauthorized', hint: '缺少或错误的 x-admin-token' }, 401);
   });
 
@@ -178,7 +175,7 @@ export function createAdmin(): Hono {
     } catch (err: any) {
       return c.json({ error: err?.message || 'channel 创建失败' }, 400);
     }
-    return c.json(maskChannel(ch, true), 201);
+    return c.json(maskChannel(ch, isLocalish(c)), 201);
   });
 
   app.patch('/channels/:id', async (c) => {
@@ -189,7 +186,7 @@ export function createAdmin(): Hono {
     } catch (err: any) {
       return c.json({ error: err?.message || 'channels 更新失败' }, 400);
     }
-    return ch ? c.json(maskChannel(ch, true)) : c.json({ error: 'not found' }, 404);
+    return ch ? c.json(maskChannel(ch, isLocalish(c))) : c.json({ error: 'not found' }, 404);
   });
 
   app.delete('/channels/:id', (c) => {
@@ -204,7 +201,7 @@ export function createAdmin(): Hono {
       ? b.keys.map((k: any) => (typeof k === 'string' ? { key: k } : k))
       : [{ key: b.key, name: b.name, weight: b.weight }];
     const ch = store.addKeys(c.req.param('id'), items.filter((k: any) => k.key));
-    return ch ? c.json(maskChannel(ch, true)) : c.json({ error: 'channel not found' }, 404);
+    return ch ? c.json(maskChannel(ch, isLocalish(c))) : c.json({ error: 'channel not found' }, 404);
   });
 
   app.patch('/channels/:id/keys/:keyId', async (c) => {
@@ -213,7 +210,7 @@ export function createAdmin(): Hono {
     const ch = store.getChannel(c.req.param('id'));
     if (!ch) return c.json({ error: 'channel not found' }, 404);
     if (!ok) return c.json({ error: 'key not found' }, 404); // 此前改不存在的 key 静默 200（审查 C-M2）
-    return c.json(maskChannel(ch, true));
+    return c.json(maskChannel(ch, isLocalish(c)));
   });
 
   app.delete('/channels/:id/keys/:keyId', (c) => {
@@ -368,6 +365,13 @@ export function createAdmin(): Hono {
     // 非字符串真值（如 123）此前在 findModelByName 内 toLowerCase 直接 500（审查 C-M3）
     if (typeof b.publicName !== 'string' || !b.publicName.trim() || typeof b.upstreamModel !== 'string' || !b.upstreamModel.trim()) {
       return c.json({ error: 'publicName / upstreamModel 需为非空字符串' }, 400);
+    }
+    if (b.tags !== undefined && !(Array.isArray(b.tags) && b.tags.every((t: any) => typeof t === 'string'))) {
+      return c.json({ error: 'tags 需为字符串数组' }, 400);
+    }
+    for (const nk of ['contextWindow', 'maxOutputTokens', 'priceInput', 'priceOutput', 'priceCacheRead', 'priceCacheWrite']) {
+      const v = (b as any)[nk];
+      if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return c.json({ error: nk + ' 需为 ≥0 的数字' }, 400);
     }
     if (!store.getChannel(b.channelId)) return c.json({ error: 'channel 不存在' }, 404);
     // 撞名（外名/tag × single/auto 双向）收敛进 store.routeNameTaken，HTTP 侧只翻译状态码

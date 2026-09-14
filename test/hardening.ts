@@ -759,6 +759,32 @@ section('14. 信息暴露、usage 口径与主键完整性');
   }
   const sessModeOk = process.platform === 'win32' || (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0;
   check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && sessModeOk, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
+  // ---- M0-b 限速语义（本进程全新桶，独立于其它用例）：失败计数、成功不洗白、跨端点共享、admin 20/min ----
+  {
+    const B = 'http://127.0.0.1:18811';
+    const vkey = (bootDb.vkeys && bootDb.vkeys[0] && bootDb.vkeys[0].key) || '';
+    const call = async (p: string, key: string) => {
+      const res = await fetch(B + p, { method: 'POST', headers: { 'content-type': 'application/json', ...(key ? { authorization: 'Bearer ' + key } : {}) }, body: '{"model":"m-x","messages":[]}' });
+      return res.status;
+    };
+    let leaked429 = 0;
+    for (let i = 1; i <= 20; i++) { const s = await call('/v1/chat/completions', 'sk-wrong-' + i); if (s === 429) { leaked429 = i; break; } }
+    check('M0-b 20 次鉴权失败不触 429（阈值之下不误伤）', leaked429 === 0, String(leaked429));
+    const mid = await call('/v1/chat/completions', vkey);
+    check('M0-b n=20 时成功请求照常放行', mid !== 429 && mid !== 401, String(mid));
+    let blockedAt = 0;
+    for (let i = 1; i <= 13; i++) { const s = await call('/v1/chat/completions', 'sk-bad-' + i); if (s === 429) { blockedAt = i; break; } }
+    check('M0-b 成功穿插不洗白：再失败即 429（旧语义此处永不拦）', blockedAt > 0 && blockedAt <= 13, String(blockedAt));
+    const ct = await call('/v1/messages/count_tokens', 'sk-bad-ct');
+    check('M0-b count_tokens 共享鉴权限速桶（此前裸奔）', ct === 429, String(ct));
+    let admAt = 0;
+    for (let i = 1; i <= 23; i++) {
+      const res = await fetch(B + '/api/overview', { headers: { 'x-admin-token': 'nope-' + i } });
+      if (res.status === 429) { admAt = i; break; }
+    }
+    check('M0-b admin 20/min 生效（第 22 次错令牌 429）', admAt === 22, String(admAt));
+  }
+
   child.kill();
   await new Promise<void>((r) => {
     child.on('exit', () => r());

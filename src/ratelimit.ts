@@ -1,28 +1,48 @@
 /**
- * 失败计数限速（审查 A-M：爆破管理令牌 / 爆破对外 key 此前无任何速率防线）。
- * 固定窗口计数，内存态——单进程本地服务够用；只做「失败」计数，成功即清零，
- * 正常用户不受影响。IP 取自 X-Forwarded-For：本机直连时该头由调用方自报、
- * 可伪造——限速是抬高成本的 best-effort，不是边界隔离。
+ * 鉴权失败限速（审查 A-M 爆破防线；M0-b 语义重做）。
+ * 口径：只记鉴权失败——成功不计数也不清零（旧实现计所有请求且成功即清零，
+ * 持任一合法 key 交替即可无限爆破，本机共享桶还会被爆破者反向锁死合法客户端）。
+ * 桶键取 socket 远端地址：TCP 上不可伪造；XFF 是自报头，逐请求换值即可绕开，
+ * 不再采信（本服务是本地网关，直连模型下 socket IP 就是真实来源）。
+ * 固定窗口、内存态；桶表超上限按插入序 FIFO 逐出——绝不整体 fail-open
+ * （旧实现在洪峰清完过期仍超限时全员放行，等于限速器被灌爆即瘫痪）。
  */
 const buckets = new Map<string, { n: number; resetAt: number }>();
 const MAX_KEYS = 10_000;
 
-export function failureAllow(key: string, limit: number, windowMs: number): { ok: boolean; retryAfterSec: number } {
-  const now = Date.now();
-  if (buckets.size > MAX_KEYS) {
-    for (const [k, b] of buckets) if (b.resetAt <= now) buckets.delete(k);
-    if (buckets.size > MAX_KEYS) return { ok: true, retryAfterSec: 0 }; // 洪峰兜底：宁可放行也不吃内存
+/** 从 Hono context 取不可伪造的来源地址（node-server 的 incoming.socket） */
+export function clientIp(c: any): string {
+  try {
+    const addr = c?.env?.incoming?.socket?.remoteAddress;
+    if (typeof addr === 'string' && addr) return addr.replace(/^::ffff:/, '');
+  } catch {
+    /* env 形态异常时归入共享桶，宁严勿松 */
   }
+  return 'unknown';
+}
+
+export function failurePeek(key: string, limit: number): { blocked: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const b = buckets.get(key);
+  if (b && b.resetAt > now && b.n > limit) {
+    return { blocked: true, retryAfterSec: Math.max(1, Math.ceil((b.resetAt - now) / 1000)) };
+  }
+  return { blocked: false, retryAfterSec: 0 };
+}
+
+export function failureHit(key: string, windowMs: number): void {
+  const now = Date.now();
   const b = buckets.get(key);
   if (!b || b.resetAt <= now) {
     buckets.set(key, { n: 1, resetAt: now + windowMs });
-    return { ok: true, retryAfterSec: 0 };
+  } else {
+    b.n += 1;
   }
-  b.n += 1;
-  if (b.n > limit) return { ok: false, retryAfterSec: Math.max(1, Math.ceil((b.resetAt - now) / 1000)) };
-  return { ok: true, retryAfterSec: 0 };
-}
-
-export function failureClear(key: string) {
-  buckets.delete(key);
+  if (buckets.size > MAX_KEYS) {
+    for (const [k, bb] of buckets) if (bb.resetAt <= now) buckets.delete(k);
+    for (const k of buckets.keys()) {
+      if (buckets.size <= MAX_KEYS) break;
+      buckets.delete(k);
+    }
+  }
 }

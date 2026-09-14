@@ -190,9 +190,17 @@ export function passthroughStream(
   modelRewrite?: { to: string } | undefined,
 ): ReadableStream<Uint8Array> {
   if (!modelRewrite) {
-    // 零改写：原始字节一个字节不动地转发，只在副本上旁扫 usage
+    // 审查 H1：旧「零改写」连 error 帧也不看，同协议透传成了 key 掩码链的盲区。
+    // 改为按帧边界切分：非 error 帧原文回发（SSE 是 UTF-8 文本，编解码往返无损），
+    // 含 "error" 的帧把 error.message 过 meta.scrub 再重发。
     const sc = new UsageSc(protocol, meta);
+    const dec = new TextDecoder();
+    const enc = new TextEncoder();
+    let buf = '';
     let firstByte = true;
+    const emitFrame = (frame: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+      controller.enqueue(enc.encode(scrubErrorFrame(frame, meta)));
+    };
     return src.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
@@ -201,9 +209,18 @@ export function passthroughStream(
             meta.onFirstContent?.();
           }
           sc.feed(chunk.slice());
-          controller.enqueue(chunk);
+          buf += dec.decode(chunk, { stream: true });
+          for (;;) {
+            const m = buf.match(/\r?\n\r?\n/);
+            if (!m || m.index === undefined) break;
+            const frame = buf.slice(0, m.index + m[0].length);
+            buf = buf.slice(m.index + m[0].length);
+            emitFrame(frame, controller);
+          }
         },
-        flush() {
+        flush(controller) {
+          buf += dec.decode();
+          if (buf) emitFrame(buf, controller);
           sc.finish();
         },
       }),
@@ -228,6 +245,9 @@ export function passthroughStream(
         return;
       }
       scanUsage(json, protocol, meta);
+      // 审查 H1：改写分支同样过掩码——error 帧不属于跨协议路径专属
+      if (json.error && typeof json.error === 'object' && typeof json.error.message === 'string' && meta.scrub) json.error.message = meta.scrub(json.error.message);
+      else if (typeof json.error === 'string' && meta.scrub) json.error = meta.scrub(json.error);
       if (json.model !== undefined) json.model = modelRewrite.to;
       if (protocol === 'anthropic' && json.type === 'message_start' && json.message) json.message.model = modelRewrite.to;
       emit(sseEvent(ev.event, json));
@@ -235,6 +255,23 @@ export function passthroughStream(
     undefined,
     () => meta.onFirstContent?.(),
   );
+}
+
+/** error 帧掩码（审查 H1）：帧内含 "error" 才尝试解析 data 行；解析失败/无 message 一律原帧返回 */
+function scrubErrorFrame(frame: string, meta: { scrub?: (s: string) => string }): string {
+  if (!meta.scrub || !frame.includes('error')) return frame;
+  return frame.replace(/(data:\s?)([^\r\n]+)/g, (all: string, head: string, payload: string) => {
+    if (payload === '[DONE]') return all;
+    try {
+      const j = JSON.parse(payload);
+      const e = j && j.error;
+      if (!e || typeof e.message !== 'string') return all;
+      e.message = meta.scrub!(e.message);
+      return head + JSON.stringify(j);
+    } catch {
+      return all;
+    }
+  });
 }
 
 /** 增量旁扫 usage 的行缓冲。每条流必须持有独立实例，不能共享 */

@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import { store, maskKey, newId, scrubSecret } from './store.ts';
-import { failureAllow, failureClear } from './ratelimit.ts';
+import { clientIp, failureHit, failurePeek } from './ratelimit.ts';
 import {
   anthropicToOpenaiRequest,
   anthropicToOpenaiResponse,
@@ -628,13 +628,13 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
   const client: 'openai' | 'anthropic' = wire === 'anthropic' ? 'anthropic' : 'openai';
 
   const rawKey = extractClientKey(c);
-  const authBucket = `vkey:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
-  const authRl = failureAllow(authBucket, 30, 60_000); // 每来源 60s 内至多 30 次鉴权失败，防公钥爆破（审查 A-M）
-  if (!authRl.ok) return fail(c, wire, 429, 'too many failed auth attempts', { 'retry-after': String(authRl.retryAfterSec) });
-  if (!rawKey) return fail(c, wire, 401, 'missing api key（请在 Authorization: Bearer <key> 或 x-api-key 中携带统一 key）');
+  const authBucket = 'vkey:' + clientIp(c);
+  const authBlock = failurePeek(authBucket, 30);
+  if (authBlock.blocked) return fail(c, wire, 429, 'too many failed auth attempts', { 'retry-after': String(authBlock.retryAfterSec) });
+  if (!rawKey) { failureHit(authBucket, 60_000); return fail(c, wire, 401, 'missing api key（请在 Authorization: Bearer <key> 或 x-api-key 中携带统一 key）'); }
   const vkey = store.findVKey(rawKey);
-  if (!vkey) return fail(c, wire, 401, 'invalid api key');
-  failureClear(authBucket);
+  if (!vkey) { failureHit(authBucket, 60_000); return fail(c, wire, 401, 'invalid api key'); }
+  // M0-b：鉴权成功既不计数也不清零——清零会把爆破计数洗白（旧语义可被合法 key 交替绕过）
   if (!vkey.enabled) return fail(c, wire, 403, 'api key disabled');
 
   // 限流在任何 await 之前准入：否则并发请求会在计数落地前一起穿过
@@ -1116,13 +1116,12 @@ export function estimateInputTokens(body: any): number {
 /** GET /v1/models —— 对外只暴露已配置且该 key 有权访问的模型；auto 条目按 §5.2 契约合成 */
 export function listModels(c: Context) {
   const rawKey = extractClientKey(c);
-  const authBucket = `vkey:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'}`;
-  const authRl = failureAllow(authBucket, 30, 60_000);
-  if (!authRl.ok) return fail(c, 'openai', 429, 'too many failed auth attempts', { 'retry-after': String(authRl.retryAfterSec) });
-  if (!rawKey) return fail(c, 'openai', 401, 'missing api key');
+  const authBucket = 'vkey:' + clientIp(c);
+  const authBlock = failurePeek(authBucket, 30);
+  if (authBlock.blocked) return fail(c, 'openai', 429, 'too many failed auth attempts', { 'retry-after': String(authBlock.retryAfterSec) });
+  if (!rawKey) { failureHit(authBucket, 60_000); return fail(c, 'openai', 401, 'missing api key'); }
   const vkey = store.findVKey(rawKey);
-  if (!vkey) return fail(c, 'openai', 401, 'invalid api key');
-  failureClear(authBucket);
+  if (!vkey) { failureHit(authBucket, 60_000); return fail(c, 'openai', 401, 'invalid api key'); }
   if (!vkey.enabled) return fail(c, 'openai', 403, 'api key disabled');
   const rl = admitRequest(vkey.id);
   if (!rl.ok) return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);

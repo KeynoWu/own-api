@@ -719,6 +719,44 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const p = (await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ debugHeaders: 'false' }) })).body;
   check('debugHeaders 传字符串 false 被拒（Boolean 强转陷阱）', Array.isArray(p.rejected) && p.rejected.length > 0, JSON.stringify(p).slice(0, 110));
 }
+// ---- 审查 P1：H1 同协议透传 error 帧掩码三形态 + M0-a/M2 契约 ----
+{
+  const mk = (publicName: string, channelId: string, upstreamModel: string, extra?: any) =>
+    api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName, channelId, upstreamModel, ...(extra || {}) }) });
+  await mk('dirty-alias', oa.id, 'mock-dirty-stream');
+  await mk('mock-dirty-stream', oa.id, 'mock-dirty-stream');
+  await mk('mock-dirty-anth', an.id, 'mock-dirty-anth');
+  const readStream = async (path: string, model: string, anth: boolean) => {
+    const res = await fetch(BASE + path, {
+      method: 'POST',
+      headers: anth
+        ? { 'x-api-key': VKEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
+        : { authorization: 'Bearer ' + VKEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, stream: true, max_tokens: 16, messages: [{ role: 'user', content: '掩码探针' }] }),
+    });
+    return await res.text();
+  };
+  const noLeak = (raw: string, k: string) => !raw.includes(k) && !raw.includes(encodeURIComponent(k)) && !raw.includes(Buffer.from(k).toString('base64')) && raw.includes('***');
+  const t1 = await readStream('/v1/chat/completions', 'mock-dirty-stream', false);
+  check('H1 openai→openai 零改写透传 error 帧已掩码', noLeak(t1, 'k-ok-main'), t1.slice(0, 140));
+  const t2 = await readStream('/v1/chat/completions', 'dirty-alias', false);
+  check('H1 alias 改写分支 error 帧已掩码', noLeak(t2, 'k-ok-main'), t2.slice(0, 140));
+  const t3 = await readStream('/v1/messages', 'mock-dirty-anth', true);
+  check('H1 anthropic→anthropic 透传 error 帧已掩码', noLeak(t3, 'k-ok-claude'), t3.slice(0, 140));
+  const tg400 = await mk('tag-poison', oa.id, 'mock-gpt-5', { tags: 'x' });
+  check('M0-a POST tags 非数组 -> 400（持久投毒封堵）', tg400.status === 400, String(tg400.status));
+  const num400 = await mk('num-poison', oa.id, 'mock-gpt-5', { priceInput: 'free' });
+  check('M0-a POST 数字字段非数字 -> 400', num400.status === 400, String(num400.status));
+  const nullR = (await mk('null-clear-m', oa.id, 'mock-gpt-5', { priceInput: 2, maxOutputTokens: 100 })).body;
+  const nullP = await api('/api/routes/' + nullR.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ priceInput: null, maxOutputTokens: null }) });
+  const nullG = (await api('/api/routes?type=single', { headers: ADMIN })).body.find((m: any) => m.id === nullR.id);
+  check('M2 PATCH null=清除（清空价格不再静默保旧值）', nullP.status === 200 && nullG.priceInput === undefined && nullG.maxOutputTokens === undefined, JSON.stringify([nullP.status, nullG.priceInput, nullG.maxOutputTokens]));
+  const bdPatch = await api('/api/channels/' + oa.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ baseUrl: 123 }) });
+  const bdList = (await api('/api/channels', { headers: ADMIN })).body.find((x: any) => x.id === oa.id);
+  check('baseUrl 数字补丁被丢弃、原值保全（GET 不再被毒成 500）', bdPatch.status === 200 && String(bdList.baseUrl).includes('18099'), JSON.stringify([bdPatch.status, bdList.baseUrl]));
+}
+
+
 {
   const r = (await api('/api/vkeys?reveal=1', { headers: { ...ADMIN, 'x-forwarded-for': '10.0.0.9' } })).body;
   check('reveal=1 经代理头拿不到明文 key', Array.isArray(r) && r.every((k) => k.key.includes('*')), JSON.stringify(r[0] && r[0].key));

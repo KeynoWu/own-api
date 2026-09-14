@@ -5,7 +5,7 @@ import { cors } from 'hono/cors';
 import { createAdmin } from './admin.ts';
 import { ENTRYPOINTS, estimateInputTokens, extractClientKey, gateway, listModels } from './gateway.ts';
 import { store } from './store.ts';
-import { admitRequest } from './usage.ts';
+import { admitRequest } from './usage.ts';import { clientIp, failureHit, failurePeek } from './ratelimit.ts';
 
 import { WEB_HTML } from './web-html.gen.ts';
 import { envAny } from './bootstrap.ts';
@@ -44,9 +44,13 @@ export function createApp() {
   // Claude Code / SDK 会调它做预算估算，给个近似值即可，避免 404
   app.post('/v1/messages/count_tokens', async (c) => {
     const rawKey = extractClientKey(c);
-    if (!rawKey) return c.json({ error: { type: 'authentication_error', message: 'missing api key' }, type: 'error' }, 401);
+    // M0-b：与网关/listModels 同源鉴权限速（审查：此端点此前裸奔，爆破无痕）
+    const authBucket = 'vkey:' + clientIp(c);
+    const authBlock = failurePeek(authBucket, 30);
+    if (authBlock.blocked) return c.json({ type: 'error', error: { type: 'rate_limit_error', message: 'too many failed auth attempts' } }, 429, { 'retry-after': String(authBlock.retryAfterSec) });
+    if (!rawKey) { failureHit(authBucket, 60_000); return c.json({ error: { type: 'authentication_error', message: 'missing api key' }, type: 'error' }, 401); }
     const vk = store.findVKey(rawKey);
-    if (!vk) return c.json({ error: { type: 'authentication_error', message: 'invalid api key' }, type: 'error' }, 401);
+    if (!vk) { failureHit(authBucket, 60_000); return c.json({ error: { type: 'authentication_error', message: 'invalid api key' }, type: 'error' }, 401); }
     if (!vk.enabled) return c.json({ error: { type: 'permission_error', message: 'api key disabled' }, type: 'error' }, 403);
     // 与主网关一致：先限流准入，再流式计数 body，避免无上限占用（SEC-02）
     const rl = admitRequest(vk.id);

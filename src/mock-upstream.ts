@@ -48,6 +48,22 @@ app.post('/v1/chat/completions', async (c) => {
   if (bad) return c.json(bad.body, bad.status as any, bad.retryAfter ? { 'retry-after': bad.retryAfter } : {});
   if (body.model === 'mock-toolong')
     return c.json({ error: { message: "This model's maximum context length is 1000 tokens. However, your messages resulted in 5000 tokens.", type: 'invalid_request_error' } }, 400 as any);
+  if (body.model === 'mock-dirty-stream') {
+    // 审查 H1 fixture：流中段 error 帧回显上游 key（原文/URL 编码/base64 三变体）
+    const variants = [key, encodeURIComponent(key), Buffer.from(key).toString('base64')].join(' | ');
+    return new Response(
+      new ReadableStream({
+        start(ctrl) {
+          const enc = new TextEncoder();
+          ctrl.enqueue(enc.encode('data: ' + JSON.stringify({ id: 'chatcmpl-dirty', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' } }] }) + '\n\n'));
+          ctrl.enqueue(enc.encode('data: ' + JSON.stringify({ error: { type: 'server_error', message: 'upstream rejected key: ' + variants } }) + '\n\n'));
+          ctrl.enqueue(enc.encode('data: [DONE]\n\n'));
+          ctrl.close();
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
   if (body.model === 'mock-404')
     return c.json({ error: { message: 'The model `mock-404` does not exist or you do not have access to it.' } }, 404 as any);
   if (body.model === 'mock-streamcut') {
@@ -144,6 +160,21 @@ app.post('/v1/messages', async (c) => {
   hits.set(String(body.model), (hits.get(String(body.model)) || 0) + 1);
   const bad = fail(key);
   if (bad) return c.json({ type: 'error', error: { type: bad.status === 401 ? 'authentication_error' : 'api_error', message: bad.body.error.message } }, bad.status as any);
+  if (body.model === 'mock-dirty-anth' && body.stream) {
+    // 审查 H1 fixture：anthropic 同协议透传的中段 error 帧回显 x-api-key
+    const variants = [key, encodeURIComponent(key), Buffer.from(key).toString('base64')].join(' | ');
+    return new Response(
+      new ReadableStream({
+        start(ctrl) {
+          const enc = new TextEncoder();
+          ctrl.enqueue(enc.encode('event: message_start\ndata: ' + JSON.stringify({ type: 'message_start', message: { id: 'mw1', type: 'message', role: 'assistant', model: body.model, content: [], usage: { input_tokens: 1, output_tokens: 1 } } }) + '\n\n'));
+          ctrl.enqueue(enc.encode('event: error\ndata: ' + JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key: ' + variants } }) + '\n\n'));
+          ctrl.close();
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
   await delay(key);
   const prompt = lastUser(body.messages);
   const text = `mock(anthropic:${body.model}) 收到: ${prompt.slice(0, 40)}`;
