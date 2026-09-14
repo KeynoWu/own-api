@@ -143,7 +143,9 @@ fn wait_ready<R: Runtime>(app: AppHandle<R>) {
         };
         if dead {
             let state = app.state::<Sidecar>();
-            if let Some(child) = lock_slot(&state.0).take() {
+            // 先 take 再 if-let：guard 临时量在语句末释放，不与 state 的生命周期打架（E0597）
+            let stale = lock_slot(&state.0).take();
+            if let Some(child) = stale {
                 let _ = child.kill();
             }
         }
@@ -215,7 +217,7 @@ pub fn run() {
             let _ = &menu;
             TrayIconBuilder::with_id("tray")
                 .menu(&menu)
-                .menu_on_left_click(true)
+                .show_menu_on_left_click(true)
                 .tooltip("own-api · 个人 LLM 网关")
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(|app, event| match event.id().as_ref() {
