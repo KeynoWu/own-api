@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "gen:web": "node scripts/gen-web-html.mjs",
     "build:sea": "node scripts/build-sea.mjs",
-    "desktop:prepare": "node scripts/build-sea.mjs && node scripts/prepare-desktop.mjs",
+    "desktop:prepare": "npm run gen:web && node scripts/build-sea.mjs && node scripts/prepare-desktop.mjs",
     "desktop:build": "npm run desktop:prepare && tauri build"
   },
   "dependencies": {

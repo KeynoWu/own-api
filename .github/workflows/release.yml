@@ -28,6 +28,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: 版本一致性（tag ↔ package.json）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VER="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 package.json 版本 $VER 不一致——发出去的包会挂着错的版本号"
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         if: ${{ !matrix.node_arch }}
         with: { node-version: 22 }

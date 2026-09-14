@@ -1,3 +1,0 @@
-    n += value?.byteLength ?? 0;
-    s += dec.decode(value, { stream: true });
-    if (n >= cap) {

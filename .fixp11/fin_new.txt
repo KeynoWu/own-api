@@ -1,4 +1,0 @@
-    let settleOnce = false; // F3：watchdog 先手 finished、pump catch 再手 fire——终态与候选健康样本只记第一次（注释早承诺，实现没兜住）
-    const finished = (err?: any, kind?: 'cancel') => {
-      if (settleOnce) return;
-      settleOnce = true;

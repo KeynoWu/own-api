@@ -791,6 +791,9 @@ section('14. 信息暴露、usage 口径与主键完整性');
     setTimeout(r, 4000);
   });
   blocker.close();
+  // R5-6：临时数据目录不再越积越大——每个 spawn 块收尾自清
+  try { fs2.rmSync(bootDir, { recursive: true, force: true }); } catch {}
+  try { fs2.rmSync(ghostDir, { recursive: true, force: true }); } catch {}
 }
 
 // ---------- 模块合并：v2 双表旧库自动迁移单表（真 spawn 证明升级路径不空库） ----------
@@ -1166,6 +1169,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
   } catch (e: any) {
     check('停机前防抖窗口脏数据必落盘（PATCH 后立即 shutdown 不丢）', false, String(e?.message));
   }
+  try { fs4.rmSync(hoDir, { recursive: true, force: true }); } catch {}
 }
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

@@ -1,5 +1,0 @@
-    this.text = normalizeNewlines(this.text + this.dec.decode(chunk, { stream: true }));
-    // 旁扫缓冲同样设上限（审查 L8）：超限抛错经 track 转协议内 error 帧，不再无界增长
-    if (this.text.length > MAX_FRAME_BUF) throw new Error('SSE 旁扫缓冲超上限：上游长时间未给出帧边界');
-    const { frames, rest } = drainFrames(this.text);
-    this.text = rest;

@@ -1,7 +1,0 @@
-          for (;;) {
-            const m = buf.match(/\r?\n\r?\n/);
-            if (!m || m.index === undefined) break;
-            const frame = buf.slice(0, m.index + m[0].length);
-            buf = buf.slice(m.index + m[0].length);
-            emitFrame(frame, controller);
-          }

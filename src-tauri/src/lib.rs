@@ -82,24 +82,42 @@ fn handoff_url(port: u16, token: &str) -> Option<String> {
     ))
 }
 
-/// 优雅停机：POST /api/shutdown（loopback + 管理令牌）。读超时+200 确认（审查 P4）：
-/// 旧实现写完就假定送达且 read 无超时——半开时托盘退出反而被冻在主线程
-fn graceful_shutdown(port: u16, token: &str) -> bool {
+/// 优雅停机：POST /api/shutdown（loopback + 管理令牌）。
+/// 三态（R5-1）：2=200 确证；1=已写出但未读到响应（服务端可能仍在收尾）；0=没发出去。
+/// 读超时把「未确证」当失败会提前 SIGKILL 丢脏数据，当成功会漏杀——调用方对 1 也要轮询确证。
+fn graceful_shutdown(port: u16, token: &str) -> u8 {
     if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
         let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
-        let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
+        // 大库 flushSync 时事件环滞后能超 300ms（R5：旧 300ms 把确证概率赌在盘上）
+        let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
         let req = format!(
             "POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nx-admin-token: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
             token
         );
         if s.write_all(req.as_bytes()).is_ok() {
-            let mut buf = [0u8; 16];
-            if let Ok(n) = s.read(&mut buf) {
-                return String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200");
+            // 状态行可能短读——循环读到成行再判（R5：单次 read(16B) 恰好切在半行就误判失败）
+            let mut acc: Vec<u8> = Vec::new();
+            let mut b = [0u8; 32];
+            loop {
+                match s.read(&mut b) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        acc.extend_from_slice(&b[..n]);
+                        if acc.len() >= 12 {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
+            if acc.is_empty() {
+                return 1; // 写完无回音：未确证，不是失败
+            }
+            let head = String::from_utf8_lossy(&acc);
+            return if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") { 2 } else { 0 };
         }
     }
-    false
+    0
 }
 
 /// 无 AppHandle 依赖的系统级动作（可安全离开主线程）
@@ -273,8 +291,10 @@ pub fn run() {
                 if let Some(child) = lock_slot(&app.state::<Sidecar>().0).take() {
                     // SIGKILL 前先到服务侧走一次优雅停机：落盘 + 摘空闲连接，400ms 防抖窗口里的数据不再赌运气
                     if let Some((port, token)) = read_session() {
-                        // 审查 P4：固定 400ms 赌注改轮询确证——端口真正关掉就走人（至多 2s）
-                        if graceful_shutdown(port, &token) {
+                        // 审查 P4：固定 400ms 赌注改轮询确证——端口真正关掉就走人（至多 2s）。
+                        // R5-1：请求「发出去但没读到 200」同样要轮询确证，否则恰恰丢掉最该等的落盘窗口
+                        let gs = graceful_shutdown(port, &token);
+                        if gs >= 1 {
                             for _ in 0..10 {
                                 std::thread::sleep(Duration::from_millis(200));
                                 if !healthy(port) {
