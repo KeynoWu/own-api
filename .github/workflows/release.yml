@@ -27,7 +27,7 @@ jobs:
             bundle_subdir: ''
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: 版本一致性（tag ↔ package.json）
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -37,17 +37,17 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME 与 package.json 版本 $VER 不一致——发出去的包会挂着错的版本号"
             exit 1
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ !matrix.node_arch }}
         with: { node-version: 22 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ matrix.node_arch }}
         with: { node-version: 22, architecture: '${{ matrix.node_arch }}' }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable(2026-09)
       - name: rustup 交叉目标
         if: ${{ matrix.rust_target }}
         run: rustup target add ${{ matrix.rust_target }}
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: src-tauri }
       - name: 质量门禁（H1：不发红着的安装包）
         run: |
@@ -82,7 +82,7 @@ jobs:
           else
             ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-${{ matrix.label }}
           if-no-files-found: error
@@ -98,11 +98,11 @@ jobs:
       - name: 触发防呆（workflow_dispatch 无 tag，发布会造出不存在的版本引用）
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: echo "::error::release 只允许 v* tag 推送触发；dispatch 仅可用于验证 build" && exit 1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: artifacts, merge-multiple: 'true' }
       - name: 资产数量硬校验（三平台缺一不可）
         run: test "$(find artifacts -name '*.dmg' -o -name '*.exe' | wc -l)" -ge 3
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: 发布说明＝CHANGELOG 对应版本节（v0.1.6 曾只挂出裸对比链接）
         shell: bash
         run: |
@@ -110,7 +110,7 @@ jobs:
           awk -v tag="## v${VER}（" 'index($0,tag)==1{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release-body.md
           [ -s release-body.md ] || { echo "::warning::CHANGELOG 找不到 v${VER} 节，release 说明退化为对比链接"; }
           printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             artifacts/**/*.dmg
