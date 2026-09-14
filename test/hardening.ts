@@ -580,8 +580,12 @@ section('11. 数据完整性');
   check('不再存在两条同名路由', dup === 1, String(dup));
 
   store.flushSync();
-  const mode = statSync(join(DATA, 'db.json')).mode & 0o777;
-  check(`db.json 权限收紧到 0600（实测 ${(mode & 0o777).toString(8)}）`, (mode & 0o077) === 0, mode.toString(8));
+  if (process.platform === 'win32') {
+    check('db.json 0600 断言仅 POSIX（win 无模式位语义，跳过）', true, 'win32');
+  } else {
+    const mode = statSync(join(DATA, 'db.json')).mode & 0o777;
+    check(`db.json 权限收紧到 0600（实测 ${(mode & 0o777).toString(8)}）`, (mode & 0o077) === 0, mode.toString(8));
+  }
 }
 
 // ============================ 12. SSE 分帧单元探针 ============================
@@ -753,7 +757,8 @@ section('14. 信息暴露、usage 口径与主键完整性');
     }
     check('OWN_API_PPID 父进程消失 -> 服务自灭（桌面壳崩溃不残留孤儿）', ghostExited, `exit=${ghost.exitCode} sig=${ghost.signalCode}`);
   }
-  check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
+  const sessModeOk = process.platform === 'win32' || (fs2.statSync(join(bootDir, 'last-session.json')).mode & 0o077) === 0;
+  check('last-session.json 交接端口与令牌给桌面壳（0600）', sess.port === 18811 && sess.token === bootDb.settings?.adminToken && sessModeOk, JSON.stringify({ port: sess.port, hasToken: !!sess.token }));
   child.kill();
   await new Promise<void>((r) => {
     child.on('exit', () => r());
@@ -840,6 +845,64 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('tool_choice none 时 tools 被整体移除（Anthropic 无 none 语义）', none.tools === undefined, JSON.stringify(none).slice(0, 90));
   const emptyAsst = openaiToAnthropicRequest({ model: 'x', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '' }, { role: 'user', content: 'go' }] }, { upstreamModel: 'claude-x' });
   check('空 assistant 消息被丢弃（不再生成 text 空串必 400 块）', !JSON.stringify(emptyAsst.messages).includes('"text":""'), JSON.stringify(emptyAsst.messages).slice(0, 120));
+}
+
+// ---------- P0：handoff/shutdown 契约（真 spawn，审查 H2 / 测试缺口 1-2） ----------
+{
+  const { spawn } = await import('node:child_process');
+  const fs4 = await import('node:fs');
+  const hoDir = mkdtempSync(join(tmpdir(), 'ownapi-ho-'));
+  fs4.writeFileSync(join(hoDir, 'db.json'), JSON.stringify({
+    version: 3, quotas: {}, channels: [], routes: [], logs: [],
+    vkeys: [{ id: 'vk1', key: 'sk-ho-testkey0123456789abc', name: 'd', enabled: true, allowedModels: [], createdAt: 1 }],
+    settings: { adminToken: 'ho-admin' },
+  }));
+  const ho = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, LLM_DATA_DIR: undefined, LLM_ADMIN_TOKEN: undefined, OWN_API_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: hoDir, OWN_API_PORT: '18813', OWN_API_PPID: undefined, OWN_API_OPEN_BROWSER: undefined },
+    stdio: 'ignore', cwd: process.cwd(),
+  });
+  let upOk = false;
+  for (let i = 0; i < 80 && !upOk; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { upOk = (await fetch('http://127.0.0.1:18813/api/healthz')).ok; } catch { /* 还没起来 */ }
+  }
+  check('handoff/shutdown 测试服务器（18813）就绪', upOk);
+  const hoApi = async (p: string, init?: any) => {
+    const res = await fetch('http://127.0.0.1:18813' + p, init);
+    let body: any = null;
+    try { body = await res.json(); } catch {}
+    return { status: res.status, body };
+  };
+  const noTok = await hoApi('/api/auth/handoff/ticket', { method: 'POST' });
+  check('无令牌发票 -> 401', noTok.status === 401, String(noTok.status));
+  const xf = await hoApi('/api/auth/handoff/ticket', { method: 'POST', headers: { 'x-admin-token': 'ho-admin', 'x-forwarded-for': '8.8.8.8' } });
+  check('非回环发票 -> 403（XFF 假冒公网）', xf.status === 403, String(xf.status));
+  const withTok = await hoApi('/api/auth/handoff/ticket', { method: 'POST', headers: { 'x-admin-token': 'ho-admin' } });
+  const tk = withTok.body?.ticket || '';
+  check('带令牌发票 -> 200 含票据（壳断链修复：此端点此前 404）', withTok.status === 200 && typeof tk === 'string' && tk.length > 10, String(withTok.status));
+  const ex1 = await hoApi('/api/auth/handoff', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: tk }) });
+  check('票据换回令牌', ex1.status === 200 && ex1.body?.token === 'ho-admin', String(ex1.status));
+  const ex2 = await hoApi('/api/auth/handoff', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: tk }) });
+  check('票据二次消费 -> 401（一次性）', ex2.status === 401, String(ex2.status));
+  await hoApi('/api/settings', { method: 'PATCH', headers: { 'x-admin-token': 'ho-admin', 'content-type': 'application/json' }, body: JSON.stringify({ upstreamIdleTimeoutMs: 123456 }) });
+  const badSh = await hoApi('/api/shutdown', { method: 'POST', headers: { 'x-admin-token': 'wrong' } });
+  check('/api/shutdown 错令牌 -> 401', badSh.status === 401, String(badSh.status));
+  const sh = await hoApi('/api/shutdown', { method: 'POST', headers: { 'x-admin-token': 'ho-admin' } });
+  check('/api/shutdown 带令牌 -> ok', sh.status === 200 && sh.body?.ok === true, String(sh.status));
+  const t0h = Date.now();
+  let gone = false;
+  while (Date.now() - t0h < 4000) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (ho.exitCode !== null || ho.signalCode !== null) { gone = true; break; }
+  }
+  try { ho.kill(); } catch {}
+  check('优雅退出 ≤4s（setShutdownHook 链完整）', gone, 'exit=' + ho.exitCode + ' sig=' + ho.signalCode);
+  try {
+    const dbf = JSON.parse(fs4.readFileSync(join(hoDir, 'db.json'), 'utf8'));
+    check('停机前防抖窗口脏数据必落盘（PATCH 后立即 shutdown 不丢）', dbf.settings?.upstreamIdleTimeoutMs === 123456, JSON.stringify(dbf.settings?.upstreamIdleTimeoutMs));
+  } catch (e: any) {
+    check('停机前防抖窗口脏数据必落盘（PATCH 后立即 shutdown 不丢）', false, String(e?.message));
+  }
 }
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

@@ -68,7 +68,7 @@ jobs:
       - name: 产物存在性硬校验（防空 glob 静默发布）
         shell: bash
         run: |
-          if [ "${runner.os}" = "Windows" ]; then
+          if [ "$RUNNER_OS" = "Windows" ]; then
             ls src-tauri/target/release/bundle/nsis/*.exe
           else
             ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg

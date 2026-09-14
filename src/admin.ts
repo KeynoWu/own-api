@@ -72,6 +72,15 @@ export function createAdmin(): Hono {
     return c.json({ token: store.getSettings().adminToken });
   });
 
+  // 桌面壳取票端点：Rust 侧只持有令牌（last-session.json），先换一次性票据再开浏览器。
+  // 审查 H2：lib.rs 发的就是这个路径，端点缺失时壳静默回退 #token=，A-M 修复在桌面路径 100% 失效
+  app.post('/auth/handoff/ticket', (c) => {
+    if (!isLocalish(c)) return c.json({ error: 'loopback only' }, 403);
+    const expect = store.getSettings().adminToken;
+    if (!expect || !safeEq(c.req.header('x-admin-token') || '', expect)) return c.json({ error: 'unauthorized' }, 401);
+    return c.json({ ticket: createHandoffTicket() });
+  });
+
   // ---------- 管理台鉴权 ----------
   // /logs/stream 需要 EventSource（无法带自定义头），用短期 SSE 订阅令牌代替长期 admin_token 进 URL
   const sseTickets = new Map<string, number>(); // ticket -> expiresAt
