@@ -32,9 +32,9 @@ function listen(port: number) {
     try {
       mkdirSync(getDataDir(), { recursive: true, mode: 0o700 });
       const f = join(getDataDir(), 'last-session.json');
-      writeFileSync(f, JSON.stringify({ base, port: info.port, token: s.adminToken, startedAt: new Date().toISOString() }));
+      writeFileSync(f, JSON.stringify({ base, port: info.port, token: s.adminToken, startedAt: new Date().toISOString() }), { mode: 0o600 });
       try {
-        chmodSync(f, 0o600);
+        chmodSync(f, 0o600); // 复用时 mode 不随 writeFileSync 变，显式设一次
       } catch {
         /* win 无 posix 位 */
       }
@@ -67,6 +67,13 @@ function shutdown(reason: string) {
   console.log(`\n  ${reason}，正在落盘并退出…`);
   clearInterval(gc);
   store.flushSync();
+  // keep-alive 空转连接不摘掉，server.close 要等满 OS 超时，SIGTERM 后干等 3s 强杀（审查 E-L）
+  try {
+    // http.Server 类型有此方法、http2 类型声明缺——运行时两者皆有（Node ≥18），按能力探测
+    (server as { closeIdleConnections?: () => void }).closeIdleConnections?.();
+  } catch {
+    /* ignore */
+  }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 }

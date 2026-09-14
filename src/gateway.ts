@@ -642,25 +642,33 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
   // 流式边读边计数：缺 content-length（chunked）时也立即在超限处中止 413
   let body: any;
   let rawText = '';
-  const reader = c.req.raw.body?.getReader();
-  if (reader) {
-    const dec = new TextDecoder();
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value?.byteLength ?? 0;
-      if (total > settings.maxBodyBytes) {
-        await reader.cancel().catch(() => {});
-        return fail(c, wire, 413, `request body too large (limit ${settings.maxBodyBytes} bytes)`);
+  try {
+    const reader = c.req.raw.body?.getReader();
+    if (reader) {
+      const dec = new TextDecoder();
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value?.byteLength ?? 0;
+        if (total > settings.maxBodyBytes) {
+          await reader.cancel().catch(() => {});
+          pushLog(baseLog(t0, vkey, c, wire, op), { status: 413, ok: false, error: 'request body too large' });
+          return fail(c, wire, 413, `request body too large (limit ${settings.maxBodyBytes} bytes)`);
+        }
+        rawText += dec.decode(value, { stream: true });
       }
-      rawText += dec.decode(value, { stream: true });
+      rawText += dec.decode();
     }
-    rawText += dec.decode();
+  } catch {
+    // body 读到一半客户端断开：reader reject 是取消语义，不是协议错误（审查 C-L7）
+    if (c.req.raw.signal.aborted) return fail(c, wire, 499, 'client aborted');
+    return fail(c, wire, 400, 'request body read failed');
   }
   try {
     body = rawText ? JSON.parse(rawText) : {};
   } catch {
+    pushLog(baseLog(t0, vkey, c, wire, op), { status: 400, ok: false, error: 'request body is not valid JSON' });
     return fail(c, wire, 400, 'request body is not valid JSON');
   }
 

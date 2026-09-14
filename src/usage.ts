@@ -74,6 +74,8 @@ export function admitRequest(vkeyId: string): { ok: boolean; reason?: string; re
 
 /** 请求结束：token/花费累加进按天配额（落盘，与日志裁剪解耦） */
 export function recordQuota(vkeyId: string, tokens: number, costUsd: number) {
+  // 已删 vkey 的迟到 finalize 不再重建幽灵日账（审查 C-L5；quotaOf 会顺手建条目）
+  if (!store.listVKeys().some((k) => k.id === vkeyId)) return;
   const q = quotaOf(vkeyId);
   q.tokens += tokens;
   q.requests += 1;

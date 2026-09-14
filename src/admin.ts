@@ -142,9 +142,11 @@ export function createAdmin(): Hono {
 
   app.patch('/channels/:id/keys/:keyId', async (c) => {
     const b = await c.req.json().catch(() => ({} as any));
-    store.updateKey(c.req.param('id'), c.req.param('keyId'), b);
+    const ok = store.updateKey(c.req.param('id'), c.req.param('keyId'), b);
     const ch = store.getChannel(c.req.param('id'));
-    return ch ? c.json(maskChannel(ch, true)) : c.json({ error: 'not found' }, 404);
+    if (!ch) return c.json({ error: 'channel not found' }, 404);
+    if (!ok) return c.json({ error: 'key not found' }, 404); // 此前改不存在的 key 静默 200（审查 C-M2）
+    return c.json(maskChannel(ch, true));
   });
 
   app.delete('/channels/:id/keys/:keyId', (c) => {
@@ -267,6 +269,10 @@ export function createAdmin(): Hono {
     if (!b.publicName || !b.channelId || !b.upstreamModel) {
       return c.json({ error: 'publicName / channelId / upstreamModel 必填' }, 400);
     }
+    // 非字符串真值（如 123）此前在 findModelByName 内 toLowerCase 直接 500（审查 C-M3）
+    if (typeof b.publicName !== 'string' || !b.publicName.trim() || typeof b.upstreamModel !== 'string' || !b.upstreamModel.trim()) {
+      return c.json({ error: 'publicName / upstreamModel 需为非空字符串' }, 400);
+    }
     if (store.findModelByName(b.publicName)) return c.json({ error: '同名模型已存在' }, 409);
     // 双向唯一性（W7）：模型名/tag 也不得遮蔽既有 auto 路由名
     if (store.findAutoRouteByName(b.publicName)) return c.json({ error: '外名与 auto 路由冲突（auto 名全局唯一）' }, 409);
@@ -305,8 +311,13 @@ export function createAdmin(): Hono {
 
   app.post('/vkeys', async (c) => {
     const b = await c.req.json().catch(() => ({} as any));
-    if (!b.name) return c.json({ error: 'name 必填' }, 400);
-    return c.json(store.createVKey(b), 201);
+    if (!b.name || typeof b.name !== 'string') return c.json({ error: 'name 必填（字符串）' }, 400);
+    try {
+      return c.json(store.createVKey(b), 201);
+    } catch (err: any) {
+      const msg = String(err?.message || '创建失败');
+      return c.json({ error: msg }, msg.includes('已存在') ? 409 : 400);
+    }
   });
 
   app.patch('/vkeys/:id', async (c) => {

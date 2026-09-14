@@ -341,11 +341,11 @@ export function anthropicToOpenaiRequest(body: any, opts: { upstreamModel: strin
   // 同 openaiToAnthropicRequest：以路由上限夹紧请求声明值（审查 M4）
   const reqMaxA = Number(body.max_tokens) || 0;
   const capA = opts.defaultMaxTokens;
-  const out: any = {
-    model: opts.upstreamModel,
-    messages,
-    max_tokens: reqMaxA ? (capA ? Math.min(reqMaxA, capA) : reqMaxA) : (capA || 8192),
-  };
+  const maxTokA = reqMaxA ? (capA ? Math.min(reqMaxA, capA) : reqMaxA) : (capA || 8192);
+  const out: any = { model: opts.upstreamModel, messages };
+  // 推理模型族（gpt-5*/o 系列）只认 max_completion_tokens，发 max_tokens 会被 400（审查需确认项，预防适配）
+  if (/^(gpt-5|o[0-9])/i.test(opts.upstreamModel || '')) out.max_completion_tokens = maxTokA;
+  else out.max_tokens = maxTokA;
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
   if (body.stop_sequences) out.stop = body.stop_sequences;
