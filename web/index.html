@@ -347,6 +347,133 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     const out = el('div', {}, wrap, legend);
     return out;
   };
+  views.overview = async () => {
+    const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
+    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
+    const box = el('div');
+    const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
+    let logs = allLogs.filter((l) => l.ts >= from);
+    const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
+    if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
+    const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
+    box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
+      el('div', {},
+        el('h2', { style: 'margin:0' }, '使用统计'),
+        el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, '查看 AI 模型的使用情况和成本统计 · 渠道 ' + o.channels.length + ' · 路由 ' + (o.models + o.autoRoutes) + ' · 对外 Key ' + o.vkeys + ' · 日志 ' + o.logs + ' 条')),
+      el('div', { class: 'row', style: 'gap:8px' },
+        sel([['', '全部模型'], ...modelNames.map((m) => [m, m])], ovSt.model, (v) => { ovSt.model = v; go('overview'); }),
+        sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
+        sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
+      )));
+    // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
+    if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
+      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, o.logRetention && o.logRetention <= 5000
+        ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'
+        : '本页统计仅取最近 5000 条日志——更早记录未纳入（当前保留上限 ' + (o.logRetention || '未设') + ' 条）'));
+    }
+    const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
+    const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
+    const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
+    const hero = el('div', { class: 'card', style: 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px' },
+      el('div', {}, el('div', { class: 'k' }, '真实消耗 Tokens'),
+        el('div', { style: 'font-size:30px;font-weight:700' }, num(realTok), el('small', { class: 'muted' }, ' ≈ ' + money(tot.cost)))),
+      el('div', { class: 'row', style: 'gap:0' },
+        el('div', { style: 'padding:0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总请求数'), el('div', { style: 'font-size:18px;font-weight:600' }, num(tot.requests), tot.errors ? el('small', { class: 'err-text' }, ' · 失败 ' + tot.errors) : null)),
+        el('div', { style: 'padding:0 4px 0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总成本'), el('div', { style: 'font-size:18px;font-weight:600' }, money(tot.cost)))));
+    box.append(hero);
+    const sub = (k, v, extra) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, extra ? el('small', {}, ' ' + extra) : null));
+    box.append(el('div', { class: 'grid cards', style: 'grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:10px' },
+      sub('新增输入', num(tot.pin)),
+      sub('Output', num(tot.pout)),
+      sub('缓存创建', num(tot.cw)),
+      sub('缓存命中', num(tot.cr)),
+      el('div', { class: 'card' }, el('div', { class: 'row', style: 'justify-content:space-between' }, el('span', { class: 'k' }, '缓存命中率'), el('b', { style: hitRate >= 30 ? 'color:var(--ok)' : '' }, hitRate + '%')),
+        el('div', { class: 'bar', style: 'margin-top:8px' }, el('i', { style: 'width:' + Math.min(100, hitRate) + '%' })))));
+    const hourly = ovSt.hours <= 48;
+    const step = hourly ? 3600e3 : 86400e3;
+    const align = (t) => { const d = new Date(t); if (hourly) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); };
+    const buckets = new Map();
+    const startT = align(Date.now() - (ovSt.hours * 3600e3 - step));
+    for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
+    for (const l of logs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
+    const bArr = [...buckets.values()];
+    const chartCard = el('div', { class: 'card', style: 'margin-top:12px' },
+      el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { style: 'margin:0' }, '使用趋势'),
+        el('span', { class: 'muted' }, hourly ? '按小时' : '按天')),
+      svgChart(bArr, hourly));
+    box.append(chartCard);
+    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['speed', '速度排行'], ['pool', '号池健康']];
+    box.append(el('div', { class: 'row', style: 'gap:6px;margin:16px 0 10px' },
+      ...TABS.map(([k, t]) => el('button', { class: 'btn sm' + (ovSt.tab === k ? ' primary' : ''), onclick: () => { ovSt.tab = k; go('overview'); } }, t))));
+    const groupAgg = (keyFn) => {
+      const m = new Map();
+      for (const l of logs) {
+        const k = keyFn(l) || '-';
+        if (!m.has(k)) m.set(k, Object.assign({ key: k, latSum: 0 }, newAgg()));
+        const b = m.get(k); addAgg(b, l); b.latSum += l.latencyMs || 0;
+      }
+      return [...m.values()].sort((a, b) => b.requests - a.requests);
+    };
+    if (ovSt.tab === 'logs') {
+      const fbar = el('div', { class: 'card', style: 'padding:10px 12px;margin-bottom:10px' },
+        el('div', { class: 'row', style: 'gap:8px' },
+          sel([['', '全部'], ['ok', '仅成功'], ['err', '仅失败']], ovSt.fstat, (v) => { ovSt.fstat = v; go('overview'); }),
+          el('span', { class: 'muted' }, ovSt.hours === 24 ? '当天' : ovSt.hours === 168 ? '近 7 天' : '近 30 天' + (ovSt.model ? ' · ' + ovSt.model : ''))));
+      box.append(fbar);
+      let rows = logs;
+      if (ovSt.fstat === 'ok') rows = rows.filter((l) => l.ok);
+      if (ovSt.fstat === 'err') rows = rows.filter((l) => !l.ok);
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, '计费模型'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '总成本'), el('th', {}, '用时/首字'), el('th', {}, '状态'), el('th', {}, '来源')));
+      for (const l of rows.slice(0, 200)) {
+        t.append(el('tr', { title: (l.retries || []).join('\n') || l.error || '' },
+          el('td', { class: 'mono muted' }, new Date(l.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })),
+          el('td', { class: 'muted' }, l.channelName || '-'),
+          el('td', { class: 'mono' }, (l.requestedModel || '-') + (l.routedTo && l.routedTo !== l.requestedModel ? ' → ' + l.routedTo : '')),
+          el('td', { class: 'mono' }, num(l.promptTokens)), el('td', { class: 'mono' }, num(l.completionTokens)),
+          el('td', { class: 'mono' }, money(l.costUsd)),
+          el('td', { class: 'mono muted' }, l.latencyMs + 'ms' + (l.ttftMs ? ' / ' + l.ttftMs + 'ms' : '')),
+          el('td', {}, el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status))),
+          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : l.wire ? 'OpenAI' : '-')));
+      }
+      if (!rows.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
+      box.append(t);
+      if (rows.length > 200) box.append(el('div', { class: 'muted', style: 'margin-top:6px' }, '共 ' + rows.length + ' 条，仅显示最近 200 条'));
+    } else if (ovSt.tab === 'provider' || ovSt.tab === 'model') {
+      const g = ovSt.tab === 'provider' ? groupAgg((l) => l.channelName) : groupAgg((l) => l.requestedModel);
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, ovSt.tab === 'provider' ? 'Provider（渠道）' : '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读/写'), el('th', {}, '成本'), el('th', {}, '平均延迟')));
+      for (const b of g) {
+        t.append(el('tr', {}, el('td', { class: 'mono' }, b.key), el('td', {}, b.requests),
+          el('td', { class: b.errors ? 'err-text' : '' }, b.errors),
+          el('td', { class: 'mono' }, num(b.pin)), el('td', { class: 'mono' }, num(b.pout)),
+          el('td', { class: 'mono muted' }, num(b.cr) + ' / ' + num(b.cw)),
+          el('td', { class: 'mono' }, money(b.cost)),
+          el('td', { class: 'mono muted' }, (b.requests ? Math.round(b.latSum / b.requests) : 0) + 'ms')));
+      }
+      if (!g.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
+      box.append(t);
+    } else if (ovSt.tab === 'speed') {
+      box.append(renderSpeedTab(await speedFetch()));
+    } else if (ovSt.tab === 'pool') {
+      const t = el('table');
+      t.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
+      for (const c of o.channels) {
+        const pct = c.keys ? Math.round((c.available / c.keys) * 100) : 0;
+        t.append(el('tr', {}, el('td', {}, c.name), el('td', {}, proto(c.protocol)),
+          el('td', {}, el('div', { class: 'row' }, el('div', { class: 'bar' }, el('i', { style: 'width:' + pct + '%', class: pct === 0 ? 'e' : '' })), el('span', { class: 'muted' }, c.available + '/' + c.keys))),
+          el('td', {}, c.cooldown ? el('span', { class: 'pill warn' }, c.cooldown + ' 冷却中') : c.available ? el('span', { class: 'pill ok' }, '正常') : el('span', { class: 'pill err-text' }, '不可用')),
+          el('td', {}, el('button', { class: 'btn sm', onclick: () => go('channels') }, '管理'))));
+      }
+      if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
+      box.append(t);
+    }
+    if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
+    return box;
+  };
+}
+
+
 // ---------------- 配置组导出/导入（config-bundle v2.1） ----------------
 /** 出包前疑似密钥启发式（DR-CB-K）：只做标黄提示不阻断；自由文本藏 key 是真实模式。 */
 function scanBundleForSecrets(b) {
@@ -512,131 +639,6 @@ function renderSpeedTab(pack) {
   return frag;
 }
 
-  views.overview = async () => {
-    const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
-    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
-    const box = el('div');
-    const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
-    let logs = allLogs.filter((l) => l.ts >= from);
-    const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
-    if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
-    const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
-    box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
-      el('div', {},
-        el('h2', { style: 'margin:0' }, '使用统计'),
-        el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, '查看 AI 模型的使用情况和成本统计 · 渠道 ' + o.channels.length + ' · 路由 ' + (o.models + o.autoRoutes) + ' · 对外 Key ' + o.vkeys + ' · 日志 ' + o.logs + ' 条')),
-      el('div', { class: 'row', style: 'gap:8px' },
-        sel([['', '全部模型'], ...modelNames.map((m) => [m, m])], ovSt.model, (v) => { ovSt.model = v; go('overview'); }),
-        sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
-        sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
-      )));
-    // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
-    if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
-      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, o.logRetention && o.logRetention <= 5000
-        ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'
-        : '本页统计仅取最近 5000 条日志——更早记录未纳入（当前保留上限 ' + (o.logRetention || '未设') + ' 条）'));
-    }
-    const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
-    const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
-    const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
-    const hero = el('div', { class: 'card', style: 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px' },
-      el('div', {}, el('div', { class: 'k' }, '真实消耗 Tokens'),
-        el('div', { style: 'font-size:30px;font-weight:700' }, num(realTok), el('small', { class: 'muted' }, ' ≈ ' + money(tot.cost)))),
-      el('div', { class: 'row', style: 'gap:0' },
-        el('div', { style: 'padding:0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总请求数'), el('div', { style: 'font-size:18px;font-weight:600' }, num(tot.requests), tot.errors ? el('small', { class: 'err-text' }, ' · 失败 ' + tot.errors) : null)),
-        el('div', { style: 'padding:0 4px 0 18px;border-left:1px solid var(--line)' }, el('div', { class: 'k' }, '总成本'), el('div', { style: 'font-size:18px;font-weight:600' }, money(tot.cost)))));
-    box.append(hero);
-    const sub = (k, v, extra) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, extra ? el('small', {}, ' ' + extra) : null));
-    box.append(el('div', { class: 'grid cards', style: 'grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:10px' },
-      sub('新增输入', num(tot.pin)),
-      sub('Output', num(tot.pout)),
-      sub('缓存创建', num(tot.cw)),
-      sub('缓存命中', num(tot.cr)),
-      el('div', { class: 'card' }, el('div', { class: 'row', style: 'justify-content:space-between' }, el('span', { class: 'k' }, '缓存命中率'), el('b', { style: hitRate >= 30 ? 'color:var(--ok)' : '' }, hitRate + '%')),
-        el('div', { class: 'bar', style: 'margin-top:8px' }, el('i', { style: 'width:' + Math.min(100, hitRate) + '%' })))));
-    const hourly = ovSt.hours <= 48;
-    const step = hourly ? 3600e3 : 86400e3;
-    const align = (t) => { const d = new Date(t); if (hourly) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); };
-    const buckets = new Map();
-    const startT = align(Date.now() - (ovSt.hours * 3600e3 - step));
-    for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
-    for (const l of logs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
-    const bArr = [...buckets.values()];
-    const chartCard = el('div', { class: 'card', style: 'margin-top:12px' },
-      el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { style: 'margin:0' }, '使用趋势'),
-        el('span', { class: 'muted' }, hourly ? '按小时' : '按天')),
-      svgChart(bArr, hourly));
-    box.append(chartCard);
-    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['speed', '速度排行'], ['pool', '号池健康']];
-    box.append(el('div', { class: 'row', style: 'gap:6px;margin:16px 0 10px' },
-      ...TABS.map(([k, t]) => el('button', { class: 'btn sm' + (ovSt.tab === k ? ' primary' : ''), onclick: () => { ovSt.tab = k; go('overview'); } }, t))));
-    const groupAgg = (keyFn) => {
-      const m = new Map();
-      for (const l of logs) {
-        const k = keyFn(l) || '-';
-        if (!m.has(k)) m.set(k, Object.assign({ key: k, latSum: 0 }, newAgg()));
-        const b = m.get(k); addAgg(b, l); b.latSum += l.latencyMs || 0;
-      }
-      return [...m.values()].sort((a, b) => b.requests - a.requests);
-    };
-    if (ovSt.tab === 'logs') {
-      const fbar = el('div', { class: 'card', style: 'padding:10px 12px;margin-bottom:10px' },
-        el('div', { class: 'row', style: 'gap:8px' },
-          sel([['', '全部'], ['ok', '仅成功'], ['err', '仅失败']], ovSt.fstat, (v) => { ovSt.fstat = v; go('overview'); }),
-          el('span', { class: 'muted' }, ovSt.hours === 24 ? '当天' : ovSt.hours === 168 ? '近 7 天' : '近 30 天' + (ovSt.model ? ' · ' + ovSt.model : ''))));
-      box.append(fbar);
-      let rows = logs;
-      if (ovSt.fstat === 'ok') rows = rows.filter((l) => l.ok);
-      if (ovSt.fstat === 'err') rows = rows.filter((l) => !l.ok);
-      const t = el('table');
-      t.append(el('tr', {}, el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, '计费模型'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '总成本'), el('th', {}, '用时/首字'), el('th', {}, '状态'), el('th', {}, '来源')));
-      for (const l of rows.slice(0, 200)) {
-        t.append(el('tr', { title: (l.retries || []).join('\n') || l.error || '' },
-          el('td', { class: 'mono muted' }, new Date(l.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })),
-          el('td', { class: 'muted' }, l.channelName || '-'),
-          el('td', { class: 'mono' }, (l.requestedModel || '-') + (l.routedTo && l.routedTo !== l.requestedModel ? ' → ' + l.routedTo : '')),
-          el('td', { class: 'mono' }, num(l.promptTokens)), el('td', { class: 'mono' }, num(l.completionTokens)),
-          el('td', { class: 'mono' }, money(l.costUsd)),
-          el('td', { class: 'mono muted' }, l.latencyMs + 'ms' + (l.ttftMs ? ' / ' + l.ttftMs + 'ms' : '')),
-          el('td', {}, el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status))),
-          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : l.wire ? 'OpenAI' : '-')));
-      }
-      if (!rows.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
-      box.append(t);
-      if (rows.length > 200) box.append(el('div', { class: 'muted', style: 'margin-top:6px' }, '共 ' + rows.length + ' 条，仅显示最近 200 条'));
-    } else if (ovSt.tab === 'provider' || ovSt.tab === 'model') {
-      const g = ovSt.tab === 'provider' ? groupAgg((l) => l.channelName) : groupAgg((l) => l.requestedModel);
-      const t = el('table');
-      t.append(el('tr', {}, el('th', {}, ovSt.tab === 'provider' ? 'Provider（渠道）' : '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读/写'), el('th', {}, '成本'), el('th', {}, '平均延迟')));
-      for (const b of g) {
-        t.append(el('tr', {}, el('td', { class: 'mono' }, b.key), el('td', {}, b.requests),
-          el('td', { class: b.errors ? 'err-text' : '' }, b.errors),
-          el('td', { class: 'mono' }, num(b.pin)), el('td', { class: 'mono' }, num(b.pout)),
-          el('td', { class: 'mono muted' }, num(b.cr) + ' / ' + num(b.cw)),
-          el('td', { class: 'mono' }, money(b.cost)),
-          el('td', { class: 'mono muted' }, (b.requests ? Math.round(b.latSum / b.requests) : 0) + 'ms')));
-      }
-      if (!g.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
-      box.append(t);
-    } else if (ovSt.tab === 'speed') {
-      box.append(renderSpeedTab(await speedFetch()));
-    } else if (ovSt.tab === 'pool') {
-      const t = el('table');
-      t.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
-      for (const c of o.channels) {
-        const pct = c.keys ? Math.round((c.available / c.keys) * 100) : 0;
-        t.append(el('tr', {}, el('td', {}, c.name), el('td', {}, proto(c.protocol)),
-          el('td', {}, el('div', { class: 'row' }, el('div', { class: 'bar' }, el('i', { style: 'width:' + pct + '%', class: pct === 0 ? 'e' : '' })), el('span', { class: 'muted' }, c.available + '/' + c.keys))),
-          el('td', {}, c.cooldown ? el('span', { class: 'pill warn' }, c.cooldown + ' 冷却中') : c.available ? el('span', { class: 'pill ok' }, '正常') : el('span', { class: 'pill err-text' }, '不可用')),
-          el('td', {}, el('button', { class: 'btn sm', onclick: () => go('channels') }, '管理'))));
-      }
-      if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
-      box.append(t);
-    }
-    if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
-    return box;
-  };
-}
 // ---------------- 模型路由（v3 单表：新增时选类型，single/auto 同页管理） ----------------
 views.models = async () => {
   const myGen = viewGen; // F1：同 overview——过期代际不得留下 15s 孤儿定时器
