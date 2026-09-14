@@ -1188,7 +1188,12 @@ section('14. 信息暴露、usage 口径与主键完整性');
   const v3del = await fetch('http://127.0.0.1:18822/api/channels/c1', { method: 'DELETE', headers: v3h });
   check('R3 删除级联 autoRoutesReferencing 不再 TypeError', v3del.status === 200, String(v3del.status));
   const v3ex = new Promise<void>((r) => v3.on('exit', () => r()));
-  v3.kill('SIGTERM');
+  if (process.platform === 'win32') {
+    // win 的 SIGTERM=TerminateProcess：exit 钩子根本不给跑——优雅停机只能走生产真路径 HTTP /shutdown
+    await fetch('http://127.0.0.1:18822/api/shutdown', { method: 'POST', headers: v3h }).catch(() => { /* 响应可能随进程一起走 */ });
+  } else {
+    v3.kill('SIGTERM');
+  }
   await Promise.race([v3ex, new Promise((r) => setTimeout(r, 9000))]);
   check('R3 优雅退出后锁文件被清理（exit 钩子比对格式修复）', !fs6.existsSync(join(v3Dir, 'db.json.lock')));
   try { fs6.rmSync(v3Dir, { recursive: true, force: true }); } catch {}
