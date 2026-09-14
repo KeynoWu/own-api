@@ -47,6 +47,10 @@ export interface UpstreamResult {
   errorText?: string;
   /** 结束本次调用的全部计时器；响应彻底消费完毕后必须调用 */
   dispose: () => void;
+  /** 硬终止：中止上游 fetch（watchdog 用）。与 dispose 不同，会真正掐断在途读取并向流注入错误 */
+  abort: (reason: string) => void;
+  /** 读取侧最终错误原因（sniff 吞异常后留给上层的文案修正线索） */
+  getStreamError: () => string | undefined;
 }
 
 /**
@@ -99,6 +103,10 @@ export async function callUpstream(opts: {
     disarm();
     opts.signal?.removeEventListener('abort', onClientAbort);
   };
+  let streamError: string | undefined;
+  const abort = (reason: string) => {
+    ac.abort(new Error(reason));
+  };
 
   try {
     const res = await fetch(url, {
@@ -118,12 +126,14 @@ export async function callUpstream(opts: {
         contentType: res.headers.get('content-type') || '',
         errorText: text.slice(0, 2000),
         dispose,
+        abort,
+        getStreamError: () => streamError,
       };
     }
 
     if (!res.body) {
       dispose();
-      return { status: res.status, headers: res.headers, body: null, contentType: res.headers.get('content-type') || '', dispose };
+      return { status: res.status, headers: res.headers, body: null, contentType: res.headers.get('content-type') || '', dispose, abort, getStreamError: () => streamError };
     }
 
     // 进入响应体阶段：空闲超时只在"正向上游取数"期间武装（M6）。
@@ -145,6 +155,7 @@ export async function callUpstream(opts: {
             ctrl.enqueue(r.value);
           }
         } catch (err) {
+          streamError = ac.signal.reason instanceof Error ? ac.signal.reason.message : String((err as any)?.message || err);
           dispose();
           ctrl.error(err);
         }
@@ -162,6 +173,8 @@ export async function callUpstream(opts: {
       body: guarded,
       contentType: res.headers.get('content-type') || '',
       dispose,
+      abort,
+      getStreamError: () => streamError,
     };
   } catch (err: any) {
     const aborted = err?.name === 'AbortError';

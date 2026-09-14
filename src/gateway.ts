@@ -88,6 +88,11 @@ function fail(c: Context, wire: WireFormat, status: number, message: string, ext
   return c.json(errorBody(wire, status, message) as any, status as any, { 'cache-control': 'no-store', ...(extra || {}) });
 }
 
+/** 出站 Retry-After 与冷却侧同口径夹紧：上游回离谱值也不能让客户端等 31 年（审查 L1） */
+function retryAfterHeader(ms: number, cooldownMaxMs: number) {
+  return String(Math.max(1, Math.min(Math.ceil(ms / 1000), Math.ceil(cooldownMaxMs / 1000))));
+}
+
 /** 内部拓扑信息默认不外泄：这些头能反推出渠道名与 key 尾号 */
 function debugHeaders(enabled: boolean, info: { channel: Channel; key: string; publicName: string; attempts: number; fallback: boolean }) {
   if (!enabled) return {};
@@ -235,6 +240,8 @@ interface AttemptInput {
   /** 本次 attempt 的响应头超时（auto 链已由预算 min 过，N10-a） */
   headTimeoutMs: number;
   idleTimeoutMs: number;
+  /** auto 链预算的绝对截止（Date.now() 基准）。key 级重试的每一次 callUpstream 前按剩余预算重算头/空闲超时（审查 L4：让预算成硬上限） */
+  budgetDeadline?: number;
   maxAttempts: number;
   /** 候选链已累计的上游尝试数（log.attempts 续加） */
   attemptBase: number;
@@ -306,6 +313,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     reuseKey = undefined;
     if (!key) {
       if (!retries.length) lastMessage = `渠道 "${channel.name}" 号池为空或全部禁用`;
+      else if (tried.size >= channel.keys.length) lastMessage = `${lastMessage}（号池 ${tried.size} 把 key 已全部尝试）`;
       break;
     }
     log.attempts = a.attemptBase + attempt;
@@ -313,14 +321,21 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
 
     let up: Awaited<ReturnType<typeof callUpstream>>;
     try {
+      let headMs = a.headTimeoutMs;
+      let idleMs = a.idleTimeoutMs;
+      if (a.budgetDeadline !== undefined) {
+        const rem = a.budgetDeadline - Date.now();
+        headMs = Math.max(1_000, Math.min(headMs, rem));
+        idleMs = Math.min(idleMs, Math.max(5_000, rem));
+      }
       up = await callUpstream({
         channel,
         apiKey: key.key,
         protocol,
         endpoint: upstreamEndpoint,
         body: upstreamBody,
-        timeoutMs: a.headTimeoutMs,
-        idleTimeoutMs: a.idleTimeoutMs,
+        timeoutMs: headMs,
+        idleTimeoutMs: idleMs,
         signal: c.req.raw.signal,
       });
     } catch (err: any) {
@@ -337,6 +352,11 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     }
 
     if (up.status >= 400) {
+      // 断开不是 key 故障：错误体下载与断开竞态时不得 classify/冷却（§8-4）
+      if (a.isAborted()) {
+        up.dispose();
+        return { kind: 'client_abort' };
+      }
       up.dispose();
       const kind = classifyFailure(up.status);
       const brief = scrubOut(extractUpstreamError(up.errorText || '', up.status), key.key);
@@ -468,8 +488,11 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
         const watchdogMs = a.headTimeoutMs + a.idleTimeoutMs * 8;
         let wd: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
           wd = undefined;
-          up.dispose();
-          finished(new Error(`流绝对时限 ${Math.round(watchdogMs / 1000)}s 到达（下游疑似停读/半开）`));
+          // 修复（审查 M1）：dispose 从不 abort、还拆掉断开桥 → 上游被无限钉住。改为真 abort 掐断上游；
+          // finished 兜底记账（pump 停摆时错误无处抛出）——finalize 幂等，pump 醒来再 fire 也只记一次。
+          const werr = new Error(`流绝对时限 ${Math.round(watchdogMs / 1000)}s 到达（下游疑似停读/半开）`);
+          up.abort(werr.message);
+          finished(werr);
         }, watchdogMs);
         wd.unref?.();
         const trackFinished = (err?: any, kind?: 'cancel') => {
@@ -491,7 +514,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     }
 
     // 非流式（含"客户端要流式、上游只给 JSON"）：先拿到对象
-    const json = await readJson(up.body);
+    const json = await readJson(up.body, settings.maxBodyBytes);
     up.dispose();
     // M4：sniff 窗口的读异常被吞成"按 JSON 处理"，取消会在这里现形——
     // 不复查就会 recordFailure（key 冷却）+ 健康分记败，断开不是故障（§8-4）
@@ -499,7 +522,8 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     // 守卫必须严：200 + null/标量/数组体直接往下走会踩属性访问抛未捕获异常
     if (json === undefined || json === null || typeof json !== 'object' || Array.isArray(json)) {
       lastStatus = 502;
-      lastMessage = '上游返回 200 但响应体不是合法的 JSON 对象';
+      // sniff 窗口的读异常（含空闲超时）不再被吞成"非法 JSON"——透出真实原因（审查 L9）
+      lastMessage = up.getStreamError() || '上游返回 200 但响应体不是合法的 JSON 对象';
       recordFailure(channel, key, 'upstream', lastMessage);
       retries.push(`[${channel.name}/${maskKey(key.key)}] ${lastMessage}`);
       lastWasRateLimit = false;
@@ -737,7 +761,7 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
       outcome.message,
       {
         ...(settings.debugHeaders && retries.length ? { 'x-lm-retries': String(retries.length) } : {}),
-        ...(outcome.rateLimit && outcome.retryAfterMs !== undefined ? { 'retry-after': String(Math.max(1, Math.ceil(outcome.retryAfterMs / 1000))) } : {}),
+        ...(outcome.rateLimit && outcome.retryAfterMs !== undefined ? { 'retry-after': retryAfterHeader(outcome.retryAfterMs, settings.cooldownMaxMs) } : {}),
       },
     );
   } catch (err: any) {
@@ -881,7 +905,8 @@ async function runAuto(ctx: AutoRunCtx) {
       aliasName: autoName, logPublicName: cur.name, aliasDiffers: true, fallback: false,
       retries,
       headTimeoutMs,
-      idleTimeoutMs: Math.min(ctx.idleTimeoutMs, Math.max(5_000, remaining)), // S4：响应体阶段同样受链预算夹制
+      idleTimeoutMs: ctx.idleTimeoutMs, // S4/L4：头/空闲超时由 attemptRoute 每次按剩余预算重算（budgetDeadline）
+      budgetDeadline: chainT0 + maxChainMs,
       maxAttempts: ctx.maxAttempts,
       attemptBase: log.attempts,
       isAuto: true,
@@ -936,7 +961,7 @@ async function runAuto(ctx: AutoRunCtx) {
   finalize({ status: finalStatus, error: msg, retries: retries.length ? retries : undefined });
   return fail(c, wire, finalStatus, msg, {
     ...(settings.debugHeaders && retries.length ? { 'x-lm-retries': String(retries.length) } : {}),
-    ...(finalStatus === 429 && retryAfterMs !== undefined ? { 'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) } : {}),
+    ...(finalStatus === 429 && retryAfterMs !== undefined ? { 'retry-after': retryAfterHeader(retryAfterMs, settings.cooldownMaxMs) } : {}),
   });
 }
 
@@ -991,10 +1016,29 @@ function applyUsage(u: Usage, protocol: string, json: any): Usage {
   return u;
 }
 
-async function readJson(body: ReadableStream<Uint8Array> | null): Promise<any> {
+/** 上游响应体读取：与入站同理设上限，超限按"非法响应"走 upstream 失败重试，防超大 200 冻结事件循环（审查 L5） */
+async function readJson(body: ReadableStream<Uint8Array> | null, maxBytes = 32 * 1024 * 1024): Promise<any> {
   if (!body) return undefined;
   try {
-    const text = await new Response(body).text();
+    const reader = body.getReader();
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          return undefined;
+        }
+        parts.push(value);
+      }
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { all.set(p, off); off += p.byteLength; }
+    const text = new TextDecoder().decode(all);
     return text ? JSON.parse(text) : undefined;
   } catch {
     return undefined;

@@ -3,10 +3,10 @@ import type { Channel, ChannelKey } from './types.ts';
 
 /** 一次上游尝试的结果分类 */
 export type FailureKind =
-  | 'auth' // 401/403：key 无效
+  | 'auth' // 401/402/403：key 级故障（无效 / 余额不足——聚合商典型形态，换 key 才有救）
   | 'rate_limit' // 429：限流
-  | 'upstream' // 5xx / 网络 / 超时
-  | 'invalid_request'; // 4xx：换 key 也没用，不重试
+  | 'upstream' // 5xx / 408 / 网络 / 超时
+  | 'invalid_request'; // 其余 4xx：换 key 也没用，不重试
 
 export interface PickContext {
   /** 本次请求内已经试过的 keyId，不再重复选取 */
@@ -62,8 +62,10 @@ export function availableKeyCount(channel: Channel, now = Date.now()) {
 
 export function classifyFailure(status: number, err?: unknown): FailureKind {
   if (!status && err) return 'upstream';
-  if (status === 401 || status === 403) return 'auth';
+  // 402（余额不足）是 key 级故障：换 key + 冷却，与鉴权失败同类处理，绝不短接全链
+  if (status === 401 || status === 402 || status === 403) return 'auth';
   if (status === 429) return 'rate_limit';
+  if (status === 408) return 'upstream'; // 上游瞬态超时：可换 key 重试
   if (status >= 500) return 'upstream';
   return 'invalid_request';
 }
