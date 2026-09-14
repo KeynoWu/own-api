@@ -1,0 +1,3 @@
+    el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
+    el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
+    el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),

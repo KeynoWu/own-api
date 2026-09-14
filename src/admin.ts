@@ -7,6 +7,7 @@ import { forgetQuota } from './usage.ts';
 import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
+import { buildBundle } from './config-bundle.ts';
 import { clearHealth, clearHealthFor, clearSticky, healthSnapshot, stickyCount } from './auto.ts';
 import type { Channel } from './types.ts';
 
@@ -526,6 +527,7 @@ export function createAdmin(): Hono {
   app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24))));
   // 速度排行（speed-insights v1.1）：hours 归一钳制在 buildSpeedStats 内（DR-SI-8）
   app.get('/stats/speed', (c) => c.json(buildSpeedStats(Number(c.req.query('hours') ?? 24))));
+  app.get('/config/export', (c) => c.json(buildBundle()));
 
   // ---------- settings ----------
   // 管理令牌不再随设置回显（审查 A-M：GET /settings 整包吐 adminToken 让任何 XSS 一步拿权）。

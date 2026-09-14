@@ -1,0 +1,2 @@
+    el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
+    el('span', { class: 'muted' }, '统一代理只接受这里登记过的 model；自动路由的 model_auto 类名字同样在这里管理。'),

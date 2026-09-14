@@ -1,0 +1,20 @@
+// ============ 19. 配置组导出（config-bundle CB-1） ============
+{
+  const leaky = 'sk-rtdead' + '0'.repeat(27) + '9z';
+  const ch: any = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'cb1-ch', baseUrl: 'http://127.0.0.1:9/v1', protocol: 'openai', keys: [leaky], note: '哨兵渠道' }) })).body;
+  const rr: any = (await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'cb1-model', channelId: ch.id, upstreamModel: 'cb1-m' }) })).body;
+  const ra: any = (await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'auto', publicName: 'cb1-auto', candidates: [{ routeId: rr.id, weight: 5 }] }) })).body;
+  const res = await fetch(BASE + '/api/config/export');
+  check('CB 导出无令牌 401', res.status === 401, String(res.status));
+  const r: any = (await api('/api/config/export', { headers: ADMIN })).body;
+  check('CB 导出 kind/version/三段结构', r?.kind === 'own-api-config-bundle' && r?.version === 1 && Array.isArray(r?.channels) && Array.isArray(r?.routes?.singles) && Array.isArray(r?.routes?.autos), JSON.stringify(r && { k: r.kind, v: r.version }));
+  const raw = JSON.stringify(r);
+  check('CB 导出零密钥痕迹（哨兵原文+keys字段全无）', raw.indexOf(leaky) === -1 && raw.indexOf('"keys"') === -1, String(raw.indexOf(leaky)) + '/' + String(raw.indexOf('"keys"')));
+  const cb1ch = (r.channels || []).find((c: any) => c.name === 'cb1-ch');
+  check('CB 渠道字段域含 enabled/timeoutMs（DR-CB-L）', !!cb1ch && 'enabled' in cb1ch && 'timeoutMs' in cb1ch, JSON.stringify(cb1ch && Object.keys(cb1ch)));
+  const s1 = (r.routes.singles || []).find((x: any) => x.publicName === 'cb1-model');
+  check('CB single 按渠道名引用', !!s1 && s1.channelName === 'cb1-ch' && !('channelId' in s1) && s1.upstreamModel === 'cb1-m', JSON.stringify(s1));
+  const a1 = (r.routes.autos || []).find((x: any) => x.publicName === 'cb1-auto');
+  const singNames = new Set((r.routes.singles || []).map((x: any) => x.publicName));
+  check('CB auto 候选按 publicName 引用且自洽', !!a1 && a1.candidates.length === 1 && a1.candidates[0].publicName === 'cb1-model' && a1.candidates[0].weight === 5 && !('routeId' in a1.candidates[0]) && (r.routes.autos || []).every((x: any) => x.candidates.every((cd: any) => singNames.has(cd.publicName) || (r.routes.autos || []).some((y: any) => y.publicName === cd.publicName))), JSON.stringify(a1));
+}

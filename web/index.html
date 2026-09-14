@@ -345,6 +345,35 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     const out = el('div', {}, wrap, legend);
     return out;
   };
+// ---------------- 配置组导出/导入（config-bundle v2.1） ----------------
+/** 出包前疑似密钥启发式（DR-CB-K）：只做标黄提示不阻断；自由文本藏 key 是真实模式。 */
+function scanBundleForSecrets(b) {
+  const re = /(sk|xoxb|sk-ant)[-_A-Za-z0-9]{16,}|[A-Za-z0-9_-]{40,}/;
+  const out = [];
+  const walk = (v, path) => {
+    if (typeof v === 'string') { if (re.test(v)) out.push(path); }
+    else if (Array.isArray(v)) { for (let i = 0; i < v.length; i++) walk(v[i], path + '[' + i + ']'); }
+    else if (v && typeof v === 'object') { for (const k in v) { if (k === 'exportedAt') continue; walk(v[k], path + '.' + k); } }
+  };
+  walk(b, '$');
+  return out;
+}
+async function exportConfig() {
+  const b = await api('/api/config/export');
+  const hits = scanBundleForSecrets(b);
+  const seen = {}; let dup = false;
+  for (const c of b.channels || []) { if (seen[c.name]) dup = true; seen[c.name] = 1; }
+  if (hits.length || dup) {
+    const msg = '导出前检查：' + (hits.length ? String.fromCharCode(10) + '疑似密钥文本（bundle 不该带，请人工复核）：' + hits.slice(0, 8).join('、') + (hits.length > 8 ? '…共 ' + hits.length + ' 处' : '') : '') + (dup ? String.fromCharCode(10) + '存在同名渠道，导入方将整条判冲突。' : '');
+    if (!confirm(msg + String.fromCharCode(10) + String.fromCharCode(10) + '仍要导出？')) return;
+  }
+  const d = new Date(); const p2 = (n) => String(n).padStart(2, '0');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(b, null, 2)], { type: 'application/json' }));
+  a.download = 'own-api-config-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '.json';
+  a.click();
+  toast('已导出全部配置（不含密钥）');
+}
 // ---------------- 速度排行（speed-insights v1.1） ----------------
 // renderSpeedTab 是纯展示层：只消费后端预计算数值，严禁在这里重算任何百分位（DR-SI-9），
 // DOM 桩钉会抽源断言本函数体不含 .sort( 与 Math.floor。
@@ -600,7 +629,8 @@ views.models = async () => {
 
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
-    el('span', { class: 'muted' }, '统一代理只接受这里登记过的 model；自动路由的 model_auto 类名字同样在这里管理。'),
+    el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
+    el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
   ));
 
   const t = el('table');
@@ -674,7 +704,8 @@ views.channels = async () => {
 
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: addChannel }, '+ 新增渠道'),
-    el('span', { class: 'muted' }, '同一渠道的多个 key 组成号池：加权轮询 + 失败自动退避切换。'),
+    el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
+    el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
   ));
 
   for (const c of channels) {

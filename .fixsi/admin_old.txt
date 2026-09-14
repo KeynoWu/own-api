@@ -1,0 +1,1 @@
+  app.get('/stats/speed', (c) => c.json(buildSpeedStats(Number(c.req.query('hours') ?? 24))));
