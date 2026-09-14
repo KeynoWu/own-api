@@ -143,9 +143,21 @@ class Store {
   private dirty = false;
   /** 日志单调序号（进程内，从已加载库续起）：日志流按 seq 增量推送，不受裁剪位移影响 */
   private logSeq = 0;
+  private pendingMigration = false;
 
   constructor() {
     this.db = this.load();
+    if (this.pendingMigration) {
+      // 迁移回写移出 load（审查 P2）：写失败 ≠ 数据损坏——保留内存态并稍后重试，
+      // 不再在解析 try/catch 里把健康数据误判成 corrupt 搬走
+      this.pendingMigration = false;
+      try {
+        this.persist();
+      } catch (err) {
+        console.error('[store] v2→v3 迁移回写失败（内存态继续服务，稍后重试）', err);
+        this.save();
+      }
+    }
     this.logSeq = (Array.isArray(this.db.logs) ? this.db.logs : []).reduce((m, l) => Math.max(m, (l && l.seq) || 0), 0);
   }
 
@@ -165,24 +177,49 @@ class Store {
       // 单表 routes（模块合并）；v2 旧库的 models/autoRoutes 两表就地迁移（保留 id 与字段）
       const rawRoutes = arr<RouteEntry>(parsed.routes);
       let migrated = false;
+      // 元素级形状过滤（审查 P2）：字段级 arr<T> 只兜非数组；单条坏元素（缺 id 的路由/无 baseUrl 的渠道）
+      // 会带病进内存毒化所有运行期读路径。迁移分支同规——此前 legacy 完全不设防。
+      const validRoute = (r: any): r is RouteEntry =>
+        !!r && typeof r.id === 'string' && r.id !== '' && typeof r.publicName === 'string' && r.publicName !== '' && (r.type === 'single' || r.type === 'auto');
       let routes: RouteEntry[];
       if (rawRoutes) {
-        routes = rawRoutes.filter((r) => r && typeof r.id === 'string' && typeof r.publicName === 'string' && (r.type === 'single' || r.type === 'auto'));
+        routes = rawRoutes;
       } else {
         const legacy = parsed as unknown as { models?: unknown; autoRoutes?: unknown };
         routes = [
-          ...(arr<ModelRoute>(legacy.models) ?? []).map((m) => ({ ...m, type: 'single' as const })),
-          ...(arr<AutoRoute>(legacy.autoRoutes) ?? []).map((a) => ({ ...a, type: 'auto' as const })),
+          ...(arr<any>(legacy.models) ?? []).map((m) => ({ ...m, type: 'single' as const })),
+          ...(arr<any>(legacy.autoRoutes) ?? []).map((a) => ({ ...a, candidates: Array.isArray((a as any)?.candidates) ? (a as any).candidates : [], type: 'auto' as const })),
         ];
         migrated = Array.isArray(legacy.models) || Array.isArray(legacy.autoRoutes);
       }
+      const keptRoutes = routes.filter(validRoute);
+      if (keptRoutes.length !== routes.length) console.warn(`[store] routes 丢弃 ${routes.length - keptRoutes.length} 条非法条目（缺 id/publicName 或 type 非法）`);
+      const seenIds = new Set<string>();
+      routes = keptRoutes.filter((r) => {
+        if (seenIds.has(r.id)) {
+          console.warn(`[store] 重复路由 id ${r.id}：仅保留首条`);
+          return false;
+        }
+        seenIds.add(r.id);
+        return true;
+      });
+      const chanOK = (ch: any) => !!ch && typeof ch.id === 'string' && typeof ch.baseUrl === 'string' && /^https?:\/\//i.test(ch.baseUrl) && (ch.protocol === 'openai' || ch.protocol === 'anthropic') && Array.isArray(ch.keys);
+      const chanRaw = arr<Channel>(parsed.channels) ?? base.channels;
+      const channels = chanRaw.filter(chanOK);
+      if (channels.length !== chanRaw.length) console.warn(`[store] channels 丢弃 ${chanRaw.length - channels.length} 条非法条目（缺 id/baseUrl 非 http(s)/protocol 非法/keys 非数组）`);
+      const vkOK = (v: any) => !!v && typeof v.id === 'string' && typeof v.key === 'string' && v.key !== '';
+      const vkRaw = arr<VirtualKey>(parsed.vkeys) ?? base.vkeys;
+      const vkeys = vkRaw.filter(vkOK);
+      if (vkeys.length !== vkRaw.length) console.warn(`[store] vkeys 丢弃 ${vkRaw.length - vkeys.length} 条非法条目`);
+      const logRaw = arr<RequestLog>(parsed.logs) ?? [];
+      const logs = logRaw.filter((l: any) => !!l && typeof l.ts === 'number');
       const merged: DBShape = {
         ...base,
         ...parsed,
-        channels: arr<Channel>(parsed.channels) ?? base.channels,
+        channels,
         routes,
-        vkeys: arr<VirtualKey>(parsed.vkeys) ?? base.vkeys,
-        logs: arr<RequestLog>(parsed.logs) ?? [],
+        vkeys,
+        logs,
         quotas: parsed.quotas && typeof parsed.quotas === 'object' && !Array.isArray(parsed.quotas) ? parsed.quotas : {},
         settings: { ...base.settings, ...(parsed.settings || {}) },
       };
@@ -190,9 +227,9 @@ class Store {
       delete (merged as any).models;
       delete (merged as any).autoRoutes;
       if (migrated) {
-        // 迁移立即回写：崩在半路也不会每次启动重迁
         merged.version = 3;
-        console.log('[store] 已将 v2 双表(models/autoRoutes)迁移为单表 routes 并回写');
+        this.pendingMigration = true;
+        console.log('[store] 已将 v2 双表(models/autoRoutes)迁移为单表 routes，构造完成后回写');
       }
       // 老库或手工改坏的库兜底：设置项重新过一遍校验
       const { value } = sanitizeSettings(
@@ -201,16 +238,20 @@ class Store {
       );
       merged.settings = { ...merged.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };
       if (!Array.isArray(merged.vkeys) || merged.vkeys.length === 0) merged.vkeys = [freshVKey()];
-      if (migrated) this.persist(merged);
       return merged;
     } catch (err) {
-      const backup = `${DB_FILE}.corrupt-${Date.now()}`;
-      try {
-        renameSync(DB_FILE, backup);
-      } catch {
-        /* ignore */
+      // 审查 P2：只有 JSON 真解析不动才配 .corrupt 改名备份；IO/权限等装载异常不得把健康数据当损坏搬走
+      if (err instanceof SyntaxError) {
+        const backup = `${DB_FILE}.corrupt-${Date.now()}`;
+        try {
+          renameSync(DB_FILE, backup);
+        } catch {
+          /* ignore */
+        }
+        console.error(`[store] db.json 解析失败，已备份到 ${backup}，使用空库启动`, err);
+      } else {
+        console.error('[store] db.json 装载异常（不判损坏、不改名，空库兜底启动，原文件保留）：', err);
       }
-      console.error(`[store] db.json 解析失败，已备份到 ${backup}，使用空库启动`, err);
       return emptyDb();
     }
   }
@@ -264,8 +305,13 @@ class Store {
       this.timer = null;
     }
     if (this.dirty) {
-      this.dirty = false;
-      this.persist();
+      // 先落盘成功再清脏（审查 P2）：persist 异常时保留脏标记等防抖窗重试；旧顺序在 exit 钩子里丢最后一秒数据
+      try {
+        this.persist();
+        this.dirty = false;
+      } catch (err) {
+        console.error('[store] flushSync 落盘失败（保留脏标记，下次机会重试）', err);
+      }
     }
   }
 
@@ -283,7 +329,10 @@ class Store {
       name: String(input.name ?? '').trim(),
       baseUrl: normalizeBaseUrl(String(input.baseUrl ?? '')),
       protocol: input.protocol === 'anthropic' ? 'anthropic' : 'openai',
-      keys: (Array.isArray(input.keys) ? input.keys : []).map((k) => makeKey(k.key, k.name, k.weight)),
+      // 空串 key 会造出恒失败的 key 反复吃池（审查 P2）：入口拒收
+      keys: (Array.isArray(input.keys) ? input.keys : [])
+        .filter((k) => !!k && typeof k.key === 'string' && k.key.trim() !== '')
+        .map((k) => makeKey(k.key, k.name, k.weight)),
       enabled: input.enabled !== false,
       extraHeaders: sanitizeExtraHeaders(input.extraHeaders),
       authStyle: input.authStyle === 'bearer' || input.authStyle === 'x-api-key' ? input.authStyle : undefined,
@@ -419,6 +468,10 @@ class Store {
       const v = input[nk];
       if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return { error: nk + ' 需为 ≥0 的数字' };
     }
+    for (const t of Array.isArray(input.tags) ? input.tags : []) {
+      const conflict = this.routeNameTaken(String(t));
+      if (conflict) return { error: 'tag "' + t + '" ' + conflict };
+    }
     const taken = this.routeNameTaken(input.publicName.trim());
     if (taken) return { error: taken };
     // W7 语义原样保留：tag 不得遮蔽既有 auto 路由名（旧 admin 校验搬进单表底座）
@@ -473,10 +526,12 @@ class Store {
       return 'conflict' as const;
     }
     if (typeof next.publicName === 'string' || next.tags !== undefined) {
-      const names = [typeof next.publicName === 'string' ? next.publicName : m.publicName, ...(Array.isArray(next.tags) ? next.tags : m.tags || [])]
-        .filter(Boolean)
-        .map((s) => String(s).toLowerCase());
-      if (this.db.routes.some((r) => r.id !== id && r.type === 'auto' && names.includes(r.publicName.toLowerCase()))) return 'conflict' as const;
+      // 审查 P2：本次变更引入的每一个名字（新外名+全部 tag）都要过 routeNameTaken——
+      // 旧检查只比对 auto 名，tag 撞上其它 single 的 publicName/tag 会静默双解析歧义
+      const names = new Set<string>();
+      if (typeof next.publicName === 'string') names.add(next.publicName.toLowerCase());
+      if (next.tags !== undefined) for (const t of Array.isArray(next.tags) ? next.tags : []) if (typeof t === 'string' && t) names.add(t.toLowerCase());
+      for (const n of names) if (this.routeNameTaken(n, id)) return 'conflict' as const;
     }
     Object.assign(m, next);
     this.save();
@@ -759,23 +814,49 @@ const LOCK_FILE = `${DB_FILE}.lock`;
 /** 同库单实例锁（审查 C-M5）：两个网关同写一份 db.json 会 last-writer-wins 互踩整库。
  *  桌面壳竞态双 spawn 正落在此窗口；持有者已死则回收陈旧锁。 */
 function acquireLock() {
+  mkdirSync(dirname(DB_FILE), { recursive: true, mode: 0o700 });
+  const payload = () => process.pid + ' ' + Date.now();
   try {
-    mkdirSync(dirname(DB_FILE), { recursive: true, mode: 0o700 });
-    if (existsSync(LOCK_FILE)) {
-      const pid = Number(readFileSync(LOCK_FILE, 'utf8').trim());
-      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
-        try {
-          process.kill(pid, 0);
-          console.error(`[store] 数据目录已被进程 ${pid} 使用（同一 db.json 不能多进程共写），拒绝启动以防互踩；请先停掉另一个实例`);
-          process.exit(1);
-        } catch {
-          /* 持有者已死：陈旧锁，继续接管 */
-        }
-      }
-    }
-    writeFileSync(LOCK_FILE, String(process.pid), { mode: 0o600 });
+    // 原子占锁（审查 P2）：flag wx 由内核裁决竞态——旧的 existsSync→write 双检窗口里
+    // 两个进程可同时判定对方已死、双双起网关互踩整库（桌面壳双 spawn 正在这窗口）
+    writeFileSync(LOCK_FILE, payload(), { mode: 0o600, flag: 'wx' });
+    return;
   } catch (err) {
-    console.error('[store] 锁检查失败（跳过，不阻断启动）：', err);
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      console.error('[store] 锁写入失败（跳过，不阻断启动）：', err);
+      return;
+    }
+  }
+  let holder = 0;
+  try {
+    holder = parseInt(readFileSync(LOCK_FILE, 'utf8').trim().split(/\s+/)[0] || '', 10) || 0;
+  } catch {
+    /* 读不动按陈旧锁处理 */
+  }
+  let alive = false;
+  if (holder > 0 && holder !== process.pid) {
+    try {
+      process.kill(holder, 0);
+      alive = true;
+    } catch (e) {
+      // EPERM=活着（别人的进程，绝不能夺锁）；只有 ESRCH 才算死
+      alive = (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+  if (alive) {
+    console.error(`[store] 数据目录已被进程 ${holder} 使用（同一 db.json 不能多进程共写），拒绝启动以防互踩；请先停掉另一个实例`);
+    process.exit(1);
+  }
+  try {
+    unlinkSync(LOCK_FILE);
+  } catch {
+    /* ignore */
+  }
+  try {
+    writeFileSync(LOCK_FILE, payload(), { mode: 0o600, flag: 'wx' });
+  } catch {
+    console.error('[store] 陈旧锁接管在竞态中败给另一实例，拒绝启动');
+    process.exit(1);
   }
 }
 acquireLock();

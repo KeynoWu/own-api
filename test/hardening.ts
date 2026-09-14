@@ -830,6 +830,67 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('迁移落盘回写：routes 取代 models/autoRoutes（v3）', migDb.version === 3 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined, JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
   rmSync(migDir, { recursive: true, force: true });
 }
+// ---- 审查 P2：脏库迁移矩阵（元素级过滤；坏条目丢弃并告警，好数据一概保全） ----
+{
+  const { spawn } = await import('node:child_process');
+  const fs4 = await import('node:fs');
+  const dirtyDir = mkdtempSync(join(tmpdir(), 'ownapi-dirty-'));
+  const dirty = {
+    version: 2,
+    quotas: {},
+    channels: [
+      { id: 'ch_ok', name: 'ok', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'openai', keys: [{ id: 'k1', key: 'k-ok', name: 'n', weight: 1, enabled: true }], enabled: true, createdAt: 1 },
+      { id: 'ch_broken', name: 'no-baseurl' },
+      'not-an-object',
+    ],
+    models: [
+      { id: 'm_ok', publicName: 'good-m', channelId: 'ch_ok', upstreamModel: 'mock-gpt-5', enabled: true, createdAt: 1 },
+      null,
+      { id: 'm_nopname', channelId: 'ch_ok', upstreamModel: 'u' },
+      { id: 'm_dup', publicName: 'dup-first', channelId: 'ch_ok', upstreamModel: 'a', enabled: true, createdAt: 1 },
+      { id: 'm_dup', publicName: 'dup-second', channelId: 'ch_ok', upstreamModel: 'b', enabled: true, createdAt: 1 },
+    ],
+    autoRoutes: [{ id: 'a_nc', publicName: 'auto-nc' }],
+    vkeys: [{ id: 'v_nokey', name: 'x' }, { id: 'v_ok', key: 'sk-dirty-mig-0123456789ab', name: 'ok', enabled: true, allowedModels: [], createdAt: 1 }],
+    logs: [{ noTs: 1 }, { ts: 2, status: 200, model: 'x' }],
+    settings: { adminToken: 'dirty-admin' },
+  };
+  fs4.writeFileSync(join(dirtyDir, 'db.json'), JSON.stringify(dirty));
+  const dchild = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, LLM_DATA_DIR: undefined, LLM_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: dirtyDir, OWN_API_PORT: '18821', OWN_API_HOST: '127.0.0.1' },
+    stdio: 'ignore',
+    cwd: process.cwd(),
+  });
+  let dUp = false;
+  for (let i = 0; i < 80 && !dUp; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { const rr = await fetch('http://127.0.0.1:18821/api/routes', { headers: { 'x-admin-token': 'dirty-admin' } }); if (rr.ok) dUp = true; } catch { /* wait */ }
+  }
+  check('P2 脏库直接可启动：坏元素被丢而非整库判废', dUp);
+  if (dUp) {
+    const dh = { 'x-admin-token': 'dirty-admin' };
+    const rs: any = await (await fetch('http://127.0.0.1:18821/api/routes', { headers: dh })).json();
+    const names = rs.map((r: any) => r.publicName).sort().join(',');
+    const aNc = rs.find((r: any) => r.id === 'a_nc');
+    check('P2 迁移矩阵：缺名/重复 id 丢弃保首条；auto 缺 candidates 空候选续命',
+      names === 'auto-nc,dup-first,good-m' && Array.isArray(aNc?.candidates) && aNc.candidates.length === 0, names + '|' + JSON.stringify(aNc?.candidates));
+    const chs: any = await (await fetch('http://127.0.0.1:18821/api/channels', { headers: dh })).json();
+    check('P2 缺 baseUrl/非对象渠道被丢，GET /channels 不再被毒', Array.isArray(chs) && chs.length === 1 && chs[0].id === 'ch_ok', JSON.stringify(chs?.map?.((c: any) => c.id)));
+    const vks: any = await (await fetch('http://127.0.0.1:18821/api/vkeys', { headers: dh })).json();
+    check('P2 缺 key 的 vkey 条目被丢（好 key 保全）', Array.isArray(vks) && vks.length === 1 && vks[0].id === 'v_ok', JSON.stringify(vks?.map?.((v: any) => v.id)));
+    const lgs: any = await (await fetch('http://127.0.0.1:18821/api/logs?limit=10', { headers: dh })).json();
+    check('P2 无 ts 日志条目被丢', Array.isArray(lgs) && lgs.length === 1, JSON.stringify(lgs?.length));
+    const gw = await fetch('http://127.0.0.1:18821/v1/models', { headers: { authorization: 'Bearer sk-dirty-mig-0123456789ab' } });
+    check('P2 清洗后网关解析链健康（/v1/models 200）', gw.status === 200, String(gw.status));
+  }
+  dchild.kill();
+  await new Promise<void>((r) => { dchild.on('exit', () => r()); setTimeout(r, 4000); });
+  const dDb = JSON.parse(fs4.readFileSync(join(dirtyDir, 'db.json'), 'utf8'));
+  check('P2 脏库迁移同样回写 v3 且只带清洗后的数据', dDb.version === 3 && dDb.routes?.length === 3 && dDb.channels?.length === 1 && dDb.vkeys?.length === 1, JSON.stringify([dDb.version, dDb.routes?.length, dDb.channels?.length, dDb.vkeys?.length]));
+  rmSync(dirtyDir, { recursive: true, force: true });
+}
+
+
 // RST 面（审查需确认项定案）：客户端 socket 硬断（resetAndDestroy=RST 非 FIN），
 // 必须同样落 499 取消终态且不冷却 key——signal 桥对 RST 的覆盖制度化
 {
