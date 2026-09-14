@@ -1109,6 +1109,30 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('CB 导出确认不阻断语义（confirm 可续）', exp2.includes('仍要导出？') && exp2.includes('confirm('));
   check('CB 两页同位导出入口+微文案', (htmlC.match(/导出全部配置/g) || []).length >= 2 && htmlC.includes('含全部渠道与路由，不含密钥'), String((htmlC.match(/导出全部配置/g) || []).length));
 }
+// ---------- CB-3 DOM 钉：两步导入 UI + 徽章判据 + 回执文案 ----------
+{
+  const fsD = await import('node:fs');
+  const htmlD = fsD.readFileSync('web/index.html', 'utf8');
+  const cut = (name: string) => {
+    const st = htmlD.indexOf('function ' + name + '(');
+    if (st < 0) return '';
+    let dep = 0;
+    for (let i = htmlD.indexOf('{', st); i < htmlD.length; i++) {
+      if (htmlD[i] === '{') dep++;
+      else if (htmlD[i] === '}') { dep--; if (dep === 0) return htmlD.slice(st, i + 1); }
+    }
+    return '';
+  };
+  const rec = new Function('return ' + cut('cbReceiptText'))();
+  const zero = rec({ channels: { created: 0, merged: 2, keysAdded: 0, conflicts: [] }, routes: { created: 0, skipped: 3, conflicts: [], warnings: [] }, pendingKeyChannels: [] });
+  check('CB 零变更回执固定首行「没有新变更」', zero.startsWith('没有新变更：5 项一致、0 项冲突'), zero);
+  const pf = new Function('cbKeyDraft', 'return ' + cut('cbPendingFields'))({})({ pendingKeyChannels: ['甲', '乙'] });
+  check('CB pending 密钥框字段（ck: 前缀+textarea）', pf.length === 2 && pf[0].name === 'ck:甲' && pf[0].type === 'textarea', JSON.stringify(pf.map((f: any) => f.name)));
+  check('CB 徽章判据=空号池且启用（琥珀 warn，非红）', htmlD.includes('c.keys.length === 0 && c.enabled') && htmlD.includes("'待填密钥'"));
+  check('CB 两页导入入口', (htmlD.match(/onclick: \(\) => importConfig\(\)/g) || []).length >= 2, String((htmlD.match(/importConfig\(\)/g) || []).length));
+  check('CB 整体失败保留对话框（catch 不清场）', cut('importConfig').includes("'导入失败，本对话框内容已保留"));
+}
+
 // ---------- R3：v3 形状净化 + 退出锁清理（真 spawn） ----------
 {
   const { spawn } = await import('node:child_process');

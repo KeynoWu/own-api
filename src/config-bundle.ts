@@ -87,7 +87,7 @@ const hdrEq = (a?: Record<string, string>, b?: Record<string, string>) => {
   return f(a) === f(b);
 };
 const isNum0 = (v: any) => (v === null || v === undefined ? true : typeof v === 'number' && Number.isFinite(v) && v >= 0);
-const hasActiveKey = (ch: any) => (ch.keys || []).some((k: any) => (k.status || 'active') === 'active');
+
 
 function chanEq(local: any, src: any) {
   return normalizeBaseUrl(src.baseUrl) === normalizeBaseUrl(local.baseUrl)
@@ -105,7 +105,7 @@ function singleEq(local: any, src: any, channelId: string) {
     && local.upstreamModel === src.upstreamModel
     && normOpt(src.protocol) === normOpt(local.protocol)
     && boolDef(src.enabled, true) === (local.enabled !== false)
-    && normOpt(src.contextWindow) === normOpt(local.contextWindow)
+    && (normOpt(src.contextWindow) ?? 128000) === (normOpt(local.contextWindow) ?? 128000) // 布尔/数值缺省按 create 默认展开后再比（§4.2）
     && normOpt(src.maxOutputTokens) === normOpt(local.maxOutputTokens)
     && boolDef(src.supportsStreaming, true) === boolDef(local.supportsStreaming, true)
     && boolDef(src.supportsTools, true) === boolDef(local.supportsTools, true)
@@ -213,7 +213,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       const net = keyList.filter((k) => !have.has(k)).length;
       if (net) { keysAddedByChannel[name] = net; keysAdded += net; }
       plan.chanMerge.push({ targetId: local.id, name, keyList });
-      if (!hasActiveKey(local) && keyList.length === 0) pending.add(name);
+      if ((local.keys || []).length === 0 && keyList.length === 0) pending.add(name); // 判据=空号池（§4.1/§8 钉：仅剩 cooldown 不算待填）
     } else {
       plan.chanCreate.push({ src, keyList });
       if (keyList.length) { keysAddedByChannel[name] = keyList.length; keysAdded += keyList.length; }
@@ -290,7 +290,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
   const receipt: Receipt = {
     dryRun: false,
     channels: { created: plan.chanCreate.length, merged: plan.chanMerge.length, keysAdded, keysAddedByChannel, conflicts: chanConflicts },
-    routes: { created: plan.singles.length + plan.autos.length, skipped: plan.skippedSingles, conflicts: routeConflicts, warnings },
+    routes: { created: plan.singles.length + plan.autos.filter((a) => !a.mergeTargetId).length, skipped: plan.skippedSingles, conflicts: routeConflicts, warnings },
     pendingKeyChannels: [...pending],
   };
   return { plan, receipt };

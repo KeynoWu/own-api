@@ -375,6 +375,50 @@ async function exportConfig() {
   a.click();
   toast('已导出全部配置（不含密钥）');
 }
+// ---- 配置组导入：两步链式弹窗（预览≡提交由服务端同一计划构建器保证） ----
+const cbKeyDraft = {};
+function cbReceiptText(rc) {
+  const ch = rc.channels; const rt = rc.routes;
+  const lines = [];
+  if (!ch.created && !rt.created && !ch.conflicts.length && !rt.conflicts.length) {
+    lines.push('没有新变更：' + (ch.merged + rt.skipped) + ' 项一致、0 项冲突');
+  } else {
+    lines.push('渠道：新建 ' + ch.created + ' / 合并 ' + ch.merged + (ch.keysAdded ? ' / 密钥写入 ' + ch.keysAdded : ''));
+    lines.push('路由：新建 ' + rt.created + ' / 跳过 ' + rt.skipped);
+  }
+  for (const x of ch.conflicts) lines.push('⚠ 渠道 ' + x.name + '：' + x.reason);
+  for (const x of rt.conflicts) lines.push('⚠ 路由 ' + x.publicName + '：' + x.reason);
+  for (const w of rt.warnings) lines.push('· ' + (w.publicName ? w.publicName + '：' : '') + w.reason);
+  if (rc.pendingKeyChannels && rc.pendingKeyChannels.length) lines.push('待填密钥渠道：' + rc.pendingKeyChannels.join('、'));
+  return lines.join('\\n');
+}
+function cbPendingFields(rc) {
+  return (rc.pendingKeyChannels || []).map((n) => ({ name: 'ck:' + n, label: '密钥（一行一个）：' + n, type: 'textarea', value: cbKeyDraft[n] || '', hint: '留空可跳过；之后也能在渠道页「+ 导入 key」补', full: true }));
+}
+async function importConfig() {
+  form('导入配置组（粘贴）', [
+    { name: 'bundle', label: 'Bundle JSON（公司内部渠道获取；不含任何密钥）', type: 'textarea', full: true, hint: '先预览再确认；导入全程零外呼，不连接 bundle 里的任何地址' },
+  ], async (v0) => {
+    let bundle;
+    try { bundle = JSON.parse(v0.bundle); } catch { toast('bundle 不是合法 JSON', true); return; }
+    let rc;
+    try { rc = await api('/api/config/import', { method: 'POST', body: JSON.stringify({ bundle, dryRun: true }) }); }
+    catch (e) { toast('预览失败：' + e.message, true); return; }
+    const pf = cbPendingFields(rc);
+    const fields = [{ name: '_rc', label: '预览（仅展示，提交以当前 bundle 重新计算）', type: 'textarea', value: cbReceiptText(rc), full: true }].concat(pf);
+    form('确认导入（新建 ' + (rc.channels.created + rc.routes.created) + ' 项）', fields, (v) => {
+      for (const f of pf) { const val = (v[f.name] || '').trim(); if (val) cbKeyDraft[f.name.slice(3)] = val; }
+      const keys = {};
+      for (const n of Object.keys(cbKeyDraft)) { const arr = cbKeyDraft[n].split('\\n').map((s) => s.trim()).filter(Boolean); if (arr.length) keys[n] = arr; }
+      api('/api/config/import', { method: 'POST', body: JSON.stringify({ bundle, keys }) }).then((rc2) => {
+        for (const f of pf) delete cbKeyDraft[f.name.slice(3)];
+        toast('导入完成：新建 ' + (rc2.channels.created + rc2.routes.created) + ' / 合并 ' + rc2.channels.merged + ' / 冲突 ' + (rc2.channels.conflicts.length + rc2.routes.conflicts.length) + (rc2.pendingKeyChannels.length ? '；待填密钥：' + rc2.pendingKeyChannels.join('、') : ''));
+        go('channels');
+      }).catch(() => toast('导入失败，本对话框内容已保留，可直接重试', true));
+    });
+  });
+}
+
 // ---------------- 速度排行（speed-insights v1.1） ----------------
 // renderSpeedTab 是纯展示层：只消费后端预计算数值，严禁在这里重算任何百分位（DR-SI-9），
 // DOM 桩钉会抽源断言本函数体不含 .sort( 与 Math.floor。
@@ -631,6 +675,7 @@ views.models = async () => {
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
     el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
+    el('button', { class: 'btn sm', onclick: () => importConfig() }, '导入配置'),
     el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
   ));
 
@@ -706,6 +751,7 @@ views.channels = async () => {
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: addChannel }, '+ 新增渠道'),
     el('button', { class: 'btn sm', onclick: () => exportConfig() }, '导出全部配置'),
+    el('button', { class: 'btn sm', onclick: () => importConfig() }, '导入配置'),
     el('span', { class: 'muted' }, '含全部渠道与路由，不含密钥。'),
   ));
 
@@ -761,6 +807,7 @@ views.channels = async () => {
         el('strong', {}, c.name), proto(c.protocol),
         c.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用'),
         el('span', { class: 'pill' }, \`可用 key \${c.availableKeys}/\${c.keys.length}\`),
+        c.keys.length === 0 && c.enabled ? el('span', { class: 'pill warn', style: 'cursor:pointer', title: '点击导入密钥', onclick: () => addKeys() }, '待填密钥') : null,
         el('span', { class: 'mono muted', style: 'flex:1' }, c.urlPreview),
         el('button', { class: 'btn sm', onclick: (e) => testAll(e.target) }, '测试连通'),
         el('button', { class: 'btn sm', onclick: addKeys }, '+ 导入 key'),
