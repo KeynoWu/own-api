@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>own-api · 公司发了一堆模型？一个入口全接住</title>
+<meta name="description" content="own-api：跑在你本机的统一大模型网关。所有 agent 只配一个 base_url、一把 key；改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型。macOS / Windows 桌面版，数据全在本地。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="own-api · 一堆公司模型，一个入口">
+<meta property="og:description" content="统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂。本机运行，数据不出门。">
+<meta property="og:url" content="https://keynowu.github.io/own-api/">
+<meta name="theme-color" content="#0B1120">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230F1A2E'/%3E%3Cpath d='M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z' fill='%23EAF1FB'/%3E%3Cpath d='M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z' fill='%23EAF1FB'/%3E%3Ccircle cx='32' cy='32' r='6.5' fill='%2338BDF8'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"own-api","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Windows","description":"本地统一大模型网关：一个 base_url 接入多个模型渠道，model 名即路由，auto 自动路由与健康分失败转移。","offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"}}
+</script>
+<style>
+:root{
+  --bg:#0B1120; --surface:#111A2E; --surface-2:#16223C; --border:#243250; --border-soft:#1B2740;
+  --text:#E8EEF9; --muted:#9FB0CC; --faint:#6B7C9C;
+  --accent:#38BDF8; --accent-strong:#7DD3FC; --accent-dim:rgba(56,189,248,.14);
+  --green:#34D399; --amber:#FBBF24; --red:#F87171;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",-apple-system,"Segoe UI",Roboto,sans-serif;
+  --r-lg:16px; --r-md:10px; --r-sm:8px;
+  --sp-1:8px; --sp-2:16px; --sp-3:24px; --sp-4:32px; --sp-6:48px; --sp-8:64px; --sp-12:96px;
+  --maxw:1120px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font:400 16px/1.7 var(--sans);-webkit-font-smoothing:antialiased}
+::selection{background:var(--accent);color:#04121f}
+a{color:var(--accent-strong);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:4px}
+img,svg{display:block}
+.mono{font-family:var(--mono)}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 var(--sp-3)}
+.skip{position:absolute;left:-9999px;top:0;background:var(--accent);color:#04121f;padding:10px 18px;border-radius:0 0 var(--r-sm) 0;z-index:100;font-weight:700}
+.skip:focus{left:0}
+
+/* ---------- nav ---------- */
+.nav{position:sticky;top:0;z-index:50;background:rgba(11,17,32,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border-soft)}
+.nav-in{display:flex;align-items:center;gap:var(--sp-3);height:64px}
+.logo{display:flex;align-items:center;gap:10px;color:var(--text);font-family:var(--mono);font-weight:700;font-size:17px;letter-spacing:.02em}
+.logo:hover{text-decoration:none}
+.logo svg{width:30px;height:30px}
+.nav-links{display:flex;gap:var(--sp-3);margin-left:auto;font-size:14.5px}
+.nav-links a{color:var(--muted)}
+.nav-links a:hover{color:var(--text);text-decoration:none}
+.nav-cta{margin-left:var(--sp-2)}
+.burger{display:none;margin-left:auto;background:none;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--text);width:44px;height:44px;cursor:pointer;align-items:center;justify-content:center}
+.burger svg{width:22px;height:22px}
+@media (max-width:860px){
+  .nav-links,.nav-cta{display:none}
+  .burger{display:flex}
+  .nav.open .nav-links{display:flex;position:absolute;top:64px;left:0;right:0;flex-direction:column;gap:0;background:var(--surface);border-bottom:1px solid var(--border);padding:var(--sp-1) 0}
+  .nav.open .nav-links a{padding:12px var(--sp-3);font-size:16px}
+}
+
+/* ---------- buttons ---------- */
+.btn{display:inline-flex;align-items:center;gap:8px;font:600 15px/1 var(--sans);padding:13px 22px;border-radius:var(--r-md);border:1px solid transparent;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,background .18s ease,border-color .18s ease;touch-action:manipulation}
+.btn:hover{text-decoration:none;transform:translateY(-1px)}
+.btn:active{transform:translateY(0) scale(.98)}
+.btn-primary{background:var(--accent);color:#04121F;box-shadow:0 6px 24px rgba(56,189,248,.28)}
+.btn-primary:hover{background:var(--accent-strong);box-shadow:0 8px 30px rgba(56,189,248,.4)}
+.btn-ghost{border-color:var(--border);color:var(--text);background:transparent}
+.btn-ghost:hover{border-color:var(--faint)}
+.btn-sm{padding:9px 16px;font-size:14px}
+.btn svg{width:17px;height:17px}
+
+/* ---------- hero ---------- */
+.hero{padding:clamp(56px,9vw,104px) 0 var(--sp-12);position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;inset:-40% -20% auto;height:90%;background:
+  radial-gradient(600px 300px at 30% 20%,rgba(56,189,248,.10),transparent 70%),
+  radial-gradient(500px 260px at 75% 10%,rgba(52,211,153,.06),transparent 70%);pointer-events:none}
+.hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:var(--sp-8);align-items:center}
+@media (max-width:980px){.hero-grid{grid-template-columns:1fr;gap:var(--sp-6)}}
+.badge{display:inline-flex;align-items:center;gap:8px;font:500 13px/1 var(--mono);color:var(--accent-strong);background:var(--accent-dim);border:1px solid rgba(56,189,248,.3);padding:8px 14px;border-radius:999px;margin-bottom:var(--sp-3)}
+.badge i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+h1{font-size:clamp(30px,4.6vw,52px);line-height:1.22;font-weight:700;letter-spacing:.01em}
+h1 em{font-style:normal;color:var(--accent-strong)}
+.sub{margin:var(--sp-3) 0 var(--sp-4);color:var(--muted);font-size:clamp(16px,1.6vw,18px);max-width:34em}
+.hero-ctas{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.hero-note{margin-top:var(--sp-3);color:var(--faint);font:400 13.5px/1.6 var(--mono)}
+/* terminal */
+.term{background:#0A0F1D;border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 24px 60px rgba(0,0,0,.5),0 0 0 1px rgba(56,189,248,.06);overflow:hidden}
+.term-bar{display:flex;align-items:center;gap:7px;padding:12px 16px;border-bottom:1px solid var(--border-soft);background:var(--surface)}
+.term-bar i{width:11px;height:11px;border-radius:50%;background:#2C3A58}
+.term-bar i:first-child{background:#F87171}.term-bar i:nth-child(2){background:#FBBF24}.term-bar i:nth-child(3){background:#34D399}
+.term-bar span{margin-left:8px;font:400 12px var(--mono);color:var(--faint)}
+.term-body{padding:18px 20px 22px;font:400 13.5px/2 var(--mono);overflow-x:auto}
+.term-body .p{color:var(--accent)}.term-body .k{color:#93C5FD}.term-body .v{color:#E8EEF9}.term-body .c{color:var(--faint)}
+.term-body .ok{color:var(--green)}
+.cursor{display:inline-block;width:8px;height:16px;background:var(--accent);vertical-align:-3px;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+/* routing flow strip */
+.flow{margin-top:var(--sp-3);background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:14px 16px;display:flex;align-items:center;gap:10px;overflow:hidden}
+.flow .col{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
+.node{font:500 11.5px/1 var(--mono);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:7px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node.hot{color:var(--accent-strong);border-color:rgba(56,189,248,.45);background:var(--accent-dim)}
+.flow .wire{position:relative;flex:1.2;height:2px;background:var(--border);border-radius:2px;min-width:40px}
+.flow .wire i{position:absolute;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:wire 2.6s linear infinite}
+.flow .wire.w2 i{animation-delay:1.2s}
+@keyframes wire{from{left:-4px;opacity:0}12%{opacity:1}88%{opacity:1}to{left:calc(100% - 4px);opacity:0}}
+
+/* ---------- console showcase ---------- */
+.shot{background:#0A0F1D;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 1px rgba(56,189,248,.07)}
+.shot-bar{display:flex;align-items:center;gap:7px;padding:12px 16px;border-bottom:1px solid var(--border-soft);background:var(--surface)}
+.shot-bar i{width:11px;height:11px;border-radius:50%;background:#2C3A58}
+.shot-bar i:first-child{background:#F87171}.shot-bar i:nth-child(2){background:#FBBF24}.shot-bar i:nth-child(3){background:#34D399}
+.shot-bar span{margin:0 auto;font:400 12px var(--mono);color:var(--faint);background:var(--bg);border:1px solid var(--border-soft);border-radius:6px;padding:5px 14px}
+.shot img{width:100%;height:auto;aspect-ratio:1889/1110;display:block}
+.shot-legend{display:flex;gap:var(--sp-3);flex-wrap:wrap;margin-top:var(--sp-3);font:400 13px var(--mono);color:var(--faint)}
+.shot-legend b{color:var(--muted);font-weight:400}
+
+/* ---------- sections ---------- */
+section{padding:var(--sp-12) 0}
+.sec-tag{font:500 13px/1 var(--mono);color:var(--accent);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px}
+h2{font-size:clamp(24px,3.2vw,34px);line-height:1.3;margin-bottom:14px}
+.sec-sub{color:var(--muted);max-width:44em;margin-bottom:var(--sp-6)}
+
+/* pain cards */
+.pains{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-2)}
+@media (max-width:980px){.pains{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:560px){.pains{grid-template-columns:1fr}}
+.pain{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:22px}
+.pain .q{font:600 15.5px/1.55 var(--sans);margin-bottom:8px}
+.pain .a{color:var(--faint);font-size:13.5px;line-height:1.7}
+.pain .x{color:var(--red);font-family:var(--mono);font-weight:700;margin-right:6px}
+
+/* feature grid */
+.feats{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-2)}
+@media (max-width:980px){.feats{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.feats{grid-template-columns:1fr}}
+.feat{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:26px;transition:border-color .2s ease,transform .2s ease}
+.feat:hover{border-color:var(--border);transform:translateY(-2px)}
+.feat .ic{width:40px;height:40px;border-radius:10px;background:var(--accent-dim);border:1px solid rgba(56,189,248,.25);display:flex;align-items:center;justify-content:center;margin-bottom:16px}
+.feat .ic svg{width:20px;height:20px;stroke:var(--accent-strong)}
+.feat h3{font-size:16.5px;margin-bottom:8px}
+.feat p{color:var(--muted);font-size:14px;line-height:1.75}
+.feat .mono{color:var(--accent-strong);font-size:13px}
+
+/* how it works */
+.how{background:var(--surface);border-block:1px solid var(--border-soft)}
+.diagram{display:grid;grid-template-columns:1fr auto 1.25fr auto 1fr;gap:var(--sp-2);align-items:center;margin-bottom:var(--sp-4)}
+@media (max-width:860px){.diagram{grid-template-columns:1fr;gap:var(--sp-3)}}
+.dbox{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:18px}
+.dbox .t{font:500 12px/1 var(--mono);color:var(--faint);margin-bottom:12px;letter-spacing:.08em}
+.dmid{border-color:rgba(56,189,248,.45);box-shadow:0 0 0 1px rgba(56,189,248,.12),0 12px 40px rgba(56,189,248,.08)}
+.dmid .url{font:600 13px/1 var(--mono);color:var(--accent-strong);background:var(--accent-dim);border:1px solid rgba(56,189,248,.3);border-radius:6px;padding:8px 10px;display:inline-block;margin-bottom:12px}
+.dmid ul{list-style:none;display:flex;flex-direction:column;gap:6px}
+.dmid li{font:400 12.5px/1.5 var(--mono);color:var(--muted);display:flex;gap:8px;align-items:center}
+.dmid li b{color:var(--text);font-weight:500}
+.darrow{color:var(--faint);font-family:var(--mono);text-align:center;font-size:18px}
+@media (max-width:860px){.darrow{transform:rotate(90deg)}}
+
+/* auto steps */
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-2);counter-reset:st}
+@media (max-width:980px){.steps{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:560px){.steps{grid-template-columns:1fr}}
+.step{position:relative;background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:22px}
+.step b.num{font:700 13px/1 var(--mono);color:var(--accent);letter-spacing:.1em;display:block;margin-bottom:10px}
+.step h4{font-size:15.5px;margin-bottom:6px}
+.step p{color:var(--muted);font-size:13.5px;line-height:1.7}
+
+/* quickstart */
+.qs-grid{display:grid;grid-template-columns:340px 1fr;gap:var(--sp-4);align-items:start}
+@media (max-width:980px){.qs-grid{grid-template-columns:1fr}}
+.qs-steps{display:flex;flex-direction:column;gap:var(--sp-2)}
+.qs-step{display:flex;gap:14px;background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:18px}
+.qs-step b{flex:none;width:30px;height:30px;border-radius:8px;background:var(--accent-dim);border:1px solid rgba(56,189,248,.3);color:var(--accent-strong);font:700 14px/28px var(--mono);text-align:center}
+.qs-step h4{font-size:15px;margin-bottom:4px}
+.qs-step p{color:var(--muted);font-size:13.5px;line-height:1.65}
+.code-card{background:#0A0F1D;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden}
+.tabs{display:flex;align-items:center;border-bottom:1px solid var(--border-soft);background:var(--surface);padding:0 6px;gap:2px;overflow-x:auto}
+.tab{background:none;border:none;color:var(--muted);font:500 13.5px/1 var(--sans);padding:14px 14px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+.tab[aria-selected="true"]{color:var(--accent-strong);border-bottom-color:var(--accent)}
+.copy{margin-left:auto;flex:none;background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font:500 12px/1 var(--mono);padding:8px 12px;cursor:pointer;min-height:32px}
+.copy:hover{color:var(--text);border-color:var(--faint)}
+.copy.done{color:var(--green);border-color:rgba(52,211,153,.5)}
+.code-card pre{padding:20px;overflow-x:auto;font:400 13px/1.9 var(--mono);color:#C9D6EE}
+.code-card pre .c{color:var(--faint)}
+.code-card pre .k{color:#93C5FD}
+.code-card pre .s{color:var(--green)}
+
+/* download */
+.dl{background:var(--surface);border-block:1px solid var(--border-soft)}
+.dl-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-2)}
+@media (max-width:860px){.dl-cards{grid-template-columns:1fr}}
+.dl-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:26px;display:flex;flex-direction:column;gap:6px;transition:border-color .2s ease,transform .2s ease}
+.dl-card:hover{border-color:rgba(56,189,248,.5);transform:translateY(-2px);text-decoration:none}
+.dl-card svg{width:26px;height:26px;stroke:var(--text);margin-bottom:8px}
+.dl-card b{color:var(--text);font-size:16.5px}
+.dl-card span{color:var(--faint);font:400 12.5px/1.6 var(--mono)}
+.dl-card .go{margin-top:12px;color:var(--accent-strong);font:500 14px var(--sans)}
+.dl-note{margin-top:var(--sp-3);color:var(--faint);font-size:13.5px;line-height:1.8}
+
+/* faq */
+.faq details{border:1px solid var(--border-soft);border-radius:var(--r-md);background:var(--surface);margin-bottom:10px;overflow:hidden}
+.faq summary{cursor:pointer;padding:18px 20px;font-weight:600;font-size:15.5px;list-style:none;display:flex;align-items:center;gap:12px;min-height:44px}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::after{content:"+";margin-left:auto;font:400 20px/1 var(--mono);color:var(--faint);transition:transform .2s ease}
+.faq details[open] summary::after{content:"–"}
+.faq .a{padding:0 20px 18px 20px;color:var(--muted);font-size:14.5px;line-height:1.8}
+.faq code{font:400 13px var(--mono);background:var(--bg);border:1px solid var(--border-soft);border-radius:4px;padding:2px 6px}
+
+/* footer */
+footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(--faint);font-size:13.5px}
+.foot{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.foot .logo{font-size:15px}
+.foot .logo svg{width:22px;height:22px}
+.foot .sep{margin-left:auto}
+
+/* reveal */
+.reveal{opacity:0;transform:translateY(16px);transition:opacity .5s ease,transform .5s ease}
+.reveal.on{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .reveal{opacity:1;transform:none}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="logo" href="#" aria-label="own-api 首页">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0F1A2E"/><path d="M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z" fill="#EAF1FB"/><path d="M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z" fill="#EAF1FB"/><circle cx="32" cy="32" r="6.5" fill="#38BDF8"/></svg>
+      own-api
+    </a>
+    <button class="burger" aria-label="打开菜单" aria-expanded="false" aria-controls="navlinks" id="burger">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav-links" id="navlinks" aria-label="主导航">
+      <a href="#pain">为什么</a>
+      <a href="#features">能力</a>
+      <a href="#how">原理</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="btn btn-primary btn-sm nav-cta" href="#download">下载</a>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ================= HERO ================= -->
+<section class="hero" aria-labelledby="h1">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="badge"><i aria-hidden="true"></i>本机运行 · 数据不出门 · macOS / Windows</span>
+      <h1 id="h1">公司发了 <em>N</em> 个模型，<br>我只配 <em>1</em> 个入口。</h1>
+      <p class="sub">每个模型一个 baseURL，Claude Code、Codex、IDE 插件各配一套，还老有模型又慢又抽风？
+        own-api 在你本机跑一个统一网关：所有 agent 只配同一个 <span class="mono">base_url</span> 和同一把 key——
+        改一个 <span class="mono">model</span> 名就换一家供应商，<span class="mono">auto</span> 名自动绕开慢的和挂掉的模型。</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
+          下载桌面版
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/KeynoWu/own-api" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.55v-2.1c-3.2.7-3.87-1.36-3.87-1.36-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.35.77 1.05.77 2.12v3.14c0 .3.2.66.8.55A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <p class="hero-note">145+ 项端到端测试 · 单文件存储 · 无需数据库 · 免费分发</p>
+    </div>
+
+    <div class="reveal">
+      <div class="term" role="img" aria-label="终端演示：配置统一入口后，model 名为 model_auto 的请求实际路由到 deepseek-chat，首字延迟 412 毫秒">
+        <div class="term-bar"><i></i><i></i><i></i><span>~/work — zsh</span></div>
+        <div class="term-body">
+          <div><span class="p">$</span> <span class="k">export</span> <span class="v">ANTHROPIC_BASE_URL=http://127.0.0.1:8787</span></div>
+          <div><span class="p">$</span> <span class="k">export</span> <span class="v">ANTHROPIC_API_KEY=sk-lm-****</span></div>
+          <div><span class="p">$</span> <span class="v">claude --model model_auto</span></div>
+          <div><span class="ok">✓</span> <span class="v">model_auto → deepseek-chat</span> <span class="c">· 首字 412ms · 粘性会话</span></div>
+          <div><span class="ok">✓</span> <span class="v">deepseek 429 → 已自动切换 glm-4.6</span> <span class="c">· 客户端无感</span></div>
+          <div><span class="p">$</span> <span class="cursor" aria-hidden="true"></span></div>
+        </div>
+      </div>
+      <div class="flow" aria-hidden="true">
+        <div class="col"><span class="node">Claude Code</span><span class="node">Codex</span><span class="node">自建 agent</span></div>
+        <div class="wire"><i></i></div>
+        <div class="col"><span class="node hot">own-api :8787</span></div>
+        <div class="wire w2"><i></i></div>
+        <div class="col"><span class="node">Claude · Anthropic</span><span class="node">GPT · OpenAI</span><span class="node">DeepSeek / GLM · 内网</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= PAIN ================= -->
+<section id="pain" aria-labelledby="pain-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">Why own-api</p>
+    <h2 id="pain-h" class="reveal">这些场景，你是不是天天在经历</h2>
+    <p class="sec-sub reveal">公司部署了一堆模型免费给大家用——听起来很爽，配起来很痛。</p>
+    <div class="pains">
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>每个模型一个 baseURL</p><p class="a">Claude Code 配一套、Codex 配一套、IDE 插件再来一套，内部文档永远过时。</p></div>
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>有的模型就是慢</p><p class="a">排队、加载、抽风。你想绕开它，就得记住"今天谁状态好"这种玄学。</p></div>
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>换模型 = 翻遍所有配置</p><p class="a">每换一次模型，每个 agent 的环境变量都要改一遍，还得担心 key 贴得到处都是。</p></div>
+      <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>多协议互不兼容</p><p class="a">Anthropic 原生、OpenAI 兼容、本地 Ollama……客户端和上游对不上就得中间转。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= FEATURES ================= -->
+<section id="features" aria-labelledby="feat-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">Capabilities</p>
+    <h2 id="feat-h" class="reveal">一个进程，管住所有模型</h2>
+    <p class="sec-sub reveal">管理台 + 统一代理入口同进程提供：渠道号池、模型路由、自动路由、限额用量，全部可视化。</p>
+    <div class="feats">
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h6m-6 5h10m-10 5h6"/><path d="M16 4v16l4-3m-4 3-4-3"/></svg></span>
+        <h3>model 名即路由</h3>
+        <p>对外只暴露别名。<span class="mono">model: "claude-sonnet"</span> 改成 <span class="mono">"gpt-4o"</span>，就走另一家渠道、另一把真实 key——agent 侧零其它改动。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.2 2.2m8.4 8.4 2.2 2.2m0-12.8-2.2 2.2M7.8 16.2l-2.2 2.2"/><circle cx="12" cy="12" r="3.5"/></svg></span>
+        <h3>auto 自动路由</h3>
+        <p>一个对外名聚合一组候选：按请求硬约束过滤（窗口 / tools / 流式）→ 会话粘性吃缓存 → 健康分加权随机。挂了自动换下一个，全链失败才报错。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg></span>
+        <h3>号池调度与退避</h3>
+        <p>一个渠道多把 key，加权最小负载轮询；401 / 429 / 5xx / 超时自动冷却退避、换 key 重试，到期自动回池，无需人工干预。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 8 3 12l4 4m10-8 4 4-4 4M3 12h13m-3-4h11"/></svg></span>
+        <h3>跨协议互转</h3>
+        <p>OpenAI ↔ Anthropic 双向：请求体、SSE 流式、tool_calls、stop_reason、usage 全映射。同协议零改写透传，不泄漏上游真实模型名。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 14 4-4 3 3 5-6"/></svg></span>
+        <h3>限额与用量统计</h3>
+        <p>每把对外 key 独立 RPM 与每日 token 上限，并发打不穿；逐请求记录 token、首字延迟、花费估算，按模型 / 渠道 / 天聚合出仪表盘。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></span>
+        <h3>零依赖桌面版</h3>
+        <p>双击安装、托盘常驻、开机自启；状态全存本地单文件，无数据库、不联网上报。默认只听 <span class="mono">127.0.0.1</span>，key 不出你的机器。</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CONSOLE SHOT ================= -->
+<section aria-labelledby="console-h" style="padding-top:0">
+  <div class="wrap">
+    <h2 id="console-h" class="reveal" style="font-size:clamp(20px,2.4vw,26px)">管理台长这样——仪表盘到号池健康，一屏一个真相</h2>
+    <p class="sec-sub reveal" style="margin-bottom:var(--sp-4)">真实截图：token 消耗与缓存命中率、按小时的用量趋势、五个分析视图随切。</p>
+    <figure>
+      <div class="shot reveal">
+        <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span>127.0.0.1:8787 · 使用统计</span></div>
+        <img src="assets/dashboard.png" width="1889" height="1110" decoding="async" loading="lazy"
+          alt="own-api 管理台使用统计页截图：顶部 KPI 卡显示真实消耗 13.98M tokens、96 次请求、缓存命中率 97.2%；中部为按小时的使用趋势折线；底部标签页含请求日志、Provider 统计、模型统计、速度排行、号池健康，当前展示两个渠道 glm-f 与 qwen-f 的请求、输入输出 token、缓存读写与平均延迟对比。">
+      </div>
+      <figcaption class="shot-legend reveal">
+        <span><b>·</b> 逐请求记 token / 首字延迟 / 花费估算</span>
+        <span><b>·</b> Provider / 模型 / <b>速度排行</b> / 号池健康 五个视图</span>
+        <span><b>·</b> 全部数据来自本机，无任何上报</span>
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ================= HOW ================= -->
+<section class="how" id="how" aria-labelledby="how-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">How it works</p>
+    <h2 id="how-h" class="reveal">所有请求穿过同一个门</h2>
+    <p class="sec-sub reveal">网关查路由表把 <span class="mono">model</span> 名翻译成「真实渠道 + 真实模型名 + 真实 key」，协议不同就自动互转，失败自动兜底。</p>
+
+    <div class="diagram reveal" role="img" aria-label="架构图：Claude Code、Codex、自建 agent 汇聚到本机 8787 端口的 own-api 网关，网关经路由表、号池、协议转换分发到 Anthropic、OpenAI、DeepSeek、Ollama 等上游">
+      <div class="dbox">
+        <p class="t">YOUR AGENTS</p>
+        <div class="col" style="display:flex;flex-direction:column;gap:6px">
+          <span class="node">Claude Code</span>
+          <span class="node">Codex</span>
+          <span class="node">IDE 插件</span>
+          <span class="node">自建 agent</span>
+        </div>
+      </div>
+      <div class="darrow" aria-hidden="true">→</div>
+      <div class="dbox dmid">
+        <p class="t">OWN-API · 本机网关</p>
+        <span class="url">http://127.0.0.1:8787/v1</span>
+        <ul>
+          <li><b>路由表</b> model 名 → 渠道 + 真名</li>
+          <li><b>auto</b> 过滤 → 粘性 → 健康分加权</li>
+          <li><b>号池</b> 多 key 轮询 · 退避冷却</li>
+          <li><b>转换</b> OpenAI ⇄ Anthropic</li>
+        </ul>
+      </div>
+      <div class="darrow" aria-hidden="true">→</div>
+      <div class="dbox">
+        <p class="t">UPSTREAMS</p>
+        <div class="col" style="display:flex;flex-direction:column;gap:6px">
+          <span class="node">api.anthropic.com</span>
+          <span class="node">api.openai.com</span>
+          <span class="node">公司内网 DeepSeek</span>
+          <span class="node">Ollama / vLLM</span>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="reveal" style="font-size:19px;margin-bottom:var(--sp-3)">auto 是怎么挑模型的</h3>
+    <div class="steps">
+      <div class="step reveal"><b class="num">STEP 01</b><h4>硬过滤</h4><p>上下文窗口、tools 支持、max_tokens、流式、缓存语义——本请求吃不消的候选先出局，不参与抽签。</p></div>
+      <div class="step reveal"><b class="num">STEP 02</b><h4>会话粘性</h4><p>多轮会话粘在同一个候选上（滑动 TTL + 迟滞带防抖），把上游 prompt 缓存吃满，多轮又快又便宜。</p></div>
+      <div class="step reveal"><b class="num">STEP 03</b><h4>健康分加权</h4><p>手动权重 × 近 10 分钟成功率加权随机。谁在抽风，谁的分自己往下掉，不用你盯。</p></div>
+      <div class="step reveal"><b class="num">STEP 04</b><h4>失败续链</h4><p>429 / 5xx / 超时自动换下一个候选接着打；全链失败才报错，失败明细默认回显方便自诊。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= QUICKSTART ================= -->
+<section id="quickstart" aria-labelledby="qs-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">Quickstart</p>
+    <h2 id="qs-h" class="reveal">三步接入，三分钟搞定</h2>
+    <p class="sec-sub reveal">装好自动打开管理台，令牌自动带上。之后所有 agent 只认这一个入口。</p>
+    <div class="qs-grid">
+      <div class="qs-steps">
+        <div class="qs-step reveal"><b>1</b><div><h4>安装桌面版</h4><p>macOS 拖进应用程序，Windows 双击安装。托盘出现图标即服务已启动。</p></div></div>
+        <div class="qs-step reveal"><b>2</b><div><h4>加渠道、导模型</h4><p>粘上游 baseURL 和 key（一行一个），点「测试连通」，上游模型一键导入路由表。</p></div></div>
+        <div class="qs-step reveal"><b>3</b><div><h4>复制接入片段</h4><p>管理台「接入方式」页，按 agent 复制现成环境变量，替换即生效。</p></div></div>
+      </div>
+      <div class="code-card reveal">
+        <div class="tabs" role="tablist" aria-label="接入示例">
+          <button class="tab" role="tab" id="tab-cc" aria-selected="true" aria-controls="pane-cc">Claude Code</button>
+          <button class="tab" role="tab" id="tab-oc" aria-selected="false" aria-controls="pane-oc">OpenAI 兼容</button>
+          <button class="tab" role="tab" id="tab-auto" aria-selected="false" aria-controls="pane-auto">自动路由</button>
+          <button class="copy" id="copyBtn" aria-label="复制当前代码">复制</button>
+        </div>
+        <pre role="tabpanel" id="pane-cc" aria-labelledby="tab-cc"><code><span class="c"># Claude Code / Anthropic SDK：只改两行</span>
+<span class="k">export</span> ANTHROPIC_BASE_URL=<span class="s">"http://127.0.0.1:8787"</span>
+<span class="k">export</span> ANTHROPIC_API_KEY=<span class="s">"sk-lm-..."</span>
+
+claude
+<span class="c"># 之后换模型 = 改一个 model 名</span></code></pre>
+        <pre role="tabpanel" id="pane-oc" aria-labelledby="tab-oc" hidden><code><span class="c"># 任何 OpenAI 兼容客户端（Codex / SDK / curl）</span>
+<span class="k">export</span> OPENAI_BASE_URL=<span class="s">"http://127.0.0.1:8787/v1"</span>
+<span class="k">export</span> OPENAI_API_KEY=<span class="s">"sk-lm-..."</span>
+
+<span class="c"># 上游是 Anthropic 也照样接——协议自动互转</span></code></pre>
+        <pre role="tabpanel" id="pane-auto" aria-labelledby="tab-auto" hidden><code><span class="c">// 一个名字聚合一组候选，谁健康谁上</span>
+<span class="k">const</span> r = <span class="k">await</span> client.chat.completions.create({
+  model: <span class="s">'model_auto'</span>,        <span class="c">// 硬过滤 → 粘性 → 健康分加权</span>
+  messages: [{ role: <span class="s">'user'</span>, content: <span class="s">'hi'</span> }],
+});
+<span class="c">// 429 / 5xx / 超时自动换候选续链，客户端无感</span></code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= DOWNLOAD ================= -->
+<section class="dl" id="download" aria-labelledby="dl-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">Download</p>
+    <h2 id="dl-h" class="reveal">下载安装，开箱即用</h2>
+    <p class="sec-sub reveal">当前版本 v0.1.6 · 安装包在 GitHub Releases 下载，数据存 <span class="mono">~/.own-api</span>，卸载重装不丢。</p>
+    <div class="dl-cards">
+      <a class="dl-card reveal" href="https://github.com/KeynoWu/own-api/releases" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16.4 12.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.8-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8s2 .8 3.4.8c1.4 0 2.3-1.3 3.1-2.5 1-1.5 1.4-2.9 1.4-2.9s-2.6-1-2.6-4.1Z"/><path d="M14.4 4.8c.7-.9 1.2-2.1 1.1-3.3-1 0-2.3.7-3 1.6-.7.8-1.3 2-1.1 3.2 1.1.1 2.3-.6 3-1.5Z"/></svg>
+        <b>macOS · Apple 芯片</b><span>own-api_0.1.6_aarch64.dmg</span>
+        <span class="go">下载 →</span>
+      </a>
+      <a class="dl-card reveal" href="https://github.com/KeynoWu/own-api/releases" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16.4 12.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.8-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8s2 .8 3.4.8c1.4 0 2.3-1.3 3.1-2.5 1-1.5 1.4-2.9 1.4-2.9s-2.6-1-2.6-4.1Z"/><path d="M14.4 4.8c.7-.9 1.2-2.1 1.1-3.3-1 0-2.3.7-3 1.6-.7.8-1.3 2-1.1 3.2 1.1.1 2.3-.6 3-1.5Z"/></svg>
+        <b>macOS · Intel</b><span>own-api_0.1.6_x64.dmg</span>
+        <span class="go">下载 →</span>
+      </a>
+      <a class="dl-card reveal" href="https://github.com/KeynoWu/own-api/releases" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3v-6ZM12 4.2 21 3v8.5H12V4.2ZM3 13.5h7.5v6.1L3 18.5v-5ZM12 13.5H21V21l-9-1.3v-6.2Z"/></svg>
+        <b>Windows · x64</b><span>own-api_0.1.6_x64-setup.exe</span>
+        <span class="go">下载 →</span>
+      </a>
+    </div>
+    <p class="dl-note reveal">未购买代码签名证书：macOS 首次打开请右键图标 →「打开」；Windows 点「更多信息 → 仍要运行」，属预期提示。
+      也可以源码运行：<span class="mono">npm install && npm start</span>（Node ≥ 20）。</p>
+  </div>
+</section>
+
+<!-- ================= FAQ ================= -->
+<section id="faq" class="faq" aria-labelledby="faq-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">FAQ</p>
+    <h2 id="faq-h" class="reveal">你可能会问</h2>
+    <div style="max-width:760px">
+      <details class="reveal">
+        <summary>我的上游 key 存在哪里？会上传吗？</summary>
+        <p class="a">全部存在本机 <code>~/.own-api/db.json</code>（写入即 0600 权限），不联网上报、没有任何遥测。网关默认只监听 <code>127.0.0.1</code>，管理台密钥默认脱敏，明文仅本机回环可见。</p>
+      </details>
+      <details class="reveal">
+        <summary>支持哪些上游协议？Codex 新版能用吗？</summary>
+        <p class="a">OpenAI 兼容（<code>/v1/chat/completions</code>）与 Anthropic 原生（<code>/v1/messages</code>）双向入口、双向互转，另兼容 legacy completions 与 embeddings。注意暂不支持 OpenAI Responses API（<code>/v1/responses</code>），这类客户端请切到 chat completions 模式。</p>
+      </details>
+      <details class="reveal">
+        <summary>auto 路由会不会把请求打到我不想用的模型？</summary>
+        <p class="a">不会越权：候选级 ACL 会校验这把对外 key 是否被授权使用每个候选；不在候选名单、权重为 0、健康分不达标的模型都不会接流量。全链失败会返回逐候选失败理由，绝不静默兜底到随机渠道。</p>
+      </details>
+      <details class="reveal">
+        <summary>能给团队同事用吗 / 要装什么依赖吗？</summary>
+        <p class="a">每人本机装一个桌面版最省事：托盘常驻、开机自启，零依赖（无需 Docker / 数据库）。要给局域网内其它设备用，设 <code>OWN_API_HOST=0.0.0.0</code> 并确保处于可信网络。</p>
+      </details>
+      <details class="reveal">
+        <summary>怎么知道哪个模型慢、哪把 key 挂了？</summary>
+        <p class="a">管理台自带仪表盘：逐请求 token / 首字延迟 / 花费，按模型、渠道、天聚合；「速度排行」直接对比各模型的延迟表现，谁慢谁靠前；号池页实时显示每把 key 的冷却与失败退避状态，可一键恢复。</p>
+      </details>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <a class="logo" href="#" aria-label="回到顶部">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0F1A2E"/><path d="M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z" fill="#EAF1FB"/><path d="M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z" fill="#EAF1FB"/><circle cx="32" cy="32" r="6.5" fill="#38BDF8"/></svg>
+      own-api
+    </a>
+    <span>本地大模型网关 · 数据不出你的机器</span>
+    <span class="sep"></span>
+    <a href="https://github.com/KeynoWu/own-api" rel="noopener">GitHub</a>
+    <a href="https://github.com/KeynoWu/own-api/issues" rel="noopener">反馈</a>
+    <span>© <span id="year"></span> KeynoWu</span>
+  </div>
+</footer>
+
+<script>
+// mobile menu
+const nav = document.getElementById('nav');
+const burger = document.getElementById('burger');
+burger.addEventListener('click', () => {
+  const open = nav.classList.toggle('open');
+  burger.setAttribute('aria-expanded', String(open));
+});
+nav.querySelectorAll('#navlinks a').forEach(a => a.addEventListener('click', () => {
+  nav.classList.remove('open'); burger.setAttribute('aria-expanded','false');
+}));
+
+// code tabs
+const tabs = [...document.querySelectorAll('.tab')];
+tabs.forEach(t => t.addEventListener('click', () => {
+  tabs.forEach(x => {
+    x.setAttribute('aria-selected', String(x === t));
+    document.getElementById(x.getAttribute('aria-controls')).hidden = x !== t;
+  });
+}));
+
+// copy button (copies the visible pane)
+const copyBtn = document.getElementById('copyBtn');
+copyBtn.addEventListener('click', async () => {
+  const active = tabs.find(t => t.getAttribute('aria-selected') === 'true');
+  const code = document.getElementById(active.getAttribute('aria-controls')).innerText;
+  try { await navigator.clipboard.writeText(code); }
+  catch { /* clipboard 不可用时静默：用户可手动选择复制 */ }
+  copyBtn.textContent = '已复制 ✓'; copyBtn.classList.add('done');
+  setTimeout(() => { copyBtn.textContent = '复制'; copyBtn.classList.remove('done'); }, 2200);
+});
+
+// scroll reveal (respects reduced motion via CSS)
+const io = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add('on'); io.unobserve(e.target); }
+}), { threshold: 0.12 });
+document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+document.getElementById('year').textContent = new Date().getFullYear();
+</script>
+</body>
+</html>
