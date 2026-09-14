@@ -755,6 +755,17 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const bdList = (await api('/api/channels', { headers: ADMIN })).body.find((x: any) => x.id === oa.id);
   check('baseUrl 数字补丁被丢弃、原值保全（GET 不再被毒成 500）', bdPatch.status === 200 && String(bdList.baseUrl).includes('18099'), JSON.stringify([bdPatch.status, bdList.baseUrl]));
 }
+{
+  // P6：SSE 巨帧上限守卫（MAX_FRAME_BUF 8MB）——9MB 单帧不得原样缓冲转发
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'mock-hugeframe', channelId: oa.id, upstreamModel: 'mock-hugeframe' }) });
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'huge-alias', channelId: oa.id, upstreamModel: 'mock-hugeframe' }) });
+  const hgReq = { method: 'POST', headers: { authorization: 'Bearer ' + VKEY, 'content-type': 'application/json' } };
+  const raw1 = await (await fetch(BASE + '/v1/chat/completions', { ...hgReq, body: JSON.stringify({ model: 'mock-hugeframe', stream: true, messages: [{ role: 'user', content: 'x' }] }) })).text();
+  check('P6 零改写透传 9MB 巨帧被 MAX_FRAME_BUF 截成错误帧', /error/i.test(raw1) && raw1.length < 1_000_000, String(raw1.length));
+  const raw2 = await (await fetch(BASE + '/v1/chat/completions', { ...hgReq, body: JSON.stringify({ model: 'huge-alias', stream: true, messages: [{ role: 'user', content: 'x' }] }) })).text();
+  check('P6 改写分支 9MB 巨帧不原样外发（响应有界）', raw2.length < 1_000_000, String(raw2.length));
+}
+
 
 
 {
@@ -762,6 +773,8 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   check('reveal=1 经代理头拿不到明文 key', Array.isArray(r) && r.every((k) => k.key.includes('*')), JSON.stringify(r[0] && r[0].key));
 }
 {
+  // 限速语义钉（P1 重做后）：只计鉴权失败、成功不增不清；桶按 socket IP。
+  // 本循环是文件里最后的 /v1 消费位——429 粘住来源直至窗口结束也无所谓，其后无合法请求
   let last = 0;
   for (let i = 0; i < 32; i++) {
     last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;

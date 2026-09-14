@@ -1,1 +1,0 @@
-if (TOKEN) api('/api/overview').then(() => boot()).catch(() => { localStorage.removeItem('lm_token'); TOKEN = ''; });

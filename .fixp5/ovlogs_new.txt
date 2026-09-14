@@ -1,4 +1,0 @@
-      logs: store.db.logs.length,
-      // P5(H2)：暴露保留上限，前端在日志被裁剪时挂统计截断警示（此前是静默的）
-      logRetention: s.logRetention,
-    });

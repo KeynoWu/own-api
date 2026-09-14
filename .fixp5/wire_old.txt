@@ -1,1 +1,0 @@
-          el('td', { class: 'muted' }, l.wire === 'anthropic' ? 'Anthropic' : 'OpenAI')));

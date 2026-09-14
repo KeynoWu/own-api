@@ -1,4 +1,0 @@
-pub struct Sidecar(pub Mutex<Option<CommandChild>>);
-
-/// 审查 P4：wait_ready 在途标志（去重用）
-static WAIT_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

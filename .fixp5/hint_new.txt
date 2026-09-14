@@ -1,1 +1,0 @@
-{ name: 'allowed', label: '允许的模型（逗号分隔，留空 = 全部；按对外名匹配，auto 路由名同样可填）', full: true },

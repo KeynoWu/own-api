@@ -1,1 +1,0 @@
-    const from = Date.now() - ovSt.hours * 3600e3;

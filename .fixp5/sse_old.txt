@@ -1,9 +1,0 @@
-  if (es) es.close();
-  es = null;
-  const tk = await api('/api/logs/stream/ticket', { method: 'POST' }).catch(() => null);
-  if (tk?.ticket) {
-    es = new EventSource(`/api/logs/stream?ticket=${encodeURIComponent(tk.ticket)}`);
-    es.onmessage = (m) => {
-      try { JSON.parse(m.data).forEach((l) => { if (!onlyErr || !l.ok) list.prepend(render(l)); }); } catch {}
-    };
-  }

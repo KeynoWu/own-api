@@ -929,6 +929,44 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('P3 scrubSecret 遮罩 base64url 与小写-%xx 变体', !out2.includes(b64u) && !out2.includes(lowPct) && out2.includes('***'), out2.slice(0, 90));
 }
 {
+  // P6：前端聚合纯逻辑钉——从 SPA 源里抽出 addAgg/newAgg 求值，锁 KPI 算术（改前端必须过这关）
+  const fsx = await import('node:fs');
+  const html = fsx.readFileSync('web/index.html', 'utf8');
+  const extract = (name: string) => {
+    const i = html.indexOf('const ' + name + ' = ');
+    if (i < 0) throw new Error(name + ' not found');
+    const arrow = html.indexOf('=>', i) + 2;
+    let p = arrow;
+    while (/\s/.test(html[p])) p++;
+    let d = 0;
+    if (html[p] === '{') {
+      // 块体：配平花括号
+      for (let k = p; k < html.length; k++) {
+        if (html[k] === '{') d++;
+        else if (html[k] === '}' && --d === 0) return html.slice(i, k + 1);
+      }
+    } else {
+      // 表达式体（如 () => ({...})）：配平括号后在顶层 ; 处收口
+      for (let k = p; k < html.length; k++) {
+        const ch = html[k];
+        if (ch === '(' || ch === '{' || ch === '[') d++;
+        else if (ch === ')' || ch === '}' || ch === ']') d--;
+        else if (ch === ';' && d === 0) return html.slice(i, k);
+      }
+    }
+    throw new Error('unbalanced ' + name);
+  };
+  const cut = (src: string) => src.slice(src.indexOf('=') + 1).trim();
+  const newAgg = eval('(' + cut(extract('newAgg')) + ')');
+  const addAgg = eval('(' + cut(extract('addAgg')) + ')');
+  const agg = newAgg();
+  addAgg(agg, { ok: true, promptTokens: 100, completionTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 10, costUsd: 0.5 });
+  check('P6 前端聚合：真实输入=prompt-缓存分项，成本/请求计数正确', agg.pin === 50 && agg.pout === 20 && agg.cr === 40 && agg.cw === 10 && agg.requests === 1 && agg.errors === 0, JSON.stringify(agg));
+  const agg2 = newAgg();
+  addAgg(agg2, { ok: false, promptTokens: 10, completionTokens: 0, cacheReadTokens: 90, cacheWriteTokens: 90 });
+  check('P6 前端聚合：缓存>prompt 时真实输入夹 0，坏样本不污染统计', agg2.pin === 0 && agg2.errors === 1, JSON.stringify(agg2));
+}
+{
   const t: any = await import('../src/translate.ts');
   const fn = t.legacyToChatRequest ?? t.default?.legacyToChatRequest;
   const out3 = fn ? fn({ model: 'm', prompt: 'hi', max_tokens: 64 }) : null;

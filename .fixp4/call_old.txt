@@ -1,5 +1,0 @@
-                    if let Some((port, token)) = read_session() {
-                        if graceful_shutdown(port, &token) {
-                            std::thread::sleep(Duration::from_millis(400));
-                        }
-                    }

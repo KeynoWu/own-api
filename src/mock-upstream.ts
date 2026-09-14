@@ -48,6 +48,21 @@ app.post('/v1/chat/completions', async (c) => {
   if (bad) return c.json(bad.body, bad.status as any, bad.retryAfter ? { 'retry-after': bad.retryAfter } : {});
   if (body.model === 'mock-toolong')
     return c.json({ error: { message: "This model's maximum context length is 1000 tokens. However, your messages resulted in 5000 tokens.", type: 'invalid_request_error' } }, 400 as any);
+  if (body.model === 'mock-hugeframe') {
+    // P6 fixture：单帧 9MB（无边界巨帧）——MAX_FRAME_BUF 必须截它，不许无界缓冲
+    const big = 'x'.repeat(9 * 1024 * 1024);
+    return new Response(
+      new ReadableStream({
+        start(ctrl) {
+          const enc = new TextEncoder();
+          ctrl.enqueue(enc.encode('data: ' + big + '\n'));
+          ctrl.enqueue(enc.encode('\n'));
+          ctrl.close();
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
   if (body.model === 'mock-dirty-stream') {
     // 审查 H1 fixture：流中段 error 帧回显上游 key（原文/URL 编码/base64 三变体）
     const variants = [key, encodeURIComponent(key), Buffer.from(key).toString('base64')].join(' | ');

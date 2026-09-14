@@ -1,2 +1,0 @@
-      )));
-    const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
