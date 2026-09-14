@@ -854,12 +854,6 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const noauth = await fetch(BASE + '/api/stats/speed');
   check('SI 无令牌 401', noauth.status === 401, String(noauth.status));
 }
-// ============ 18. 速度空窗（clearLogs 放最末，不伤任何 log 依赖断言） ============
-{
-  const del = await api('/api/logs', { method: 'DELETE', headers: ADMIN });
-  const rep: any = (await api('/api/stats/speed?hours=0', { headers: ADMIN })).body;
-  check('SI 空窗 200 且三集合全空不 500', del.status === 200 && rep && rep.streamRows.length === 0 && rep.latencyRows.length === 0 && rep.unattributed === null && rep.logsInWindow === 0 && rep.oldestTs === 0, JSON.stringify(rep && { n: rep.logsInWindow }));
-}
 // ============ 19. 配置组导出（config-bundle CB-1） ============
 {
   const leaky = 'sk-rtdead' + '0'.repeat(27) + '9z';
@@ -879,7 +873,73 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const a1 = (r.routes.autos || []).find((x: any) => x.publicName === 'cb1-auto');
   const singNames = new Set((r.routes.singles || []).map((x: any) => x.publicName));
   check('CB auto 候选按 publicName 引用且自洽', !!a1 && a1.candidates.length === 1 && a1.candidates[0].publicName === 'cb1-model' && a1.candidates[0].weight === 5 && !('routeId' in a1.candidates[0]) && (r.routes.autos || []).every((x: any) => x.candidates.every((cd: any) => singNames.has(cd.publicName) || (r.routes.autos || []).some((y: any) => y.publicName === cd.publicName))), JSON.stringify(a1));
-}// ============ 18. 速度空窗（clearLogs 放最末，不伤任何 log 依赖断言） ============
+}
+// ============ 20. 配置组导入 dryRun（CB-2） ============
+{
+  const B = (o: any) => ({ method: 'POST', headers: ADMIN, body: JSON.stringify(o) });
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const hitsSum = async () => Object.values(await mockHits()).reduce((s, x) => s + x, 0);
+  const mk = (name: string, base: string) => api('/api/channels', { ...B({ name, baseUrl: base, protocol: 'openai' }) });
+  await mk('cb2-conf-base', 'http://127.0.0.1:8/v1');
+  await mk('cb2-dup', 'http://127.0.0.1:1/v1');
+  await mk('cb2-dup', 'http://127.0.0.1:2/v1');
+  const b1: any = (await api('/api/config/export', { headers: ADMIN })).body;
+  const cb1Chan = b1.channels.find((c: any) => c.name === 'cb1-ch');
+  const cb1Single = b1.routes.singles.find((x: any) => x.publicName === 'cb1-model');
+  const imp = (payload: any) => api('/api/config/import', B(payload));
+  const rKind = await imp({ bundle: { kind: 'x', version: 1, channels: [{ name: 'a', baseUrl: 'http://h/v1' }] }, dryRun: true });
+  const rVer = await imp({ bundle: { kind: 'own-api-config-bundle', version: 2, channels: [{ name: 'a', baseUrl: 'http://h/v1' }] }, dryRun: true });
+  const rEmpty = await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [], routes: { singles: [], autos: [] } }, dryRun: true });
+  const rNoBase = await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'a' }] }, dryRun: true });
+  const rDupChan = await imp({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'a', baseUrl: 'http://h/v1' }, { name: 'a', baseUrl: 'http://g/v1' }] }, dryRun: true });
+  const rTop = await imp({ bundle: 5, dryRun: true });
+  check('CB 结构畸形六连 400', [rKind, rVer, rEmpty, rNoBase, rDupChan, rTop].every((r) => r.status === 400), [rKind.status, rVer.status, rEmpty.status, rNoBase.status, rDupChan.status, rTop.status].join('/'));
+  check('CB version 过大 400 含升级指引', String(rVer.body?.error || '').includes('升级'), JSON.stringify(rVer.body));
+  const bundle = {
+    kind: 'own-api-config-bundle', version: 1, exportedAt: '2026-09-14T00:00:00Z',
+    channels: [cb1Chan, { name: 'cb2-new', baseUrl: 'http://127.0.0.1:7/v1', protocol: 'openai', futureField: 1, api_key: 'sk-someone-else' }, { name: 'cb2-conf-base', baseUrl: 'http://127.0.0.1:99/v1', protocol: 'openai' }, { name: 'cb2-dup', baseUrl: 'http://127.0.0.1:3/v1', protocol: 'openai' }, { name: 'cb2-nokey', baseUrl: 'http://127.0.0.1:6/v1', protocol: 'openai' }],
+    routes: {
+      singles: [
+        { publicName: 'cb2-s-new', channelName: 'cb2-new', upstreamModel: 'm1' },
+        cb1Single,
+        { publicName: 'cb2-s-confref', channelName: 'cb2-conf-base', upstreamModel: 'm2' },
+        { publicName: 'cb2-s-bad', channelName: 'cb2-who', upstreamModel: 'm3' },
+      ],
+      autos: [{ publicName: 'cb2-auto', candidates: [{ publicName: 'cb2-s-new', weight: 5 }, { publicName: 'ghost-x', weight: 1 }, { publicName: 'cb1-auto', weight: 1 }] }],
+    },
+  };
+  const keys = { 'cb2-new': ['sk-cb2-k1', 'sk-cb2-k1', 'sk-cb2-k2'], 'cb1-ch': ['sk-cb2-k3'], 'cb2-conf-base': ['sk-cb2-nope'], 'cb2-ghost': ['sk-cb2-nope2'] };
+  await store.flushSync();
+  await sleepMs(520);
+  const snap = JSON.stringify({ c: store.db.channels, r: store.db.routes, s: store.db.settings });
+  const logN = store.db.logs.length;
+  const hits0 = await hitsSum();
+  const dr = await imp({ bundle, keys, dryRun: true });
+  const rc: any = dr.body;
+  check('CB dryRun 200 且 dryRun:true', dr.status === 200 && rc?.dryRun === true, String(dr.status) + ' ' + JSON.stringify(rc && rc.channels && rc.channels.conflicts.map((z: any) => z.reason)).slice(0, 160));
+  await store.flushSync();
+  check('CB dryRun 三子树+logs 零变化（防抖安全断言法）', snap === JSON.stringify({ c: store.db.channels, r: store.db.routes, s: store.db.settings }) && store.db.logs.length === logN);
+  check('CB 渠道计数 created2/merged1/conflict2', rc?.channels?.created === 2 && rc?.channels?.merged === 1 && rc?.channels?.conflicts?.length === 2, JSON.stringify(rc?.channels && { c: rc.channels.created, m: rc.channels.merged, x: rc.channels.conflicts.map((z: any) => z.name) }));
+  const dupC = (rc?.channels?.conflicts || []).find((z: any) => z.name === 'cb2-dup');
+  check('CB 同名歧义 conflict 文案含「2 个同名渠道」', !!dupC && dupC.reason.includes('2 个同名渠道'), JSON.stringify(dupC));
+  check('CB keysAdded 净新增口径（去重后 3）', rc?.channels?.keysAdded === 3 && rc?.channels?.keysAddedByChannel?.['cb2-new'] === 2 && rc?.channels?.keysAddedByChannel?.['cb1-ch'] === 1, JSON.stringify(rc?.channels?.keysAddedByChannel));
+  check('CB 路由计数 created3/skipped1/conflict1', rc?.routes?.created === 3 && rc?.routes?.skipped === 1 && rc?.routes?.conflicts?.length === 1 && rc.routes.conflicts[0].publicName === 'cb2-s-bad', JSON.stringify(rc?.routes && { c: rc.routes.created, s: rc.routes.skipped, x: rc.routes.conflicts }));
+  const W = (rc?.routes?.warnings || []).map((w: any) => w.reason).join(' | ');
+  check('CB warnings 全家桶（悬空/禁嵌套/conflict引用/密钥拒写×2/未知字段/外来key忽略）', W.includes('候选 ghost-x 不存在') && W.includes('候选 cb1-auto 指向自动路由') && W.includes('conflict 渠道 cb2-conf-base') && W.includes('渠道 cb2-conf-base 冲突，密钥未写入') && W.includes('渠道 cb2-ghost 不存在') && W.includes('未知字段「futureField」') && W.includes('密钥字段「api_key」已忽略'), W.slice(0, 400));
+  check('CB 同包候选解析成功（cb2-s-new 无 warning）', !W.includes('候选 cb2-s-new'));
+  check('CB pendingKeyChannels 只含无 key 新渠道', !!rc?.pendingKeyChannels?.includes('cb2-nokey') && !rc.pendingKeyChannels.includes('cb2-new') && !rc.pendingKeyChannels.includes('cb1-ch'), JSON.stringify(rc?.pendingKeyChannels));
+  const drText = await (await fetch(BASE + '/api/config/import', B({ bundle: { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'cb2-tmp', baseUrl: 'http://h/v1' }] }, keys: { 'cb2-tmp': ['sk-cb2-k9SENT'] }, dryRun: true }))).text();
+  check('CB 响应不回显 keys 原文', drText.indexOf('sk-cb2-k9SENT') === -1, drText.slice(0, 120));
+  const hits1 = await hitsSum();
+  check('CB dryRun 零外呼（hits 增量 0）', hits1 === hits0, hits0 + '->' + hits1);
+  const st0: any = (await api('/api/settings', { headers: ADMIN })).body;
+  await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ maxBodyBytes: 4096 }) });
+  const fat = { kind: 'own-api-config-bundle', version: 1, channels: [{ name: 'cb2-fat', baseUrl: 'http://h/v1', note: 'x'.repeat(20000) }] };
+  const r413 = await imp({ bundle: fat, dryRun: true });
+  check('CB 超 maxBodyBytes → 413（本端点自建闸）', r413.status === 413, String(r413.status));
+  await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ maxBodyBytes: st0.maxBodyBytes }) });
+}
+// ============ 18. 速度空窗（clearLogs 放最末，不伤任何 log 依赖断言） ============
 {
   const del = await api('/api/logs', { method: 'DELETE', headers: ADMIN });
   const rep: any = (await api('/api/stats/speed?hours=0', { headers: ADMIN })).body;

@@ -113,7 +113,7 @@ function emptyDb(): DBShape {
 }
 
 /** 归一化成字符串数组：支持数组，或每行一个的字符串；去重去空 */
-function toStrList(v: unknown): string[] | undefined {
+export function toStrList(v: unknown): string[] | undefined {
   const raw = Array.isArray(v) ? v.map((s) => String(s)) : typeof v === 'string' ? v.split('\n') : [];
   const out = [...new Set(raw.map((s) => s.trim()).filter(Boolean))];
   return out.length ? out : undefined;
@@ -127,7 +127,7 @@ const UPDATABLE_VKEY_FIELDS = ['name', 'enabled', 'allowedModels', 'rpmLimit', '
 const UPDATABLE_KEY_FIELDS = ['status', 'weight', 'name', 'note'];
 
 /** extraHeaders 值级校验：只留可字符串化的值（审查 C-M3——对象值会让 Headers.set 每请求运行期 TypeError） */
-function sanitizeExtraHeaders(h: unknown): Record<string, string> | undefined {
+export function sanitizeExtraHeaders(h: unknown): Record<string, string> | undefined {
   if (!h || typeof h !== 'object' || Array.isArray(h)) return undefined;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h as Record<string, unknown>)) {
@@ -594,7 +594,7 @@ class Store {
     return this.autos().find((a) => a.publicName.toLowerCase() === lower);
   }
   /** 全局撞名（单表后天然统一）：不得与任一 single 的 publicName/tag 或其它 auto 的 publicName 同名 */
-  private routeNameTaken(name: string, excludeId?: string): string | undefined {
+  routeNameTaken(name: string, excludeId?: string): string | undefined {
     const lower = String(name || '').toLowerCase();
     const hit = this.db.routes.find(
       (r) => r.id !== excludeId && (r.publicName.toLowerCase() === lower || (r.type === 'single' && r.tags?.some((t) => t.toLowerCase() === lower))),

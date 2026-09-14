@@ -7,7 +7,7 @@ import { forgetQuota } from './usage.ts';
 import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
-import { buildBundle } from './config-bundle.ts';
+import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
 import { clearHealth, clearHealthFor, clearSticky, healthSnapshot, stickyCount } from './auto.ts';
 import type { Channel } from './types.ts';
 
@@ -528,6 +528,41 @@ export function createAdmin(): Hono {
   // 速度排行（speed-insights v1.1）：hours 归一钳制在 buildSpeedStats 内（DR-SI-8）
   app.get('/stats/speed', (c) => c.json(buildSpeedStats(Number(c.req.query('hours') ?? 24))));
   app.get('/config/export', (c) => c.json(buildBundle()));
+  app.post('/config/import', async (c) => {
+    // 本端点自建 body 闸（§6.4：/api/* 从无全局体积守卫）：content-length 预拒 + reader 流式累计
+    const cap = store.db.settings.maxBodyBytes || 0;
+    const cl = Number(c.req.header('content-length') || 0);
+    if (cap > 0 && cl > cap) return c.json({ error: '请求体过大' }, 413);
+    let body: any;
+    try {
+      const rb = c.req.raw.body;
+      if (rb) {
+        const it = rb.getReader();
+        const parts: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const r = await it.read();
+          if (r.done) break;
+          total += (r.value as Uint8Array).byteLength;
+          if (cap > 0 && total > cap) return c.json({ error: '请求体过大' }, 413);
+          parts.push(r.value as Uint8Array);
+        }
+        const buf = new Uint8Array(total);
+        let off = 0;
+        for (const seg of parts) { buf.set(seg, off); off += seg.byteLength; }
+        body = JSON.parse(new TextDecoder().decode(buf));
+      }
+    } catch { return c.json({ error: 'JSON 畸形' }, 400); }
+    if (!body || typeof body !== 'object') return c.json({ error: 'body 需为对象：{ bundle, keys?, dryRun? }' }, 400);
+    const { errors, plan, receipt } = buildImportPlan(body.bundle, body.keys);
+    if (errors) return c.json({ error: errors.join('; '), errors }, 400);
+    receipt!.dryRun = body.dryRun === true;
+    if (body.dryRun === true) return c.json(receipt);
+    const extra = applyPlan(plan!);
+    for (const e2 of extra) receipt!.routes.conflicts.push(e2);
+    store.flushSync(); // 回执前落盘：消除「回执宣称已创建、盘上还没有」观测窗（§4.5）
+    return c.json(receipt);
+  });
 
   // ---------- settings ----------
   // 管理令牌不再随设置回显（审查 A-M：GET /settings 整包吐 adminToken 让任何 XSS 一步拿权）。

@@ -1,60 +1,3 @@
-// 配置组导出（docs/config-bundle-design.md v2.1）。导入逻辑见文件后半（CB-2/3 落地）。
-import { store, normalizeBaseUrl, toStrList, sanitizeExtraHeaders } from './store.ts';
-
-export const BUNDLE_KIND = 'own-api-config-bundle';
-export const BUNDLE_VERSION = 1;
-
-/** 导出恒全量、恒不含密钥；渠道名原样导出（重名由导入端 §4.2-R 判冲突，导出端只提示）。 */
-export function buildBundle() {
-  const routes = store.db.routes;
-  const byId = new Map(routes.map((r) => [r.id, r] as const));
-  const channels = store.db.channels.map((c) => ({
-    name: c.name,
-    baseUrl: c.baseUrl,
-    protocol: c.protocol,
-    authStyle: c.authStyle ?? 'bearer',
-    ...(c.extraHeaders && Object.keys(c.extraHeaders).length ? { extraHeaders: c.extraHeaders } : {}),
-    ...(c.testModel ? { testModel: c.testModel } : {}),
-    ...(c.modelList && c.modelList.length ? { modelList: c.modelList } : {}),
-    enabled: c.enabled !== false,
-    timeoutMs: c.timeoutMs ?? null,
-    ...(c.note ? { note: c.note } : {}),
-  }));
-  const singles: any[] = [];
-  const autos: any[] = [];
-  for (const r of routes) {
-    if (r.type === 'single') {
-      const ch = store.db.channels.find((c) => c.id === r.channelId);
-      singles.push({
-        publicName: r.publicName,
-        channelName: ch ? ch.name : '',
-        upstreamModel: r.upstreamModel,
-        ...(r.protocol ? { protocol: r.protocol } : {}),
-        enabled: r.enabled !== false,
-        ...(r.contextWindow !== undefined ? { contextWindow: r.contextWindow } : {}),
-        ...(r.maxOutputTokens !== undefined ? { maxOutputTokens: r.maxOutputTokens } : {}),
-        ...(r.supportsStreaming !== undefined ? { supportsStreaming: r.supportsStreaming } : {}),
-        ...(r.supportsTools !== undefined ? { supportsTools: r.supportsTools } : {}),
-        ...(r.priceInput !== undefined ? { priceInput: r.priceInput } : {}),
-        ...(r.priceOutput !== undefined ? { priceOutput: r.priceOutput } : {}),
-        ...(r.priceCacheRead !== undefined ? { priceCacheRead: r.priceCacheRead } : {}),
-        ...(r.priceCacheWrite !== undefined ? { priceCacheWrite: r.priceCacheWrite } : {}),
-        ...(r.tags && r.tags.length ? { tags: r.tags } : {}),
-        ...(r.note ? { note: r.note } : {}),
-      });
-    } else {
-      autos.push({
-        publicName: r.publicName,
-        enabled: r.enabled !== false,
-        stickyTtlMs: r.stickyTtlMs ?? 300000,
-        ...(r.note ? { note: r.note } : {}),
-        // 引用锚=候选 publicName（DR-CB-A）；本机悬空候选导出端静默剔除（导出保持自洽可导入）
-        candidates: (r.candidates || []).map((cd) => ({ publicName: byId.get(cd.routeId)?.publicName || '', weight: cd.weight })).filter((cd) => cd.publicName !== ''),
-      });
-    }
-  }
-  return { kind: BUNDLE_KIND, version: BUNDLE_VERSION, exportedAt: new Date().toISOString(), channels, routes: { singles, autos } };
-}
 
 // ================= 导入：校验 + 计划（dryRun 与提交共用同一构建器，预览≡落盘） =================
 
@@ -251,7 +194,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       else routeConflicts.push({ publicName: name, reason: '已存在且配置不同（不覆盖）' });
       return;
     }
-    if (store.routeNameTaken(name)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); return; }
+    if (store.routeNameTaken(name, null)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); return; }
     plan.singles.push({ src, channelId, newChanIdx, srcIdx });
   });
   const bundleSingleNames = new Set(singlesIn.map((s: any) => String(s.publicName).trim()));
@@ -282,7 +225,7 @@ export function buildImportPlan(bundle: any, keysRaw: any): { errors?: string[];
       plan.autos.push({ src, mergeTargetId: existing.id, okCount });
       continue;
     }
-    if (store.routeNameTaken(name)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); continue; }
+    if (store.routeNameTaken(name, null)) { routeConflicts.push({ publicName: name, reason: '外名/tag 与既有路由冲突' }); continue; }
     if (!okCount) { warnings.push({ publicName: name, reason: '候选全部无法解析，auto 未创建' }); continue; }
     plan.autos.push({ src, okCount });
   }
@@ -308,8 +251,8 @@ export function applyPlan(plan: Plan): Conflict[] {
       authStyle: src.authStyle, extraHeaders: sanitizeExtraHeaders(src.extraHeaders),
       testModel: src.testModel, modelList: toStrList(src.modelList), enabled: boolDef(src.enabled, true),
       timeoutMs: src.timeoutMs ?? undefined, note: src.note,
+      keys: p.keyList.map((k) => ({ key: k })),
     });
-    if (p.keyList.length) store.addKeys(ch.id, p.keyList.map((k) => ({ key: k })));
     idByNewChan.set(i, ch.id);
   }
   for (const m of plan.chanMerge) {
