@@ -550,7 +550,8 @@ class Store {
     for (const k of Object.keys(patch)) {
       if (!UPDATABLE_MODEL_FIELDS.includes(k)) continue;
       const v = (patch as Record<string, unknown>)[k];
-      if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'protocol' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃
+      // F5：protocol 纳入 null=清除（「跟随渠道」的 UI 承诺此前是静默 no-op）
+      if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃
 
       if (k === 'protocol' && v !== undefined && v !== 'openai' && v !== 'anthropic') continue;
       if ((k === 'enabled' || k === 'supportsStreaming' || k === 'supportsTools') && typeof v !== 'boolean') continue;

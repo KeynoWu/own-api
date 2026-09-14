@@ -1,6 +1,0 @@
-  private persist(db: DBShape = this.db) {
-    if (this.loadBlocked) {
-      console.error('[store] 上次装载未成功，拒绝回写（防止空库顶掉不可读的原库，R3[中3]）');
-      return;
-    }
-    mkdirSync(dirname(DB_FILE), { recursive: true, mode: 0o700 });

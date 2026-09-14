@@ -1,0 +1,2 @@
+    el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
+    saveBtn));

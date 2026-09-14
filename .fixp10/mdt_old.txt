@@ -1,0 +1,1 @@
+  timer = setInterval(() => go('models'), 15000);

@@ -1,0 +1,1 @@
+      publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || undefined,

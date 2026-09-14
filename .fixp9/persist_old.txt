@@ -1,2 +1,0 @@
-  private persist(db: DBShape = this.db) {
-    mkdirSync(dirname(DB_FILE), { recursive: true, mode: 0o700 });

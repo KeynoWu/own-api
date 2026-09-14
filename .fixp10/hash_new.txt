@@ -1,0 +1,2 @@
+  location.hash = v;
+  curView = v;

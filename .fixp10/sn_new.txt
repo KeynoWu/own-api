@@ -1,0 +1,1 @@
+      key: isLocalish(c) ? vk.key : '（明文 key 请在本机直连的管理台查看复制）', // R1-S1：掩码战役后最后的无闸明文出口，与 reveal 同口径

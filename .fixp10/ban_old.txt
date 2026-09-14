@@ -1,0 +1,3 @@
+    if (o.logRetention && allLogs.length >= o.logRetention) {
+      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'));
+    }

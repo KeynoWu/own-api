@@ -1,0 +1,2 @@
+  views.overview = async () => {
+    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);

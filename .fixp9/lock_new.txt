@@ -1,3 +1,0 @@
-    // R3[高危1]：锁内容是「pid ts」（P2 改了写入格式漏改这里）→ 比对永假 → 正常退出永不清锁
-    const lockRaw = existsSync(LOCK_FILE) ? readFileSync(LOCK_FILE, 'utf8').trim() : '';
-    if (lockRaw && lockRaw.split(' ')[0] === String(process.pid)) unlinkSync(LOCK_FILE);

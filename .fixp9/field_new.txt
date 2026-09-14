@@ -1,4 +1,0 @@
-  // R3[中3]：装载失败（IO/权限/损坏但备份改名也失败）时禁 persist——空库绝不许覆盖读不到的原库
-  private loadBlocked = false;
-
-  private load(): DBShape {

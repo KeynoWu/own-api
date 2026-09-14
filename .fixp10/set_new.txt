@@ -1,0 +1,4 @@
+      const res = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+      if (patch.adminToken && !(res && (res._rejected || res.rejected) && (res._rejected || res.rejected).length)) { // F3：换令牌后本会话凭据即刻跟上，否则下一个请求起全会话 401 变砖
+        TOKEN = patch.adminToken; localStorage.setItem('lm_token', patch.adminToken);
+      }

@@ -1,0 +1,7 @@
+// F4：http 非安全上下文无 navigator.clipboard（同步炸毁创建流）；掩码串被静默复制=用户拿假 key 配 agent
+const copy = (t) => {
+  if (!t) { toast('没有可复制的内容', true); return; }
+  if (String(t).includes('*')) { toast('这是掩码串——明文 key 仅限本机直连获取', true); return; }
+  const fb = () => window.prompt('请手动复制（Ctrl+C）：', t);
+  try { navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast('已复制'), fb) : fb(); } catch { fb(); }
+};

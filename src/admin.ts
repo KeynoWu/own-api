@@ -548,7 +548,7 @@ export function createAdmin(): Hono {
     if (!vk) return c.json({ error: '还没有对外 key' }, 404);
     return c.json({
       baseUrl: base,
-      key: vk.key,
+      key: isLocalish(c) ? vk.key : '（明文 key 请在本机直连的管理台查看复制）', // R1-S1：掩码战役后最后的无闸明文出口，与 reveal 同口径
       model,
       curl: `curl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${vk.key}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}'`,
       openaiSdk: `import OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${vk.key}" });\nconst r = await client.chat.completions.create({ model: "${model}", messages: [{ role: "user", content: "hi" }] });`,

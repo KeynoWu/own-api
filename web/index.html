@@ -136,7 +136,13 @@ const toast = (msg, bad) => {
   $('#toast').append(n);
   setTimeout(() => n.remove(), bad ? 6000 : 2600);
 };
-const copy = (t) => navigator.clipboard.writeText(t).then(() => toast('已复制'), () => toast('复制失败', true));
+// F4：http 非安全上下文无 navigator.clipboard（同步炸毁创建流）；掩码串被静默复制=用户拿假 key 配 agent
+const copy = (t) => {
+  if (!t) { toast('没有可复制的内容', true); return; }
+  if (String(t).includes('*')) { toast('这是掩码串——明文 key 仅限本机直连获取', true); return; }
+  const fb = () => window.prompt('请手动复制（Ctrl+C）：', t);
+  try { navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast('已复制'), fb) : fb(); } catch { fb(); }
+};
 const num = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n || 0));
 const money = (n) => '$' + (Number(n) || 0).toFixed(4);
 const ago = (t) => {
@@ -223,17 +229,23 @@ function form(title, fields, onSubmit) {
   }
 
   const myForm = ++formSeq; // 表单叠开（类型选择→具体表单）时的本实例标识
+  const saveBtn = el('button', { class: 'btn primary', onclick: () => submit() }, '保存');
+  let submitting = false; // F2：双击保存=双发 POST（渠道会真建两条），在途一律吞掉
   const submit = async () => {
+    if (submitting) return;
+    submitting = true;
+    saveBtn.disabled = true;
     const vals = {};
     for (const f of fields) vals[f.name] = f.type === 'cands' ? inputs[f.name].__get() : inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
-    try { await onSubmit(vals); if (dlg.__form === myForm) dlg.close(); } catch (e) { toast(e.message, true); }
+    try { await onSubmit(vals); if (dlg.__form === myForm) dlg.close(); }
+    catch (e) { toast(e.message, true); saveBtn.disabled = false; submitting = false; }
   };
   if (dlg.open) dlg.close(); // 叠开先退旧场再入幕
   dlg.__form = myForm;
   dlg.innerHTML = '';
   dlg.append(el('h3', {}, title), body, el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' },
     el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'),
-    el('button', { class: 'btn primary', onclick: submit }, '保存')));
+    saveBtn));
   dlg.showModal(); // M1（修订）：先 close 化解旧 InvalidStateError；上一版「已开则跳过」反而把刚打开的新表单关掉
 }
 
@@ -246,6 +258,7 @@ function go(v) {
   clearInterval(timer);
   if (v !== 'logs' && es) { es.close(); es = null; }
   location.hash = v;
+  curView = v;
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
   $('#app').innerHTML = '';
   $('#app').append(views.loading());
@@ -259,6 +272,11 @@ function go(v) {
       if (v === 'overview' && ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
     });
 }
+// F8：行内启停/删除按钮此前无 catch——失败静默像成功。一张全局网兜住所有未处理拒绝（也兜未来的）
+addEventListener('unhandledrejection', (e) => { toast('请求失败：' + ((e.reason && e.reason.message) || String(e.reason)), true); e.preventDefault(); });
+// F10：Back/Forward 此前只改地址栏不换视图（无 hashchange 监听）
+let curView = 'overview';
+addEventListener('hashchange', () => { const v = location.hash.slice(1) || 'overview'; if (v !== curView) go(v); });
 
 views.loading = () => el('div', { class: 'muted' }, '加载中…');
 
@@ -328,6 +346,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     return out;
   };
   views.overview = async () => {
+    const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
     const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
     const box = el('div');
     const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
@@ -344,8 +363,11 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
         sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
         sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
       )));
-    if (o.logRetention && allLogs.length >= o.logRetention) {
-      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'));
+    // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
+    if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
+      box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, o.logRetention && o.logRetention <= 5000
+        ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'
+        : '本页统计仅取最近 5000 条日志——更早记录未纳入（当前保留上限 ' + (o.logRetention || '未设') + ' 条）'));
     }
     const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
     const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
@@ -442,12 +464,13 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
       if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
       box.append(t);
     }
-    if (ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
+    if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
     return box;
   };
 }
 // ---------------- 模型路由（v3 单表：新增时选类型，single/auto 同页管理） ----------------
 views.models = async () => {
+  const myGen = viewGen; // F1：同 overview——过期代际不得留下 15s 孤儿定时器
   const [routes, channels, rt] = await Promise.all([api('/api/routes'), api('/api/channels'), api('/api/auto-health')]);
   const models = routes.filter((r) => r.type === 'single');
   const box = el('div');
@@ -465,7 +488,7 @@ views.models = async () => {
     { name: 'contextWindow', label: '上下文窗口', type: 'number' },
   ], (v) => api('/api/routes', { method: 'POST', body: JSON.stringify({
       type: 'single',
-      publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || undefined,
+      publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || null, // F5：「跟随渠道」=null 清除，undefined 会被 JSON 丢键变 no-op
       priceInput: v.priceInput ? Number(v.priceInput) : undefined, priceOutput: v.priceOutput ? Number(v.priceOutput) : undefined,
       maxOutputTokens: v.maxOutputTokens ? Number(v.maxOutputTokens) : undefined, contextWindow: v.contextWindow ? Number(v.contextWindow) : undefined,
     }) }).then(() => { toast('已创建'); go('models'); }));
@@ -479,7 +502,7 @@ views.models = async () => {
     { name: 'priceOutput', label: '输出 $/M', type: 'number', step: '0.01', value: m.priceOutput ?? '' },
     { name: 'maxOutputTokens', label: 'max_tokens 默认', type: 'number', value: m.maxOutputTokens ?? '' },
   ], (v) => api('/api/routes/' + m.id, { method: 'PATCH', body: JSON.stringify({
-      publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || undefined,
+      publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || null, // F5
       priceInput: v.priceInput === '' ? null : Number(v.priceInput), priceOutput: v.priceOutput === '' ? null : Number(v.priceOutput),
       maxOutputTokens: v.maxOutputTokens === '' ? null : Number(v.maxOutputTokens),
     }) }).then(() => { toast('已更新'); go('models'); }));
@@ -558,7 +581,7 @@ views.models = async () => {
   if (!(rt.windows || []).length) wt.append(el('tr', {}, el('td', { class: 'muted' }, '窗口内暂无候选流量样本')));
   rc.append(wt);
   box.append(rc);
-  timer = setInterval(() => go('models'), 15000);
+  if (myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('models'), 15000); } // F1
   return box;
 };
 // ---------------- 渠道与号池 ----------------
@@ -760,6 +783,7 @@ views.logs = async () => {
   // M3：SSE 首帧快照与屏上已有条目按 seq 去重——竞态窗口内不再双份渲染
   const seenSeq = new Set(first.map((l) => l.seq));
   const onSseMsg = (m) => {
+    sseTry = 0; // F9：收到推送就把重连额度回满——纯网络闪断不烧票据重发预算
     try {
       JSON.parse(m.data).forEach((l) => {
         if (l.seq != null && seenSeq.has(l.seq)) return;
@@ -840,6 +864,9 @@ views.settings = async () => {
     if (tok.value.trim()) patch.adminToken = tok.value.trim();
     try {
       const res = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+      if (patch.adminToken && !(res && (res._rejected || res.rejected) && (res._rejected || res.rejected).length)) { // F3：换令牌后本会话凭据即刻跟上，否则下一个请求起全会话 401 变砖
+        TOKEN = patch.adminToken; localStorage.setItem('lm_token', patch.adminToken);
+      }
       const rejected = res?._rejected || res?.rejected || [];
       if (rejected.length) toast('部分设置未生效：' + rejected.join('；'), true);
       else toast('已保存');

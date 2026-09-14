@@ -1,6 +1,0 @@
-/** 近似回环判定：经反向代理（带 XFF）一律不算本机——reveal 明文与令牌交接只在直连本机时开放 */
-function isLocalish(c: { req: { header: (n: string) => string | undefined } }) {
-  if (c.req.header('x-forwarded-for') || c.req.header('forwarded')) return false;
-  const host = (c.req.header('host') || '').split(':')[0].replace(/^\[|\]$/g, '');
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]' || host.endsWith('.local');
-}

@@ -1,1 +1,0 @@
-      merged.settings = { ...merged.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };

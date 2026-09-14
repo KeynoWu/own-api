@@ -1,2 +1,0 @@
-  const rl = admitRequest(vkey.id);
-  if (!rl.ok) return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);

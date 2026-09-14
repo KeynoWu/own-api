@@ -1,0 +1,1 @@
+  if (myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('models'), 15000); } // F1

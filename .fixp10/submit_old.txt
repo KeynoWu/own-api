@@ -1,0 +1,6 @@
+  const myForm = ++formSeq; // 表单叠开（类型选择→具体表单）时的本实例标识
+  const submit = async () => {
+    const vals = {};
+    for (const f of fields) vals[f.name] = f.type === 'cands' ? inputs[f.name].__get() : inputs[f.name].type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
+    try { await onSubmit(vals); if (dlg.__form === myForm) dlg.close(); } catch (e) { toast(e.message, true); }
+  };

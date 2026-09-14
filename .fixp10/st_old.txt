@@ -1,0 +1,1 @@
+      if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'protocol' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃

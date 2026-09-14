@@ -1,6 +1,0 @@
-  const rl = admitRequest(vkey.id);
-  if (!rl.ok) {
-    // P3 原则贯彻（R2）：per-key RPM 门槛前拒绝也要在控制台可见——三个端点同语义 429 同口径记账
-    pushLog(baseLog(Date.now(), vkey, c, 'openai', 'models'), { ok: false, status: 429, error: rl.reason || 'rate limited' });
-    return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
-  }

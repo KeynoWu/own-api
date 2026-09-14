@@ -1,0 +1,1 @@
+      publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || null, // F5
