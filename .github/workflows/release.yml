@@ -105,6 +105,19 @@ jobs:
       - name: 校验和（必须在 checkout 之前——checkout 会清掉未跟踪的 artifacts/，v0.1.7/v0.1.8 两次事故同根因）
         shell: bash
         run: cd artifacts && find . \( -name '*.dmg' -o -name '*.exe' \) -type f | sort | xargs sha256sum > sha256sums.txt
+      - name: 版本无关别名（落地页直链 releases/latest/download/<别名> 永指最新版，不随版本号过期）
+        shell: bash
+        working-directory: artifacts
+        run: |
+          set -e
+          for f in *.dmg *.exe; do
+            case "$f" in
+              *aarch64.dmg)  cp "$f" own-api-macos-arm64.dmg ;;
+              *x64.dmg)      cp "$f" own-api-macos-x64.dmg ;;
+              *x64-setup.exe) cp "$f" own-api-windows-x64-setup.exe ;;
+            esac
+          done
+          ls -la
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: 发布说明＝CHANGELOG 对应版本节（v0.1.6 曾只挂出裸对比链接）
         shell: bash
@@ -118,6 +131,8 @@ jobs:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.exe
+            artifacts/own-api-macos-*.dmg
+            artifacts/own-api-windows-*.exe
             artifacts/sha256sums.txt
           body_path: release-body.md
           draft: false
@@ -127,6 +142,6 @@ jobs:
         run: |
           N=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '[.assets] | length')
           echo "release 资产数: $N"
-          [ "$N" -ge 4 ] || { echo "::error::release 资产少于 4（3 平台包 + sha256sums）——上传环节静默失败"; exit 1; }
+          [ "$N" -ge 7 ] || { echo "::error::release 资产少于 7（3 平台包 + 3 别名直链 + sha256sums）——上传环节静默失败"; exit 1; }
         env:
           GH_TOKEN: ${{ github.token }}
