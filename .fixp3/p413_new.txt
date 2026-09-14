@@ -1,5 +1,0 @@
-  if (declared && declared > settings.maxBodyBytes) {
-    // 审查 P3：门槛前的 413/400 也要进审计，否则控制台对流言扫描/滥用永远失明
-    pushLog(baseLog(t0, vkey, c, wire, op), { status: 413, ok: false, error: 'declared content-length too large' });
-    return fail(c, wire, 413, `request body too large (${declared} > ${settings.maxBodyBytes} bytes)`);
-  }

@@ -1,3 +1,0 @@
-  if (declared && declared > settings.maxBodyBytes) {
-    return fail(c, wire, 413, `request body too large (${declared} > ${settings.maxBodyBytes} bytes)`);
-  }

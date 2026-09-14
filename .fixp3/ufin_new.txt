@@ -1,9 +1,0 @@
-  finish() {
-    // 审查 P3：收尾解码冲掉 decoder 残段——最后一帧 usage 若恰被块边界拆在多字节序列中不再蒸发
-    this.text += this.dec.decode();
-    const { frames, rest } = drainFrames(this.text);
-    this.text = '';
-    for (const f of frames) this.scan(f);
-    const tail = rest.trim();
-    if (tail) this.scan(tail);
-  }

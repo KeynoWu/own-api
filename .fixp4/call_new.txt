@@ -1,0 +1,11 @@
+                    if let Some((port, token)) = read_session() {
+                        // 审查 P4：固定 400ms 赌注改轮询确证——端口真正关掉就走人（至多 2s）
+                        if graceful_shutdown(port, &token) {
+                            for _ in 0..10 {
+                                std::thread::sleep(Duration::from_millis(200));
+                                if !healthy(port) {
+                                    break;
+                                }
+                            }
+                        }
+                    }

@@ -1,0 +1,4 @@
+    match sidecar {
+        Ok((_rx, child)) => {
+            *lock_slot(&app.state::<Sidecar>().0) = Some(child);
+        }

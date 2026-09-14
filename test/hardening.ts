@@ -748,7 +748,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
     });
     const ghostStarted = Date.now();
     let ghostExited = false;
-    while (Date.now() - ghostStarted < 9000) {
+    while (Date.now() - ghostStarted < 15_000) { // P4：tsx 冷启+2s 轮询在重载 CI 上过 9s 窗口，放宽到 15s
       await new Promise((r) => setTimeout(r, 250));
       if (ghost.exitCode !== null || ghost.signalCode !== null) {
         ghostExited = true;
@@ -901,8 +901,12 @@ section('14. 信息暴露、usage 口径与主键完整性');
   sock.write('POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1:19199\r\nauthorization: Bearer ' + VKEY + '\r\ncontent-type: application/json\r\ncontent-length: ' + Buffer.byteLength(bodyStr) + '\r\nconnection: keep-alive\r\n\r\n' + bodyStr);
   await new Promise((r2) => setTimeout(r2, 800));
   sock.resetAndDestroy();
-  await new Promise((r2) => setTimeout(r2, 1500));
-  const rstLog: any = await admin('/api/logs?limit=1');
+  let rstLog: any = null; // P4：固定 1.5s 赌注改轮询——499 一落账就走
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r2) => setTimeout(r2, 200));
+    rstLog = await admin('/api/logs?limit=1');
+    if (rstLog.body?.[0]?.status === 499) break;
+  }
   check('客户端 RST 硬断落 499 取消终态（signal RST 覆盖，非上游失败）', rstLog.body[0]?.status === 499, JSON.stringify(rstLog.body[0] && { st: rstLog.body[0].status, err: rstLog.body[0].error }));
 }
 // ---------- 修复战役：纯函数回归 ----------

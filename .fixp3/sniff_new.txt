@@ -1,7 +1,0 @@
-        if (c.req.raw.signal.aborted) {
-          // 审查 P3：dispose 只拆计时器与桥——已建立的上游响应体不 cancel，会挂到空闲超时；
-          // 先 abort 掐断上游体，再 dispose 拆桥
-          up.abort('客户端在嗅探窗口已断开');
-          up.dispose();
-          return { kind: 'client_abort' };
-        }

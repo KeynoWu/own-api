@@ -14,6 +14,9 @@ use tauri_plugin_shell::process::CommandChild;
 
 pub struct Sidecar(pub Mutex<Option<CommandChild>>);
 
+/// 审查 P4：wait_ready 在途标志（去重用）
+static WAIT_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Mutex 中毒不 panic：任何回调 panic 过的锁仍要能把侧车句柄取出来收尾
 fn lock_slot<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -79,18 +82,21 @@ fn handoff_url(port: u16, token: &str) -> Option<String> {
     ))
 }
 
-/// 优雅停机：POST /api/shutdown（loopback + 管理令牌）。返回 true 仅代表请求已送达
+/// 优雅停机：POST /api/shutdown（loopback + 管理令牌）。读超时+200 确认（审查 P4）：
+/// 旧实现写完就假定送达且 read 无超时——半开时托盘退出反而被冻在主线程
 fn graceful_shutdown(port: u16, token: &str) -> bool {
     if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
         let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
+        let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
         let req = format!(
             "POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nx-admin-token: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
             token
         );
         if s.write_all(req.as_bytes()).is_ok() {
-            let mut buf = [0u8; 64];
-            let _ = s.read(&mut buf);
-            return true;
+            let mut buf = [0u8; 16];
+            if let Ok(n) = s.read(&mut buf) {
+                return String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200");
+            }
         }
     }
     false
@@ -129,10 +135,15 @@ fn open_console_now() -> Result<(), String> {
 
 /// 等待就绪后开控制台；超时且确认服务没活着则释放槽位，让下一次托盘点击能重新拉起
 fn wait_ready<R: Runtime>(app: AppHandle<R>) {
+    // 审查 P4：waiter 去重——托盘连点每次都新起等待线程，多线程抢开浏览器/抢杀槽位；同一时刻只留一个
+    if WAIT_READY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
         for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(250));
             if open_console_now().is_ok() {
+                WAIT_READY.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
         }
@@ -149,6 +160,7 @@ fn wait_ready<R: Runtime>(app: AppHandle<R>) {
                 let _ = child.kill();
             }
         }
+        WAIT_READY.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
@@ -171,8 +183,23 @@ fn ensure_running<R: Runtime>(app: &AppHandle<R>) {
         .sidecar("own-api")
         .and_then(|c| c.env("OWN_API_PPID", std::process::id().to_string()).spawn());
     match sidecar {
-        Ok((_rx, child)) => {
+        Ok((mut rx, child)) => {
             *lock_slot(&app.state::<Sidecar>().0) = Some(child);
+            // 审查 P4：侧车输出此前整条管道丢弃——服务崩在半路托盘用户只能干瞪眼。
+            // stderr 与错误事件转壳进程 stderr（launchd/控制台可见）
+            std::thread::spawn(move || {
+                while let Some(ev) = rx.blocking_recv() {
+                    match ev {
+                        tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
+                            eprintln!("[sidecar] {}", String::from_utf8_lossy(&line));
+                        }
+                        tauri_plugin_shell::process::CommandEvent::Error(e) => {
+                            eprintln!("[sidecar] {e}");
+                        }
+                        _ => {}
+                    }
+                }
+            });
         }
         Err(e) => {
             eprintln!("[own-api] 侧车启动失败：{e}");
@@ -246,8 +273,14 @@ pub fn run() {
                 if let Some(child) = lock_slot(&app.state::<Sidecar>().0).take() {
                     // SIGKILL 前先到服务侧走一次优雅停机：落盘 + 摘空闲连接，400ms 防抖窗口里的数据不再赌运气
                     if let Some((port, token)) = read_session() {
+                        // 审查 P4：固定 400ms 赌注改轮询确证——端口真正关掉就走人（至多 2s）
                         if graceful_shutdown(port, &token) {
-                            std::thread::sleep(Duration::from_millis(400));
+                            for _ in 0..10 {
+                                std::thread::sleep(Duration::from_millis(200));
+                                if !healthy(port) {
+                                    break;
+                                }
+                            }
                         }
                     }
                     let _ = child.kill();
