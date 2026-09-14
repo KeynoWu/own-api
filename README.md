@@ -73,7 +73,7 @@ npm start                 # 启动网关 + 管理台（默认 http://127.0.0.1:8
 
 ```bash
 npm run mock              # 终端 A：假上游（OpenAI + Anthropic 双协议，内置 401/429/500 场景）
-npm start                 # 终端 B：网关，LLM_ADMIN_TOKEN=demo-token npm start 可固定令牌
+npm start                 # 终端 B：网关，OWN_API_ADMIN_TOKEN=demo-token npm start 可固定令牌（旧 LLM_ADMIN_TOKEN 同认）
 npm run seed              # 终端 C：灌演示渠道/模型并打几发请求
 ```
 
@@ -179,18 +179,21 @@ npm run test:all  # 两把一起跑
 
 环境变量：
 
-| 变量 | 默认 | 说明 |
+所有变量都认 `OWN_API_*` 新前缀；下表"旧名"仍兼容（同存时新前缀优先）：
+
+| 变量（旧名） | 默认 | 说明 |
 | --- | --- | --- |
-| `PORT` / `HOST` | `8787` / `127.0.0.1` | 监听地址。要局域网可用设 `HOST=0.0.0.0` |
-| `LLM_ADMIN_TOKEN` | 随机生成 | 管理台令牌。固定它才不会每次重启都变 |
-| `LLM_DATA_DIR` / `LLM_DB_FILE` | `./data` | 状态文件位置 |
-| `LLM_UPSTREAM_TIMEOUT` | `300000` | 上游首包超时（ms） |
-| `LLM_IDLE_TIMEOUT` | `120000` | 流式响应体最大空闲（ms） |
-| `LLM_MAX_BODY_BYTES` | `67108864` | 请求体上限，超限 413 |
-| `LLM_MAX_RETRIES` | `3` | 单请求最多尝试的 key 数 |
-| `LLM_AUTO_CHAIN_SECONDS` | `300` | auto 一次请求跨所有候选的总耗时预算（每跳首超时取 min(剩余预算, 渠道超时)） |
-| `LLM_DEBUG_HEADERS` | 关闭 | 置 `1` 才返回 `x-lm-channel` / `x-lm-key` 等内部头 |
-| `LLM_CORS_ORIGIN` | 仅本机 | 额外放行的 Origin，逗号分隔；`*` 表示全放（不建议） |
+| `OWN_API_PORT` / `OWN_API_HOST`（`PORT` / `HOST`） | `8787` / `127.0.0.1` | 监听地址。要局域网可用设 `OWN_API_HOST=0.0.0.0` |
+| `OWN_API_ADMIN_TOKEN`（`LLM_ADMIN_TOKEN`） | 随机生成 | 管理台令牌。固定它才不会每次重启都变 |
+| `OWN_API_DATA_DIR` / `OWN_API_DB_FILE`（`LLM_DATA_DIR` / `LLM_DB_FILE`） | `~/.own-api` | 状态文件位置；工作目录已有 `./data/db.json` 时开发兼容继续用它 |
+| `OWN_API_UPSTREAM_TIMEOUT`（`LLM_UPSTREAM_TIMEOUT`） | `300000` | 上游首包超时（ms） |
+| `OWN_API_IDLE_TIMEOUT`（`LLM_IDLE_TIMEOUT`） | `120000` | 流式响应体最大空闲（ms） |
+| `OWN_API_MAX_BODY_BYTES`（`LLM_MAX_BODY_BYTES`） | `67108864` | 请求体上限，超限 413 |
+| `OWN_API_MAX_RETRIES`（`LLM_MAX_RETRIES`） | `3` | 单请求最多尝试的 key 数 |
+| `OWN_API_AUTO_CHAIN_SECONDS`（`LLM_AUTO_CHAIN_SECONDS`） | `300` | auto 一次请求跨所有候选的总耗时预算（每次尝试的头/空闲超时都按剩余预算收缩） |
+| `OWN_API_DEBUG_HEADERS`（`LLM_DEBUG_HEADERS`） | 关闭 | 置 `1` 才返回 `x-lm-channel` / `x-lm-key` 等内部头 |
+| `OWN_API_CORS_ORIGIN`（`LLM_CORS_ORIGIN`） | 仅本机 | 额外放行的 Origin，逗号分隔；`*` 表示全放（不建议） |
+| `OWN_API_OPEN_BROWSER` | 关闭 | 置 `1` 启动后自动开浏览器（走一次性交接票据） |
 
 「设置」页还能调：未知模型兜底渠道、auto 链预算、进入冷却的失败阈值、冷却基数/上限、日志保留条数。
 
@@ -198,10 +201,15 @@ npm run test:all  # 两把一起跑
 
 - 默认只监听 `127.0.0.1`。需要给局域网内的 agent 用时，自行设 `HOST=0.0.0.0` 并确保处于可信网络——
   网关持有全部上游 key，对外暴露等于把它们交给了同一网络的人。
-- 管理台返回的 key 默认脱敏，需要明文时走 `?reveal=1`（仅本地使用）。
-- 上游 key 明文存在 `data/db.json`（写入时权限收紧为 `0600`），请把该文件当作机密对待（已在 `.gitignore` 中）。
+- 管理台返回的 key 默认脱敏；`?reveal=1` 明文仅对**本机回环直连**生效（经反向代理一律拒绝）。
+  管理令牌本身不再随 `GET /api/settings` 回显（只有 `adminTokenSet` 标志）。
+- 上游 key 明文存在数据目录的 `db.json`（写入即 `0600` + fsync），请把该文件当作机密对待（已在 `.gitignore` 中）。
+  Windows 无 POSIX 权限位：请把数据目录放在当前用户独占的目录（必要时用 EFS/BitLocker 兜底）。
 - 管理令牌只接受 `x-admin-token` 请求头；`/api/logs/stream` 因 `EventSource` 无法带自定义头，改用
-  `/api/logs/stream/ticket` 换取**短期（1h）SSE 订阅令牌**再以 `?ticket=` 订阅，不让长期管理令牌进 URL。
+  `/api/logs/stream/ticket` 换取**短期（10 分钟）SSE 订阅令牌**再以 `?ticket=` 订阅；
+  浏览器 URL 交接改走 60 秒一次性 `#handoff` 票据（`POST /api/auth/handoff` 换回令牌），长期令牌不进 URL。
+- 鉴权失败有限速：管理台每来源 20 次/分、网关每来源 30 次/分，超限 429（best-effort，基于 XFF 首跳）。
+- `/v1/messages/count_tokens` 与推理入口共用同一把 key 的 RPM 准入与每日额度闸门，不是免费端点。
 - CORS 默认只放行 `localhost` 来源；`x-lm-*` 内部头默认不下发给 agent。
 
 ## 目录

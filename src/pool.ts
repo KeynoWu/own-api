@@ -36,10 +36,12 @@ export function pickKey(channel: Channel, ctx: PickContext): ChannelKey | undefi
     if (ctx.tried.has(k.id)) continue;
     if (!isAvailable(k, now)) continue;
     const weight = k.weight > 0 ? k.weight : 1;
+    // load = 累计请求数/权重：累计值非滑窗——新入池 key 天然低载优先，是预热友好行为（审查 I4，文档化）
     candidates.push({ key: k, load: k.totalRequests / weight });
   }
   if (!candidates.length) {
-    // 全部被本次请求试过：退回冷却集合，让最后一个还没过期的也能被尝试前先由调用方判断
+    // 本请求试尽或全部仍在冷却：返回 undefined 结束 key 级重试——冷却集合不做二轮兜底，
+    // 真实原因由调用方带最后一次上游错误汇总成"号池已试尽"（旧注释描述的退回行为并不存在）
     return undefined;
   }
   candidates.sort((a, b) => a.load - b.load || (a.key.lastUsedAt || 0) - (b.key.lastUsedAt || 0));

@@ -689,6 +689,47 @@ section('16. 桌面发行地基：前缀 env / 数据目录 / 控制台内嵌');
   check('默认数据目录 ~/.own-api（不再寄生 cwd，共享盘不共账）', withEnvCleared(() => resolveDataDir(emptyCwd)) === join(os.homedir(), '.own-api'), withEnvCleared(() => resolveDataDir(emptyCwd)));
   check('控制台 HTML 内嵌副本与磁盘同步（防改 web 忘 gen:web）', WEB_HTML === fs.readFileSync('web/index.html', 'utf8'), `${WEB_HTML.length}/${fs.readFileSync('web/index.html', 'utf8').length}`);
   check('控制台支持 #token= 注入（双击启动免复制令牌）', WEB_HTML.includes('URLSearchParams(location.hash'), '');
+// ================================================================
+section('15. 修复战役回归断言（审查报告契约固化）');
+{
+  const s = (await api('/api/settings', { headers: ADMIN })).body;
+  check('GET /settings 不回显 adminToken（只有 adminTokenSet 标志）', s.adminToken === undefined && s.adminTokenSet === true, JSON.stringify(s).slice(0, 110));
+}
+{
+  const chs = (await api('/api/channels', { headers: ADMIN })).body;
+  const anyCh = chs[0];
+  const r404 = await api('/api/channels/' + anyCh.id + '/keys/k-does-not-exist', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ name: 'x' }) });
+  check('PATCH 不存在 key -> 404（此前静默 200 回执）', r404.status === 404, String(r404.status));
+  const ok2 = await api('/api/channels/' + anyCh.id + '/keys/' + anyCh.keys[0].id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ name: '白名单试验', status: 'active' }) });
+  check('PATCH key 白名单字段正常生效', ok2.status === 200, String(ok2.status));
+}
+{
+  const dup = await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'dup', key: VKEY }) });
+  check('创建对外 key 与既有 key 重复 -> 409', dup.status === 409, String(dup.status));
+  const neg = await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'neg', rpmLimit: -5 }) });
+  check('创建对外 key 负限额 -> 400（不再静默变不限）', neg.status === 400, String(neg.status));
+  const short = await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'short', key: 'sk-lm-abc' }) });
+  check('自定义公钥短于 16 字符 -> 400', short.status === 400, String(short.status));
+}
+{
+  const bad = await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 123, channelId: 'ch-x', upstreamModel: 'm' }) });
+  check('POST /models publicName 非字符串 -> 400（此前 500）', bad.status === 400, String(bad.status));
+}
+{
+  const p = (await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ debugHeaders: 'false' }) })).body;
+  check('debugHeaders 传字符串 false 被拒（Boolean 强转陷阱）', Array.isArray(p.rejected) && p.rejected.length > 0, JSON.stringify(p).slice(0, 110));
+}
+{
+  const r = (await api('/api/vkeys?reveal=1', { headers: { ...ADMIN, 'x-forwarded-for': '10.0.0.9' } })).body;
+  check('reveal=1 经代理头拿不到明文 key', Array.isArray(r) && r.every((k) => k.key.includes('*')), JSON.stringify(r[0] && r[0].key));
+}
+{
+  let last = 0;
+  for (let i = 0; i < 32; i++) {
+    last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;
+  }
+  check('网关爆破错误 key -> 30/min 限速 429 生效', last === 429, String(last));
+}
 }
 
 // ================================================================

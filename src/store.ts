@@ -28,16 +28,16 @@ function n(v: string | undefined, d: number) {
 function defaultSettings(): Settings {
   return {
     adminToken: envAny(['OWN_API_ADMIN_TOKEN', 'LLM_ADMIN_TOKEN']) || `admin-${randomBytes(9).toString('base64url')}`,
-    defaultUpstreamTimeoutMs: n(process.env.LLM_UPSTREAM_TIMEOUT, 300_000),
-    upstreamIdleTimeoutMs: n(process.env.LLM_IDLE_TIMEOUT, 120_000),
-    maxBodyBytes: n(process.env.LLM_MAX_BODY_BYTES, 64 * 1024 * 1024),
-    debugHeaders: process.env.LLM_DEBUG_HEADERS === '1',
-    maxKeyRetries: n(process.env.LLM_MAX_RETRIES, 3),
+    defaultUpstreamTimeoutMs: n(envAny(['OWN_API_UPSTREAM_TIMEOUT', 'LLM_UPSTREAM_TIMEOUT']), 300_000),
+    upstreamIdleTimeoutMs: n(envAny(['OWN_API_IDLE_TIMEOUT', 'LLM_IDLE_TIMEOUT']), 120_000),
+    maxBodyBytes: n(envAny(['OWN_API_MAX_BODY_BYTES', 'LLM_MAX_BODY_BYTES']), 64 * 1024 * 1024),
+    debugHeaders: envAny(['OWN_API_DEBUG_HEADERS', 'LLM_DEBUG_HEADERS']) === '1',
+    maxKeyRetries: n(envAny(['OWN_API_MAX_RETRIES', 'LLM_MAX_RETRIES']), 3),
     errorThreshold: 3,
     cooldownBaseMs: 30_000,
     cooldownMaxMs: 15 * 60_000,
     logRetention: 2000,
-    autoMaxChainSeconds: n(process.env.LLM_AUTO_CHAIN_SECONDS, 300),
+    autoMaxChainSeconds: n(envAny(['OWN_API_AUTO_CHAIN_SECONDS', 'LLM_AUTO_CHAIN_SECONDS']), 300),
   };
 }
 

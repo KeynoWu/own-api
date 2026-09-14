@@ -9,6 +9,7 @@ on:
 
 jobs:
   build:
+    permissions: { contents: read }
     strategy:
       fail-fast: false
       matrix:
@@ -39,11 +40,14 @@ jobs:
         run: rustup target add ${{ matrix.rust_target }}
       - uses: swatinem/rust-cache@v2
         with: { workspaces: src-tauri }
-      - name: 前端内嵌 + SEA 二进制 + sidecar 就位
+      - name: 质量门禁（H1：不发红着的安装包）
         run: |
           npm ci
           npm run gen:web
-          npm run desktop:prepare
+          npm run typecheck
+          npm run test:all
+      - name: SEA 二进制 + sidecar 就位
+        run: npm run desktop:prepare
       - name: tauri build
         run: npx tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
       - name: 包内侧车冒烟（v0.1.1 hardened-runtime SIGTRAP 事故的制度化守护）
@@ -62,12 +66,17 @@ jobs:
           done
           echo "::error::dmg 内侧车 30 秒未就绪（签名/SEA 注入回归？）"; cat /tmp/smoke-sidecar.log; exit 1
       - name: 产物存在性硬校验（防空 glob 静默发布）
-        run: ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe || true
         shell: bash
+        run: |
+          if [ "${runner.os}" = "Windows" ]; then
+            ls src-tauri/target/release/bundle/nsis/*.exe
+          else
+            ls src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.label }}
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
             src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.bundle_subdir }}release/bundle/nsis/*.exe
@@ -77,6 +86,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
+      - name: 触发防呆（workflow_dispatch 无 tag，发布会造出不存在的版本引用）
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: echo "::error::release 只允许 v* tag 推送触发；dispatch 仅可用于验证 build" && exit 1
       - uses: actions/download-artifact@v4
         with: { path: artifacts, merge-multiple: 'true' }
       - name: 资产数量硬校验（三平台缺一不可）

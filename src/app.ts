@@ -8,6 +8,7 @@ import { store } from './store.ts';
 import { admitRequest } from './usage.ts';
 
 import { WEB_HTML } from './web-html.gen.ts';
+import { envAny } from './bootstrap.ts';
 
 export function createApp() {
   const app = new Hono();
@@ -18,7 +19,7 @@ export function createApp() {
   });
   // CORS：默认只放行本机来源。'*' + 全头放行会让浏览器里任意网页把本机网关当跳板，
   // 一旦 HOST=0.0.0.0 更是把管理面铺给整个局域网。需要放宽时用 LLM_CORS_ORIGIN。
-  const extraOrigins = (process.env.LLM_CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const extraOrigins = (envAny(['OWN_API_CORS_ORIGIN', 'LLM_CORS_ORIGIN']) || '').split(',').map((s) => s.trim()).filter(Boolean);
   app.use(
     '*',
     cors({

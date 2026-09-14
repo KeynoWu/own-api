@@ -762,6 +762,48 @@ section('14. 信息暴露、usage 口径与主键完整性');
   blocker.close();
 }
 
+// RST 面（审查需确认项定案）：客户端 socket 硬断（resetAndDestroy=RST 非 FIN），
+// 必须同样落 499 取消终态且不冷却 key——signal 桥对 RST 的覆盖制度化
+{
+  const net = await import('node:net');
+  const bodyStr = JSON.stringify({ model: 'tee', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  const sock = net.connect(19199, '127.0.0.1');
+  await new Promise((r2) => sock.once('connect', () => r2(undefined)));
+  sock.write('POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1:19199\r\nauthorization: Bearer ' + VKEY + '\r\ncontent-type: application/json\r\ncontent-length: ' + Buffer.byteLength(bodyStr) + '\r\nconnection: keep-alive\r\n\r\n' + bodyStr);
+  await new Promise((r2) => setTimeout(r2, 800));
+  sock.resetAndDestroy();
+  await new Promise((r2) => setTimeout(r2, 1500));
+  const rstLog: any = await admin('/api/logs?limit=1');
+  check('客户端 RST 硬断落 499 取消终态（signal RST 覆盖，非上游失败）', rstLog.body[0]?.status === 499, JSON.stringify(rstLog.body[0] && { st: rstLog.body[0].status, err: rstLog.body[0].error }));
+}
+// ---------- 修复战役：纯函数回归 ----------
+{
+  const { scrubSecret } = await import('../src/store.ts');
+  const k = 'sk-lm-TESTKEY0123456789abcdef';
+  const b64 = Buffer.from(k).toString('base64');
+  const encv = encodeURIComponent(k);
+  const b64np = b64.replace(/=+$/, '');
+  const msg = 'invalid key ' + encv + ' raw=' + k + ' b64=' + b64 + ' b64np=' + b64np;
+  const out = scrubSecret(msg, k);
+  check('scrubSecret 遮罩原文+URL编码+base64（含去padding）四变体', !out.includes(encv) && !out.includes(b64) && !out.includes(k) && !out.includes(b64np), out.slice(0, 80));
+}
+{
+  const { anthropicToOpenaiRequest } = await import('../src/translate.ts');
+  const userMsg = { role: 'user', content: [{ type: 'text', text: 'hi' }] };
+  const r5 = anthropicToOpenaiRequest({ model: 'x', max_tokens: 999, messages: [userMsg] }, { upstreamModel: 'gpt-5-pro', defaultMaxTokens: 1000 });
+  check('推理模型族（gpt-5/o系）发 max_completion_tokens 不发 max_tokens', r5.max_completion_tokens === 999 && r5.max_tokens === undefined, JSON.stringify(r5).slice(0, 90));
+  const r4 = anthropicToOpenaiRequest({ model: 'x', max_tokens: 9999, messages: [userMsg] }, { upstreamModel: 'gpt-4o', defaultMaxTokens: 1000 });
+  check('max_tokens 请求值被路由上限夹紧（Anthropic 到 OpenAI 向）', r4.max_tokens === 1000, String(r4.max_tokens));
+}
+{
+  const { openaiToAnthropicRequest } = await import('../src/translate.ts');
+  const capped = openaiToAnthropicRequest({ model: 'x', max_tokens: 50000, messages: [{ role: 'user', content: 'hi' }] }, { upstreamModel: 'claude-x', defaultMaxTokens: 4096 });
+  check('max_tokens 请求值被路由上限夹紧（OpenAI 到 Anthropic 向）', capped.max_tokens === 4096, String(capped.max_tokens));
+  const none = openaiToAnthropicRequest({ model: 'x', messages: [{ role: 'user', content: 'hi' }], tools: [{ name: 'f', input_schema: {} }], tool_choice: 'none' }, { upstreamModel: 'claude-x' });
+  check('tool_choice none 时 tools 被整体移除（Anthropic 无 none 语义）', none.tools === undefined, JSON.stringify(none).slice(0, 90));
+  const emptyAsst = openaiToAnthropicRequest({ model: 'x', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '' }, { role: 'user', content: 'go' }] }, { upstreamModel: 'claude-x' });
+  check('空 assistant 消息被丢弃（不再生成 text 空串必 400 块）', !JSON.stringify(emptyAsst.messages).includes('"text":""'), JSON.stringify(emptyAsst.messages).slice(0, 120));
+}
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {
   console.log('\n失败明细：');
