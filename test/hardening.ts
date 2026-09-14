@@ -1066,6 +1066,27 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('空 assistant 消息被丢弃（不再生成 text 空串必 400 块）', !JSON.stringify(emptyAsst.messages).includes('"text":""'), JSON.stringify(emptyAsst.messages).slice(0, 120));
 }
 
+// ---------- SI-2 DOM 钉：renderSpeedTab 纯展示 + TABS 注入 ----------
+{
+  const fsS = await import('node:fs');
+  const htmlS = fsS.readFileSync('web/index.html', 'utf8');
+  check('SI renderSpeedTab 存在（DOM 钉源锚）', htmlS.includes('function renderSpeedTab('));
+  const start = htmlS.indexOf('function renderSpeedTab(');
+  let depth = 0; let end = -1;
+  if (start >= 0) {
+    for (let i = htmlS.indexOf('{', start); i < htmlS.length; i++) {
+      if (htmlS[i] === '{') depth++;
+      else if (htmlS[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+  }
+  const body = end > 0 ? htmlS.slice(start, end + 1) : '';
+  check('SI renderSpeedTab 括号平衡可抽取', end > 0 && body.length > 1000, String(body.length));
+  check('SI 前端禁自算百分位（无 .sort( 与 Math.floor）', !/\.sort\(|Math\.floor/.test(body));
+  check('SI 着色只消费后端 benchmark 单源', body.includes('benchmark.streamP50Ms') && body.includes('benchmark.latP50Ms'));
+  check('SI 「勿与上表比较」分隔与「只做观测」提示条在版', body.includes('勿与上表比较') && body.includes('不影响 auto 路由'));
+  check("SI TABS 注入", htmlS.includes("['speed', '速度排行']"));
+}
+
 // ---------- R3：v3 形状净化 + 退出锁清理（真 spawn） ----------
 {
   const { spawn } = await import('node:child_process');

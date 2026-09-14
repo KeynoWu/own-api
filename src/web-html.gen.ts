@@ -346,6 +346,69 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     const out = el('div', {}, wrap, legend);
     return out;
   };
+// ---------------- 速度排行（speed-insights v1.1） ----------------
+// renderSpeedTab 是纯展示层：只消费后端预计算数值，严禁在这里重算任何百分位（DR-SI-9），
+// DOM 桩钉会抽源断言本函数体不含 .sort( 与 Math.floor。
+async function speedFetch() {
+  const hours = ovSt.spHours === undefined ? 24 : ovSt.spHours;
+  const rep = await api('/api/stats/speed?hours=' + hours);
+  const chOf = {}; const autoNames = {};
+  try { for (const r of await api('/api/routes')) { if (r.type === 'single') chOf[r.publicName] = r.channelName; else autoNames[r.publicName] = 1; } } catch { /* 徽章尽力而为 */ }
+  return { rep, chOf, autoNames };
+}
+function renderSpeedTab(pack) {
+  const rep = pack.rep;
+  const hours = rep.window.hours;
+  const frag = el('div');
+  frag.append(el('div', { class: 'card', style: 'padding:9px 12px;margin-bottom:10px;font-size:12px' },
+    el('b', {}, '本页只做观测，不影响 auto 路由；'), '要躲开慢模型请到模型路由调整候选权重。'));
+  frag.append(el('div', { class: 'row', style: 'gap:8px;align-items:center;margin-bottom:8px' },
+    el('span', { class: 'muted', style: 'font-size:12px' }, '样本取自最近 ' + rep.logsInWindow + ' 条日志（logRetention=' + rep.retention + '），时间范围：'),
+    el('select', { style: 'width:auto', onchange: (e) => { ovSt.spHours = Number(e.target.value); go('overview'); } },
+      ...[[24, '24h'], [168, '7 天'], [0, '全部']].map((o) => el('option', { value: String(o[0]), ...(String(hours) === String(o[0]) ? { selected: '' } : {}) }, o[1])))));
+  if (hours > 0 && rep.oldestTs && rep.window.to - rep.oldestTs < hours * 3600000) {
+    const coverH = Math.max(1, Math.round((rep.window.to - rep.oldestTs) / 3600000));
+    frag.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px;color:#b45309' },
+      '所选范围已超出日志保留（实际覆盖约 ' + coverH + 'h）——如需更长窗口请到设置调大日志保留条数（上限 200000）'));
+  }
+  if (!rep.streamRows.length && !rep.latencyRows.length && !rep.unattributed) {
+    frag.append(el('div', { class: 'card muted' }, '窗口内还没有请求记录——先到「接入方式」复制接入配置，跑几个请求后再回来看排行'));
+    return frag;
+  }
+  const rate = (n, d) => (d ? ((n / d) * 100).toFixed(1) + '%' : '-');
+  const cell = (txt, cls, st) => el('td', { class: 'mono' + (cls ? ' ' + cls : ''), style: st || '' }, txt);
+  const hl = (v, base) => (base && v > base * 2 ? 'color:#dc2626;font-weight:600' : base && v > base * 1.5 ? 'color:#b45309' : '');
+  const nameTd = (r) => el('td', {}, r.key, ' ',
+    pack.autoNames[r.key] ? el('span', { class: 'pill' }, 'auto') : (pack.chOf[r.key] ? el('span', { class: 'pill muted' }, pack.chOf[r.key]) : el('span', { class: 'muted' }, '-')));
+  const t1 = el('table');
+  t1.append(el('tr', {}, el('th', {}, '模型'), el('th', {}, '样本(流式)'), el('th', {}, 'TTFT P50'), el('th', {}, 'TTFT P95'), el('th', {}, '上游错误率'), el('th', {}, '中断率'), el('th', {}, 'failover'), el('th', {}, '最后请求')));
+  for (const r of rep.streamRows) {
+    t1.append(el('tr', { class: r.streamN < 5 ? 'muted' : '' }, nameTd(r), el('td', {}, String(r.streamN) + (r.streamN < 5 ? '（样本少）' : '')),
+      cell(r.ttftP50Ms + 'ms', '', hl(r.ttftP50Ms, rep.benchmark.streamP50Ms)), cell(r.ttftP95Ms + 'ms'),
+      cell(rate(r.errors, r.requests)), cell(rate(r.cancels, r.requests)), cell((r.failoverRate * 100).toFixed(0) + '%'),
+      el('td', { class: 'muted' }, ago(r.lastTs))));
+  }
+  if (!rep.streamRows.length) frag.append(el('div', { class: 'card muted' }, '窗口内没有流式请求，TTFT 列不可用'));
+  else frag.append(t1);
+  frag.append(el('div', { class: 'muted', style: 'margin:14px 0 8px;font-weight:600' }, '↓ 非流式（按总延迟 P50 升序）——无 TTFT，勿与上表比较'));
+  const t2 = el('table');
+  t2.append(el('tr', {}, el('th', {}, '模型'), el('th', {}, '样本(首跳)'), el('th', {}, '延迟 P50'), el('th', {}, '延迟 P95'), el('th', {}, '均值'), el('th', { title: '5xx/网络/超时，不含客户端取消' }, '上游错误率'), el('th', { title: '多为客户端超时或主动取消，非上游故障' }, '中断率'), el('th', {}, 'failover'), el('th', {}, '最后请求')));
+  for (const r of rep.latencyRows) {
+    t2.append(el('tr', { class: r.firstAttemptN < 5 ? 'muted' : '' }, nameTd(r), el('td', {}, String(r.firstAttemptN) + (r.firstAttemptN && r.firstAttemptN < 5 ? '（样本少）' : '')),
+      r.latP50Ms !== undefined ? cell(r.latP50Ms + 'ms', '', hl(r.latP50Ms, rep.benchmark.latP50Ms)) : cell('-'),
+      cell(r.latP95Ms !== undefined ? r.latP95Ms + 'ms' : '-'), cell(r.avgLatencyMs !== undefined ? r.avgLatencyMs + 'ms' : '-'),
+      cell(rate(r.errors, r.requests)), cell(rate(r.cancels, r.requests)), cell((r.failoverRate * 100).toFixed(0) + '%'),
+      el('td', { class: 'muted' }, ago(r.lastTs))));
+  }
+  if (rep.unattributed) {
+    const ua = rep.unattributed;
+    t2.append(el('tr', { class: 'muted' }, el('td', {}, '-（未归因：限流/未命中等）'), el('td', {}, String(ua.requests)), el('td', {}, '-'), el('td', {}, '-'), el('td', {}, '-'),
+      cell(rate(ua.errors, ua.requests)), cell(rate(ua.cancels, ua.requests)), el('td', {}, '-'), el('td', { class: 'muted' }, ago(ua.lastTs))));
+  }
+  frag.append(t2);
+  return frag;
+}
+
   views.overview = async () => {
     const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
     const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
@@ -401,7 +464,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
         el('span', { class: 'muted' }, hourly ? '按小时' : '按天')),
       svgChart(bArr, hourly));
     box.append(chartCard);
-    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['pool', '号池健康']];
+    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['speed', '速度排行'], ['pool', '号池健康']];
     box.append(el('div', { class: 'row', style: 'gap:6px;margin:16px 0 10px' },
       ...TABS.map(([k, t]) => el('button', { class: 'btn sm' + (ovSt.tab === k ? ' primary' : ''), onclick: () => { ovSt.tab = k; go('overview'); } }, t))));
     const groupAgg = (keyFn) => {
@@ -452,7 +515,9 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
       }
       if (!g.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '暂无数据')));
       box.append(t);
-    } else {
+    } else if (ovSt.tab === 'speed') {
+      box.append(renderSpeedTab(await speedFetch()));
+    } else if (ovSt.tab === 'pool') {
       const t = el('table');
       t.append(el('tr', {}, el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '号池可用'), el('th', {}, '状态'), el('th', {}, '')));
       for (const c of o.channels) {

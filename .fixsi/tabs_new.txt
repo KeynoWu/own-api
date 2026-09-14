@@ -1,0 +1,1 @@
+    const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['speed', '速度排行'], ['pool', '号池健康']];

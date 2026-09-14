@@ -1,0 +1,4 @@
+      box.append(t);
+    } else if (ovSt.tab === 'speed') {
+      box.append(renderSpeedTab(await speedFetch()));
+    } else if (ovSt.tab === 'pool') {
