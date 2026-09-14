@@ -929,6 +929,77 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('P3 scrubSecret 遮罩 base64url 与小写-%xx 变体', !out2.includes(b64u) && !out2.includes(lowPct) && out2.includes('***'), out2.slice(0, 90));
 }
 {
+  // P6+：DOM 桩链式弹窗钉——form() 弹窗链不再是测试真空（M1/c2e3f49 事故的根源就是这里长期没法测）
+  const fsx2 = await import('node:fs');
+  const html2 = fsx2.readFileSync('web/index.html', 'utf8');
+  check('链式钉源锚点唯一（el/form 若被重构挪位，本钉必须响）', html2.split('function form(').length === 2 && html2.split('const el = (').length === 2);
+  const balance2 = (start: number) => {
+    let d = 0;
+    for (let k = start; k < html2.length; k++) {
+      if (html2[k] === '{') d++;
+      else if (html2[k] === '}' && --d === 0) return k + 1;
+    }
+    throw new Error('unbalanced form/el src');
+  };
+  const elAt = html2.indexOf('const el = (');
+  const elSrc = html2.slice(elAt, balance2(html2.indexOf('{', html2.indexOf('=>', elAt))));
+  const formAt = html2.indexOf('function form(');
+  const formSrc = html2.slice(formAt, balance2(html2.indexOf('{', formAt)));
+  const mkNode = (tag: string): any => {
+    const n: any = { nodeType: 1, tag, children: [], style: {}, dataset: {}, attrs: {}, ev: {}, textContent: '' };
+    n.append = (...ks: any[]) => { for (const k of ks.flat()) if (k != null) n.children.push(k); };
+    n.prepend = (...ks: any[]) => { n.children.unshift(...ks.flat().filter((x: any) => x != null)); };
+    n.insertBefore = (x: any) => { n.children.unshift(x); };
+    n.setAttribute = (k: string, v: any) => { n.attrs[k] = v; n[k] = v; };
+    n.addEventListener = (t: string, f: any) => { n.ev[t] = f; };
+    Object.defineProperty(n, 'innerHTML', { get: () => '', set: () => { n.children.length = 0; } });
+    return n;
+  };
+  const dlg: any = mkNode('dialog');
+  dlg.open = false;
+  dlg.showModal = () => { dlg.open = true; };
+  dlg.close = () => { dlg.open = false; };
+  const toasts: string[] = [];
+  const document: any = { createElement: mkNode, createTextNode: (t: string) => ({ nodeType: 3, text: t }) };
+  const $ = (s: string) => (s === '#dlg' ? dlg : null);
+  const toast = (m: string) => { toasts.push(m); };
+  const evalSrc = 'let formSeq = 0;' + String.fromCharCode(10) + elSrc + String.fromCharCode(10) + formSrc + String.fromCharCode(10) + '({ el, form })';
+  const api: any = eval(evalSrc);
+  const findBtn = (label: string, node?: any): any => {
+    const cur = node || dlg;
+    for (const c of cur.children || []) {
+      if (c.tag === 'button' && (c.children || []).some((t: any) => t.text === label)) return c;
+      const hit = c && c.children ? findBtn(label, c) : null;
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const texts = (node: any): string => (node.children || []).map((t: any) => t.text || texts(t)).join('');
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // 场景1（事故本体）：A 的 onSubmit 链式打开 B——A 的收尾 close 不得关掉刚上台的 B
+  api.form('A类型选择', [{ name: 'x', label: 'x', type: 'text', value: 'a' }], () => {
+    api.form('B具体表单', [{ name: 'y', label: 'y', type: 'text', value: 'b' }], async () => {});
+  });
+  check('链式钉：A 打开弹窗', dlg.open === true);
+  await findBtn('保存').ev.click();
+  check('链式钉：A 保存后 B 在台上、未被 A 的收尾 close 误关', dlg.open === true && texts(dlg.children[0]) === 'B具体表单', texts(dlg.children[0]));
+  // 场景2：B 自己保存正常自我关闭
+  await findBtn('保存').ev.click();
+  check('链式钉：B 自己保存正常关闭自己', dlg.open === false);
+  // 场景3：旧表单在途慢提交不得误关新表单（myForm 标识的本体语义）
+  api.form('C', [{ name: 'x', label: 'x', type: 'text', value: '' }], async () => { await wait(40); });
+  const slowC = findBtn('保存').ev.click();
+  api.form('D', [{ name: 'x', label: 'x', type: 'text', value: '' }], async () => {});
+  await slowC;
+  check('链式钉：旧表单迟到的保存不误关新表单', dlg.open === true && texts(dlg.children[0]) === 'D');
+  // 场景4：保存失败 toast 且弹窗留开可重试；取消正常关闭
+  api.form('E', [{ name: 'x', label: 'x', type: 'text', value: '' }], async () => { throw new Error('保存失败示例'); });
+  await findBtn('保存').ev.click();
+  check('链式钉：保存失败 toast 且弹窗留开可重试', dlg.open === true && toasts.includes('保存失败示例'), JSON.stringify(toasts));
+  findBtn('取消').ev.click();
+  check('链式钉：取消关闭弹窗', dlg.open === false);
+}
+{
   // P6：前端聚合纯逻辑钉——从 SPA 源里抽出 addAgg/newAgg 求值，锁 KPI 算术（改前端必须过这关）
   const fsx = await import('node:fs');
   const html = fsx.readFileSync('web/index.html', 'utf8');
