@@ -6,6 +6,20 @@ import type { Protocol } from './types.ts';
 
 // ---------------------------------------------------------------- 工具
 
+/** OpenAI tool 消息 content 允许数组：取 text 部分拼接；图片等无法表达的给占位；null→空格。
+ *  原实现 JSON.stringify 让模型看到 JSON 字符串而非内容（审查 L2） */
+function toolResultToText(content: unknown): string {
+  if (typeof content === 'string') return content || ' ';
+  if (Array.isArray(content)) {
+    const t = content
+      .map((p: any) => (typeof p === 'string' ? p : p?.type === 'text' ? (p.text ?? '') : p?.type === 'image' ? '[image]' : ''))
+      .filter(Boolean)
+      .join('\n');
+    return t || ' ';
+  }
+  return content == null ? ' ' : JSON.stringify(content);
+}
+
 function isTextContent(c: any): c is string {
   return typeof c === 'string';
 }
@@ -21,9 +35,15 @@ function safeJsonParse(s: any): any {
 }
 
 function splitDataUrl(url: string) {
-  const m = /^data:([^;,]+)(?:;base64)?,(.*)$/s.exec(url);
+  const m = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(url);
   if (!m) return undefined;
-  return { mediaType: m[1], data: m[2] };
+  if (m[2]) return { mediaType: m[1], data: m[3] };
+  // URL 编码 data URL（如 svg+xml,%3Csvg…）：解码后转 base64（审查 L9：原文把 URL 编码内容当 base64，必损坏）
+  try {
+    return { mediaType: m[1], data: Buffer.from(decodeURIComponent(m[3]), 'utf8').toString('base64') };
+  } catch {
+    return undefined;
+  }
 }
 
 export function stopReasonToFinish(r: string | null | undefined): string | null {
@@ -41,7 +61,8 @@ export function stopReasonToFinish(r: string | null | undefined): string | null 
     case 'pause_turn':
       return null;
     default:
-      return r ?? null;
+      // Anthropic 新增枚举不再原样穿透成非 OpenAI 值（严格客户端解析会炸），归一 stop（审查 L6）
+      return r ? 'stop' : null;
   }
 }
 
@@ -86,7 +107,7 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
           {
             type: 'tool_result',
             tool_use_id: msg.tool_call_id,
-            content: isTextContent(msg.content) ? msg.content : JSON.stringify(msg.content),
+            content: toolResultToText(msg.content),
           },
         ],
       });
@@ -97,6 +118,9 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
       messages.push({ role: 'user', content: openaiContentToAnthropic(msg.content) });
       continue;
     }
+
+    // 未知 role（含 legacy 'function'、拼写错误）丢弃，不再静默落入 assistant（审查 L3）
+    if (role !== 'assistant') continue;
 
     // assistant（可能带 tool_calls）
     const blocks: any[] = [];
@@ -112,8 +136,8 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
         input: safeJsonParse(tc.function?.arguments),
       });
     }
-    if (!blocks.length) blocks.push({ type: 'text', text: '' });
-    messages.push({ role: 'assistant', content: blocks });
+    // 全空 assistant 消息（无文本无 tool_calls）直接丢：Anthropic 拒 text:"" 块（审查 M1）
+    if (blocks.length) messages.push({ role: 'assistant', content: blocks });
   }
 
   // 丢掉没有配对 tool_use 的 tool_result（客户端重放/截断历史时很常见，
@@ -125,7 +149,8 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
   for (const m of messages) {
     if (!Array.isArray(m.content)) continue;
     const kept = m.content.filter((b: any) => b.type !== 'tool_result' || knownToolIds.has(b.tool_use_id));
-    m.content = kept.length ? kept : [{ type: 'text', text: '' }];
+    // 全被过滤则留空数组——由下方 mergeAdjacent 前的空 content 过滤整条丢弃（审查 M1）
+    m.content = kept;
   }
 
   // Anthropic 要求相邻同角色需合并
@@ -134,10 +159,13 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
 
   applyResponseFormatFallback(body, system);
 
+  // max_tokens 以路由上限（defaultMaxTokens）夹紧：单路由直连没有 auto 的候选剔除，超限透传必 400（审查 M4）
+  const reqMax = Number(body.max_tokens) || Number(body.max_completion_tokens) || 0;
+  const cap = opts.defaultMaxTokens;
   const out: any = {
     model: opts.upstreamModel,
     messages: merged,
-    max_tokens: Number(body.max_tokens) || Number(body.max_completion_tokens) || opts.defaultMaxTokens || 8192,
+    max_tokens: reqMax ? (cap ? Math.min(reqMax, cap) : reqMax) : (cap || 8192),
   };
   if (system.length) out.system = system.length === 1 ? system[0].text : system;
   if (body.temperature !== undefined) out.temperature = body.temperature;
@@ -158,12 +186,18 @@ export function openaiToAnthropicRequest(body: any, opts: { upstreamModel: strin
   if (tc && out.tools) {
     if (tc === 'auto') out.tool_choice = { type: 'auto' };
     else if (tc === 'required') out.tool_choice = { type: 'any' };
-    else if (tc === 'none') delete out.tool_choice;
+    else if (tc === 'none') {
+      // Anthropic 无 tool_choice:'none'——删 tools 才是忠实语义（原实现 delete 的是从未赋值的字段，no-op，审查 L4）
+      delete out.tools;
+    }
     else if (typeof tc === 'object' && tc.function?.name) out.tool_choice = { type: 'tool', name: tc.function.name };
   }
 
-  // 扩展思考 / 缓存等字段透传（存在才带）
-  for (const k of ['metadata', 'top_k']) if (body[k] !== undefined) out[k] = body[k];
+  // 扩展字段透传；metadata 仅保 Anthropic 定义过的 user_id（任意字段透传可能 400，审查需确认项）
+  if (body.top_k !== undefined) out.top_k = body.top_k;
+  if (body.metadata && typeof body.metadata === 'object' && body.metadata.user_id != null) {
+    out.metadata = { user_id: String(body.metadata.user_id) };
+  }
   return out;
 }
 
@@ -180,6 +214,10 @@ export function collectDropWarnings(body: any, targetProtocol: Protocol): string
     if (Number(body.n) > 1) w.push(`n=${body.n} 不被上游协议支持，仅返回 1 个 choice`);
     if (body.logprobs || body.top_logprobs) w.push('logprobs 不被上游协议支持，已忽略');
     if (body.frequency_penalty || body.presence_penalty) w.push('frequency_penalty / presence_penalty 不被上游协议支持，已忽略');
+    if (JSON.stringify(body.messages || '').includes('"input_audio"')) w.push('input_audio 内容不被 Anthropic 上游支持，已丢弃');
+    if (body.parallel_tool_calls === false) w.push('parallel_tool_calls=false 无法表达进 Anthropic（disable_parallel_tool_use 需随 tool_choice 下发），已忽略');
+    if (body.logit_bias) w.push('logit_bias 不被上游协议支持，已忽略');
+    if (body.seed !== undefined) w.push('seed 不被上游协议支持，已忽略');
   } else if (targetProtocol === 'openai') {
     if (JSON.stringify(body).includes('cache_control')) w.push('cache_control 断点无法映射到 OpenAI 协议，缓存计费会受影响');
     if (body.thinking) w.push('thinking（扩展思考）不被 OpenAI 协议支持，已忽略');
@@ -218,13 +256,11 @@ function openaiContentToAnthropic(content: any): any[] {
           : { type: 'url', url },
       });
     } else if (part.type === 'input_audio') {
-      blocks.push({
-        type: 'document',
-        source: { type: 'base64', media_type: `audio/${part.input_audio?.format || 'mp3'}`, data: part.input_audio?.data },
-      });
+      // Anthropic document 仅支持 application/pdf（审查 M3）：合成必 400 的音频块不如丢弃+告警，
+      // 告警由 collectDropWarnings 统一发 x-lm-warning
     }
   }
-  return blocks.length ? blocks : [{ type: 'text', text: '' }];
+  return blocks; // 空数组由调用方按"整条消息丢弃"处理；Anthropic 拒 text:""（审查 M1）
 }
 
 function mergeAdjacent(messages: any[]): any[] {
@@ -302,10 +338,13 @@ export function anthropicToOpenaiRequest(body: any, opts: { upstreamModel: strin
     }
   }
 
+  // 同 openaiToAnthropicRequest：以路由上限夹紧请求声明值（审查 M4）
+  const reqMaxA = Number(body.max_tokens) || 0;
+  const capA = opts.defaultMaxTokens;
   const out: any = {
     model: opts.upstreamModel,
     messages,
-    max_tokens: Number(body.max_tokens) || opts.defaultMaxTokens || 8192,
+    max_tokens: reqMaxA ? (capA ? Math.min(reqMaxA, capA) : reqMaxA) : (capA || 8192),
   };
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
@@ -384,7 +423,7 @@ export function openaiToAnthropicResponse(raw: any, publicName: string): any {
       input: safeJsonParse(tc.function?.arguments),
     });
   }
-  if (!content.length) content.push({ type: 'text', text: '' });
+  if (!content.length) content.push({ type: 'text', text: ' ' }); // Anthropic 要求 text≥1 字符（审查 M1）
   // Anthropic 口径：input_tokens **不含**缓存部分（与文件底部 usageFromAnthropic 的归一互为逆运算）。
   // 直接把含缓存的 prompt_tokens 填进 input_tokens，Anthropic 客户端求和会双算缓存。
   const un = usageFromOpenai(raw.usage);

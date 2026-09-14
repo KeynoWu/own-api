@@ -397,7 +397,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     // ---------- 成功 ----------
     recordSuccess(channel, key);
     const usage: Usage = emptyUsage();
-    const meta: StreamMeta = { publicName: aliasName, usage };
+    const meta: StreamMeta = { publicName: aliasName, usage, scrub: (s) => scrubOut(s, key.key) };
     let firstContentAt = 0;
     meta.onFirstContent = () => {
       if (!firstContentAt) firstContentAt = Date.now();

@@ -25,9 +25,13 @@ export interface StreamMeta {
   publicName: string;
   usage: Usage;
   onFirstContent?: () => void;
+  /** 出站错误文案的 key 掩码（error 帧也过 C17 掩码链，审查 A-L8） */
+  scrub?: (s: string) => string;
 }
 
 const enc = new TextEncoder();
+/** 单帧缓冲上限：正常 SSE 帧远小于此；超限说明上游畸形/二进制垃圾，立即断流而非无界增长 O(n²)（审查 L8） */
+const MAX_FRAME_BUF = 8 * 1024 * 1024;
 
 /**
  * 统一换行符：SSE 允许 CRLF / CR / LF。
@@ -35,8 +39,12 @@ const enc = new TextEncoder();
  * （CRLF 行分隔符被 TCP 拆在 \r|\n 之间），就会在多行帧中间拼出一个假的 \n\n 帧边界。
  */
 function normalizeNewlines(s: string) {
-  if (s.endsWith('\r')) return normalizeNewlines(s.slice(0, -1)) + '\r';
-  return s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  // 尾部 CR 游程整体保留待定（CRLF 可能被 TCP 拆在 CR|LF 之间）；用正则迭代处理，
+  // 不再每个尾部 CR 递归一层——上游发数 MB 连续 CR 时原实现栈溢出（审查 L6）
+  const m = /\r+$/.exec(s);
+  const tail = m ? m[0] : '';
+  const head = tail ? s.slice(0, -tail.length) : s;
+  return head.replace(/\r\n/g, '\n').replace(/\r/g, '\n') + tail;
 }
 
 /** 从缓冲区里切出完整帧；返回剩余未完成的尾巴 */
@@ -107,6 +115,7 @@ function frameTransform(
           onFirst?.();
         }
         buf = normalizeNewlines(buf + dec.decode(chunk, { stream: true }));
+        if (buf.length > MAX_FRAME_BUF) throw new Error('SSE 帧缓冲超上限：上游长时间未给出帧边界');
         const { frames, rest } = drainFrames(buf);
         buf = rest;
         const emit: Emit = (c) => controller.enqueue(typeof c === 'string' ? enc.encode(c) : c);
@@ -129,7 +138,23 @@ function frameTransform(
 }
 
 function sseEvent(event: string | undefined, data: any): string {
-  return `${event ? `event: ${event}\n` : ''}data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`;
+  const s = typeof data === 'string' ? data : JSON.stringify(data);
+  // 多行 data 按 SSE 规范拆成多个 data: 行——原实现把换行写成裸行，下游会静默丢弃续行（审查 L7）
+  const body = s.split('\n').map((l) => `data: ${l}`).join('\n');
+  return `${event ? `event: ${event}\n` : ''}${body}\n\n`;
+}
+
+/** Anthropic 口径 usage：input_tokens 必须不含缓存部分（与非流式 translate.openaiToAnthropicResponse 同式）。
+ *  原流式路径直接塞含缓存的 promptTokens，同一上游流式/非流式口径互斥（审查 M2） */
+function anthropicUsagePayload(u: Usage) {
+  const read = u.cacheReadTokens || 0;
+  const write = u.cacheWriteTokens || 0;
+  return {
+    input_tokens: Math.max(0, (u.promptTokens || 0) - read - write),
+    output_tokens: u.completionTokens || 0,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: write,
+  };
 }
 
 function openaiUsagePayload(u: Usage) {
@@ -224,6 +249,8 @@ class UsageSc {
   }
   feed(chunk: Uint8Array) {
     this.text = normalizeNewlines(this.text + this.dec.decode(chunk, { stream: true }));
+    // 旁扫缓冲同样设上限（审查 L8）：超限抛错经 track 转协议内 error 帧，不再无界增长
+    if (this.text.length > MAX_FRAME_BUF) throw new Error('SSE 旁扫缓冲超上限：上游长时间未给出帧边界');
     const { frames, rest } = drainFrames(this.text);
     this.text = rest;
     for (const f of frames) this.scan(f);
@@ -289,7 +316,7 @@ export function anthropicJsonToSSE(json: any, publicName: string, usage: Usage):
           model: publicName,
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: usage.promptTokens, output_tokens: 0 },
+          usage: anthropicUsagePayload(usage),
         },
       });
       blocks.forEach((b: any, i: number) => {
@@ -308,7 +335,7 @@ export function anthropicJsonToSSE(json: any, publicName: string, usage: Usage):
       push('message_delta', {
         type: 'message_delta',
         delta: { stop_reason: json.stop_reason || 'end_turn', stop_sequence: null },
-        usage: { output_tokens: usage.completionTokens, input_tokens: usage.promptTokens },
+        usage: anthropicUsagePayload(usage),
       });
       push('message_stop', { type: 'message_stop' });
       c.close();
@@ -380,8 +407,12 @@ export function anthropicStreamToOpenai(src: ReadableStream<Uint8Array>, meta: S
         mergeUsage(meta.usage, usageFromAnthropic(json.usage));
         const finish = stopReasonToFinish(json.delta?.stop_reason);
         if (finish) chunk({}, finish, openaiUsagePayload(meta.usage));
+        else emit(sseEvent(undefined, { ...base, choices: [], usage: openaiUsagePayload(meta.usage) })); // pause_turn 等：usage 与 finish 解耦（审查 L5）
       } else if (type === 'error') {
-        emit(sseEvent(undefined, { error: json.error ?? { message: 'upstream stream error' } }));
+        const e = json.error && typeof json.error === 'object' ? json.error : { message: 'upstream stream error' };
+        const msg = e.message ? String(e.message) : 'upstream stream error';
+        // error 帧过 scrub：上游错误里回显 api_key 原文/编码变体都不外发（审查 A-L8，掩码链最后缺口）
+        emit(sseEvent(undefined, { error: { ...e, message: meta.scrub ? meta.scrub(msg) : msg } }));
       }
     },
     (emit) => emit('data: [DONE]\n\n'),
@@ -467,7 +498,7 @@ export function openaiStreamToAnthropic(src: ReadableStream<Uint8Array>, meta: S
               model: meta.publicName,
               stop_reason: null,
               stop_sequence: null,
-              usage: { input_tokens: meta.usage.promptTokens, output_tokens: 0 },
+              usage: { input_tokens: 0, output_tokens: 0 }, // message_start 时 usage 尚未到（真值在 message_delta，审查 I2）
             },
           }),
         );
@@ -480,7 +511,9 @@ export function openaiStreamToAnthropic(src: ReadableStream<Uint8Array>, meta: S
         return;
       }
       if (json.error) {
-        emit(sseEvent('error', { type: 'error', error: json.error }));
+        const e = typeof json.error === 'object' && json.error ? json.error : { message: String(json.error) };
+        const msg = e.message ? String(e.message) : 'upstream stream error';
+        emit(sseEvent('error', { type: 'error', error: { ...e, message: meta.scrub ? meta.scrub(msg) : msg } }));
         return;
       }
       if (json.usage) mergeUsage(meta.usage, usageFromOpenai(json.usage));
@@ -547,7 +580,7 @@ export function openaiStreamToAnthropic(src: ReadableStream<Uint8Array>, meta: S
         sseEvent('message_delta', {
           type: 'message_delta',
           delta: { stop_reason: stopReason || 'end_turn', stop_sequence: null },
-          usage: { input_tokens: meta.usage.promptTokens, output_tokens: meta.usage.completionTokens },
+          usage: anthropicUsagePayload(meta.usage),
         }),
       );
       emit(sseEvent('message_stop', { type: 'message_stop' }));
