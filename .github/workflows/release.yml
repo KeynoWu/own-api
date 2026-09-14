@@ -102,10 +102,18 @@ jobs:
         with: { path: artifacts, merge-multiple: 'true' }
       - name: 资产数量硬校验（三平台缺一不可）
         run: test "$(find artifacts -name '*.dmg' -o -name '*.exe' | wc -l)" -ge 3
+      - uses: actions/checkout@v4
+      - name: 发布说明＝CHANGELOG 对应版本节（v0.1.6 曾只挂出裸对比链接）
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v tag="## v${VER}（" 'index($0,tag)==1{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release-body.md
+          [ -s release-body.md ] || { echo "::warning::CHANGELOG 找不到 v${VER} 节，release 说明退化为对比链接"; }
+          printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.exe
-          generate_release_notes: true
+          body_path: release-body.md
           draft: false
