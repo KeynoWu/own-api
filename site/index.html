@@ -81,7 +81,7 @@ img,svg{display:block}
 @media (max-width:980px){.hero-grid{grid-template-columns:1fr;gap:var(--sp-6)}}
 .badge{display:inline-flex;align-items:center;gap:8px;font:500 13px/1 var(--mono);color:var(--accent-strong);background:var(--accent-dim);border:1px solid rgba(56,189,248,.3);padding:8px 14px;border-radius:999px;margin-bottom:var(--sp-3)}
 .badge i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
-h1{font-size:clamp(30px,4.6vw,52px);line-height:1.22;font-weight:700;letter-spacing:.01em}
+h1{font-size:clamp(28px,4.4vw,48px);line-height:1.24;font-weight:700;letter-spacing:.01em;text-wrap:balance}
 h1 em{font-style:normal;color:var(--accent-strong)}
 .sub{margin:var(--sp-3) 0 var(--sp-4);color:var(--muted);font-size:clamp(16px,1.6vw,18px);max-width:34em}
 .hero-ctas{display:flex;gap:var(--sp-2);flex-wrap:wrap}
@@ -252,10 +252,11 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 
 <!-- ================= HERO ================= -->
 <section class="hero" aria-labelledby="h1">
-  <div class="wrap hero-grid">
-    <div>
-      <span class="badge"><i aria-hidden="true"></i>多模型管理台 · 本机运行 · macOS / Windows</span>
-      <h1 id="h1">公司发了 <em>N</em> 个大模型，<br>我用 <em>1</em> 个管理台全管住。</h1>
+  <div class="wrap">
+    <span class="badge"><i aria-hidden="true"></i>多模型管理台 · 本机运行 · macOS / Windows</span>
+    <h1 id="h1">公司发了 <em>N</em> 个大模型，我用 <em>1</em> 个管理台全管住。</h1>
+    <div class="hero-grid" style="margin-top:var(--sp-4)">
+      <div>
       <p class="sub">每个模型一个 baseURL，谁快谁慢全凭感觉？own-api 在你本机开一个多模型管理台：
         渠道、密钥、路由、速度对比集中可视；所有 agent 只配同一个 <span class="mono">base_url</span> 和同一把 key——
         改一个 <span class="mono">model</span> 名就换一家供应商，<span class="mono">auto</span> 名自动绕开慢的和挂掉的模型。</p>
@@ -290,6 +291,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
         <div class="col"><span class="node hot">own-api :8787</span></div>
         <div class="wire w2"><i></i></div>
         <div class="col"><span class="node">Claude · Anthropic</span><span class="node">GPT · OpenAI</span><span class="node">DeepSeek / GLM · 内网</span></div>
+      </div>
       </div>
     </div>
   </div>
