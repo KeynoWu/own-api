@@ -67,6 +67,9 @@ export const WEB_HTML = `<!doctype html>
   #toast { position: fixed; right: 18px; bottom: 18px; display: flex; gap: 8px; flex-direction: column; z-index: 50; }
   #toast div { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 8px; font-size: 13px; max-width: 420px; }
   #toast div.err { border-left-color: var(--err); }
+  /* 软刷新：数据真变化时一次性柔和淡入（内容不变不触发；reduced-motion 由 prefers-reduced-motion 兜底） */
+  #app.soft { animation: appSoft .5s ease; }
+  @keyframes appSoft { from { opacity: .55; } to { opacity: 1; } }
   #gate { max-width: 420px; margin: 12vh auto; }
   .split { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
   @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
@@ -258,21 +261,34 @@ function form(title, fields, onSubmit) {
 const views = {};
 let timer = null;
 let viewGen = 0;
-function go(v) {
+function go(v, opts = {}) {
   const gen = ++viewGen; // M4：视图代际守卫——慢视图的过期响应不得覆盖新视图
   clearInterval(timer);
   if (v !== 'logs' && es) { es.close(); es = null; }
+  const sameView = v === curView && !opts.force; // 同视图软刷新：不清场、不闪 loading，数据备好再一次性替换
   location.hash = v;
   curView = v;
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
-  $('#app').innerHTML = '';
-  $('#app').append(views.loading());
+  if (!sameView) { $('#app').innerHTML = ''; $('#app').append(views.loading()); }
+  const keepScroll = sameView ? window.scrollY : 0;
   Promise.resolve((views[v] || views.overview)()) // L1：未知 hash 回落概览，不再白屏炸掉
-    .then((node) => { if (gen !== viewGen) return; $('#app').innerHTML = ''; $('#app').append(node); })
+    .then((node) => {
+      if (gen !== viewGen) return;
+      const app = $('#app');
+      const cur = app.firstElementChild;
+      if (sameView && cur && cur.outerHTML === node.outerHTML) return; // 数据没变：零 DOM 扰动直接跳过
+      const ae = document.activeElement; // 用户正在输入：本轮不替换（不抢焦点，下轮自愈）
+      if (sameView && ae && app.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+      app.replaceChildren(node);
+      if (sameView) {
+        window.scrollTo(0, keepScroll); // 替换是同步的，滚回原位防高度微差抖动
+        app.classList.remove('soft'); void app.offsetWidth; app.classList.add('soft');
+      }
+    })
     .catch((e) => {
       if (gen !== viewGen) return;
-      $('#app').innerHTML = '';
-      $('#app').append(el('div', { class: 'card err-text' }, e.message));
+      if (sameView) { toast('刷新失败：' + e.message + '（已保留当前画面）', true); } // 软刷新失败不清场——陈旧好过空白
+      else { $('#app').innerHTML = ''; $('#app').append(el('div', { class: 'card err-text' }, e.message)); }
       // M4：失败分支同样重挂刷新计时——瞬时抖动不该让挂机页失去自愈
       if (v === 'overview' && ovSt.refresh > 0) timer = setInterval(() => go('overview'), ovSt.refresh * 1000);
     });
@@ -1112,7 +1128,7 @@ function boot() {
   if (es) es.close(), (es = null);
   const wantV = localStorage.getItem('lm_view'); // 托盘深链目标视图：一次性消费（消费即删，不影响后续手点导航）
   if (wantV) localStorage.removeItem('lm_view');
-  go(wantV || (location.hash || '#overview').slice(1));
+  go(wantV || (location.hash || '#overview').slice(1), { force: true }); // 首载仍走清场+loading（此时画面本来就空）
   api('/healthz').then((h) => { $('#hdr-sub').textContent = \`\${h.channels} 渠道 · \${h.models} 模型 · \${h.vkeys} 对外 key\`; });
 }
 
