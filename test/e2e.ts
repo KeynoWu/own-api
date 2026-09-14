@@ -95,9 +95,9 @@ const listedCh = (await api('/api/channels', { headers: ADMIN })).body;
   const oaListed = (listedCh || []).find((c: any) => c.id === oa.id);
   check('管理台不回显明文 key', !!oaListed?.keys?.every?.((k: any) => typeof k.key === 'string' && !k.key.includes('k-ok-main')), JSON.stringify(oaListed?.keys?.map((k: any) => k.key)));
 
-await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 'gpt-4o', channelId: oa.id, upstreamModel: 'mock-gpt-5', priceInput: 2.5, priceOutput: 10 }) });
-await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 'claude-sonnet', channelId: an.id, upstreamModel: 'mock-claude-sonnet', priceInput: 3, priceOutput: 15 }) });
-const models = (await api('/api/models', { headers: ADMIN })).body;
+await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 'gpt-4o', channelId: oa.id, upstreamModel: 'mock-gpt-5', priceInput: 2.5, priceOutput: 10 }) });
+await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 'claude-sonnet', channelId: an.id, upstreamModel: 'mock-claude-sonnet', priceInput: 3, priceOutput: 15 }) });
+const models = (await api('/api/routes?type=single', { headers: ADMIN })).body;
 check('注册两个模型路由', models.length === 2, JSON.stringify(models?.map?.((m: any) => m.publicName)));
 
 VKEY = store.listVKeys()[0].key;
@@ -222,13 +222,13 @@ check('可用 key 计数为 1', chAfter.availableKeys === 1, String(chAfter.avai
 
 // 全部 key 不可用 -> 明确报错而不是静默挂起
 const broken = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'AllBad', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'openai', keys: ['k-401-a', 'k-401-b'] }) })).body;
-await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 'broken-model', channelId: broken.id, upstreamModel: 'mock-gpt-5' }) });
+await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 'broken-model', channelId: broken.id, upstreamModel: 'mock-gpt-5' }) });
 const brokenRes = await api('/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${VKEY}` }, body: JSON.stringify({ model: 'broken-model', messages: [{ role: 'user', content: 'x' }] }) });
 check('全渠道鉴权失败 -> 401 透传', brokenRes.status === 401, JSON.stringify(brokenRes.body));
 
 // 上游 5xx：重试耗尽后 502
 const bad500 = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'Boom500', baseUrl: 'http://127.0.0.1:18099/v1', protocol: 'openai', keys: ['k-500-a', 'k-500-b', 'k-500-c'] }) })).body;
-await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 'boom-model', channelId: bad500.id, upstreamModel: 'mock-gpt-5' }) });
+await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 'boom-model', channelId: bad500.id, upstreamModel: 'mock-gpt-5' }) });
 const t5xx = Date.now();
 const boom = await api('/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${VKEY}` }, body: JSON.stringify({ model: 'boom-model', messages: [{ role: 'user', content: 'x' }] }) });
 check('5xx 换 key 重试后返回 502', boom.status === 502, JSON.stringify(boom.body));
@@ -246,7 +246,7 @@ check('按模型聚合含 claude-sonnet', !!byModel && byModel.requests >= 4, JS
 check('成功率字段存在', typeof stats.successRate === 'number' && stats.successRate < 100, String(stats.successRate));
 check('P50/P95 延迟有值', stats.p50Latency > 0 && stats.p95Latency >= stats.p50Latency, `${stats.p50Latency}/${stats.p95Latency}`);
 
-const mdl = (await api('/api/models', { headers: ADMIN })).body.find((m: any) => m.publicName === 'gpt-4o');
+const mdl = (await api('/api/routes?type=single', { headers: ADMIN })).body.find((m: any) => m.publicName === 'gpt-4o');
 check('模型单价已保存', mdl?.priceInput === 2.5, String(mdl?.priceInput));
 
 // ================================================================ 8. 对外接口
@@ -287,10 +287,10 @@ await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringi
 const AH = { authorization: `Bearer ${VKEY}`, 'content-type': 'application/json' };
 const mkCh = async (name: string, protocol: string, keys: string[], baseUrl = 'http://127.0.0.1:18099/v1') =>
   (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name, baseUrl, protocol, keys }) })).body;
-const mkModel = async (body: any) => api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify(body) });
-const mkAuto = async (body: any) => api('/api/auto-routes', { method: 'POST', headers: ADMIN, body: JSON.stringify(body) });
-const patchAuto = async (id: string, body: any) => api(`/api/auto-routes/${id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify(body) });
-const patchModel = async (id: string, body: any) => api(`/api/models/${id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify(body) });
+const mkModel = async (body: any) => api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', ...body }) });
+const mkAuto = async (body: any) => api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'auto', ...body }) });
+const patchAuto = async (id: string, body: any) => api(`/api/routes/${id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify(body) });
+const patchModel = async (id: string, body: any) => api(`/api/routes/${id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify(body) });
 const patchSettings = async (body: any) => api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify(body) });
 const autoReq = async (model: string, extra: any = {}, headers: any = AH) =>
   api('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages: [{ role: 'user', content: '你好' }], ...extra }) });
@@ -364,7 +364,7 @@ const rProto = await api('/v1/messages', { method: 'POST', headers: { 'x-api-key
 check('①-g cache_control 只走 anthropic 候选', rProto.status === 200 && (await getLogs('auto_proto'))[0]?.routedTo === 'auto-m-claude', `${rProto.status} ${(await getLogs('auto_proto'))[0]?.routedTo}`);
 const aDangR = await mkAuto({ publicName: 'auto_dang', candidates: [{ routeId: 'route_gone_404', weight: 1 }], stickyTtlMs: 0 });
 check('悬空候选被剔除 -> 404（C8）', (await autoReq('auto_dang')).status === 404, 'dangling');
-const dangList = (await (await api('/api/auto-routes', { headers: ADMIN })).body).find((a: any) => a.id === aDangR.body.id);
+const dangList = (await (await api('/api/routes?type=auto', { headers: ADMIN })).body).find((a: any) => a.id === aDangR.body.id);
 check('管理端标注 dangling 候选', dangList?.candidates?.[0]?.dangling === true, JSON.stringify(dangList?.candidates));
 
 // —— 链失败分类 ——
@@ -447,7 +447,7 @@ await patchSettings({ fallbackChannelId: '' });
 // —— 引用告警（C8）——
 const mDelR = (await mkModel({ publicName: 'auto-m-del', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
 await mkAuto({ publicName: 'auto_del', candidates: [{ routeId: mDelR.id, weight: 1 }] });
-const delRes = await api(`/api/models/${mDelR.id}`, { method: 'DELETE', headers: ADMIN });
+const delRes = await api(`/api/routes/${mDelR.id}`, { method: 'DELETE', headers: ADMIN });
 check('删被引用模型 -> 回 referencedAutoRoutes', delRes.body?.referencedAutoRoutes?.some((a: any) => a.publicName === 'auto_del'), JSON.stringify(delRes.body));
 
 // —— debugHeaders 下 routed-to 头 ——
@@ -712,7 +712,7 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   check('自定义公钥短于 16 字符 -> 400', short.status === 400, String(short.status));
 }
 {
-  const bad = await api('/api/models', { method: 'POST', headers: ADMIN, body: JSON.stringify({ publicName: 123, channelId: 'ch-x', upstreamModel: 'm' }) });
+  const bad = await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single',  publicName: 123, channelId: 'ch-x', upstreamModel: 'm' }) });
   check('POST /models publicName 非字符串 -> 400（此前 500）', bad.status === 400, String(bad.status));
 }
 {
@@ -729,6 +729,16 @@ section('15. 修复战役回归断言（审查报告契约固化）');
     last = (await api('/v1/chat/completions', { method: 'POST', headers: { authorization: 'Bearer sk-lm-brute-' + i }, body: JSON.stringify({ model: 'gpt-4o', messages: [] }) })).status;
   }
   check('网关爆破错误 key -> 30/min 限速 429 生效', last === 429, String(last));
+{
+  // 模块合并契约：单表撞名双向互斥 + 候选禁嵌套 auto
+  const autos = (await api('/api/routes?type=auto', { headers: ADMIN })).body;
+  const oneAuto = autos.find((a: any) => a.enabled);
+  const chs = (await api('/api/channels', { headers: ADMIN })).body;
+  const r = await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: oneAuto.publicName, channelId: chs[0].id, upstreamModel: 'u' }) });
+  check('新增单模型撞 auto 名 -> 409（单表撞名校验，此前 POST 不设防）', r.status === 409, String(r.status));
+  const nest = await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'auto', publicName: 'nest-attempt', candidates: [{ routeId: oneAuto.id, weight: 1 }] }) });
+  check('auto 候选指向 auto -> 400（禁嵌套）', nest.status === 400 && String(nest.body?.error || '').includes('单模型'), JSON.stringify(nest.body));
+}
 }
 }
 

@@ -46,8 +46,12 @@ export interface Channel {
   modelList?: string[];
 }
 
+/** 路由类型判别：single=单模型直连；auto=候选聚合自动路由（模块合并，单一 routes 表） */
+export type RouteType = 'single' | 'auto';
+
 /** 对外的一个模型条目：agent 侧看到的 model 名 */
 export interface ModelRoute {
+  type: 'single';
   id: string;
   /** 对外暴露的模型名，agent 在请求体里传这个 */
   publicName: string;
@@ -151,6 +155,7 @@ export interface AutoCandidate {
 
 /** 自动路由条目：agent 请求 publicName 时按「硬过滤→粘性→加权」在候选中选路（docs/model-auto-design.md） */
 export interface AutoRoute {
+  type: 'auto';
   id: string;
   /** 对外名；全局唯一，且不得与 ModelRoute.publicName 或其 tags 冲突（双向校验，W7） */
   publicName: string;
@@ -161,6 +166,9 @@ export interface AutoRoute {
   createdAt: number;
   note?: string;
 }
+
+/** 单表路由判别联合（routes 数组的元素类型） */
+export type RouteEntry = ModelRoute | AutoRoute;
 
 export interface Settings {
   adminToken: string;
@@ -197,8 +205,8 @@ export interface DBShape {
   /** 按天配额累计（vkeyId -> Quota），与日志裁剪解耦 */
   quotas: Record<string, Quota>;
   channels: Channel[];
-  models: ModelRoute[];
-  autoRoutes: AutoRoute[];
+  /** 统一路由表（v3：models+autoRoutes 合并，type 判别；旧库加载时自动迁移） */
+  routes: RouteEntry[];
   vkeys: VirtualKey[];
   logs: RequestLog[];
   settings: Settings;

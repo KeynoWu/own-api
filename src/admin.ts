@@ -299,31 +299,60 @@ export function createAdmin(): Hono {
         skipped.push(finalName);
         continue;
       }
-      created.push(
-        store.createModel({
-          publicName: finalName,
-          channelId: ch.id,
-          upstreamModel: name,
-          protocol: ch.protocol,
-        }),
-      );
+      const { model, error: mkErr } = store.createModel({
+        publicName: finalName,
+        channelId: ch.id,
+        upstreamModel: name,
+        protocol: ch.protocol,
+      });
+      if (!model) {
+        // 单表撞名校验兜底（tag 遮蔽等预检查不覆盖的边角）：与真撞名同走 skipped 回执
+        skipped.push(finalName);
+        continue;
+      }
+      created.push(model);
     }
     return c.json({ created: created.length, models: created, skipped });
   });
 
-  // ---------- models ----------
-  app.get('/models', (c) => {
-    return c.json(
-      store.listModels().map((m) => ({
-        ...m,
-        channelName: store.getChannel(m.channelId)?.name || '(渠道已删除)',
-        channelProtocol: store.getChannel(m.channelId)?.protocol,
-      })),
-    );
+  // ---------- routes（v3 统一路由表：type: 'single' | 'auto'，模块合并） ----------
+  const enrichRoute = (r: any, snap: any[]): any =>
+    r.type === 'single'
+      ? { ...r, channelName: store.getChannel(r.channelId)?.name || '(渠道已删除)', channelProtocol: store.getChannel(r.channelId)?.protocol }
+      : {
+          ...r,
+          candidates: r.candidates.map((cd: any) => {
+            const m = store.getModel(cd.routeId);
+            const ch = m ? store.getChannel(m.channelId) : undefined;
+            return {
+              ...cd,
+              name: m?.publicName,
+              upstreamModel: m?.upstreamModel,
+              routeEnabled: m?.enabled,
+              channelName: ch?.name,
+              channelEnabled: ch?.enabled,
+              dangling: !m,
+              health: snap.find((h) => h.routeId === cd.routeId)?.health ?? 1,
+              healthDetail: snap.find((h) => h.routeId === cd.routeId),
+            };
+          }),
+        };
+  app.get('/routes', (c) => {
+    const type = c.req.query('type');
+    if (type !== undefined && type !== 'single' && type !== 'auto') return c.json({ error: "type 需为 'single' 或 'auto'" }, 400);
+    const snap = healthSnapshot();
+    const all = store.listRoutes();
+    return c.json((type ? all.filter((r) => r.type === type) : all).map((r) => enrichRoute(r, snap)));
   });
 
-  app.post('/models', async (c) => {
+  app.post('/routes', async (c) => {
     const b = await c.req.json().catch(() => ({} as any));
+    if (b.type === 'auto') {
+      const { auto, error } = store.createAutoRoute(b);
+      if (error) return c.json({ error }, 400);
+      return c.json(auto, 201);
+    }
+    if (b.type !== 'single') return c.json({ error: "type 必填：'single' 或 'auto'" }, 400);
     if (!b.publicName || !b.channelId || !b.upstreamModel) {
       return c.json({ error: 'publicName / channelId / upstreamModel 必填' }, 400);
     }
@@ -331,26 +360,37 @@ export function createAdmin(): Hono {
     if (typeof b.publicName !== 'string' || !b.publicName.trim() || typeof b.upstreamModel !== 'string' || !b.upstreamModel.trim()) {
       return c.json({ error: 'publicName / upstreamModel 需为非空字符串' }, 400);
     }
-    if (store.findModelByName(b.publicName)) return c.json({ error: '同名模型已存在' }, 409);
-    // 双向唯一性（W7）：模型名/tag 也不得遮蔽既有 auto 路由名
-    if (store.findAutoRouteByName(b.publicName)) return c.json({ error: '外名与 auto 路由冲突（auto 名全局唯一）' }, 409);
-    const tagClash = Array.isArray(b.tags) ? b.tags.find((t: any) => typeof t === 'string' && store.findAutoRouteByName(t)) : undefined;
-    if (tagClash) return c.json({ error: `tag「${tagClash}」与 auto 路由名冲突` }, 409);
     if (!store.getChannel(b.channelId)) return c.json({ error: 'channel 不存在' }, 404);
-    return c.json(store.createModel(b), 201);
+    // 撞名（外名/tag × single/auto 双向）收敛进 store.routeNameTaken，HTTP 侧只翻译状态码
+    const { model, error } = store.createModel(b);
+    if (!model) return c.json({ error: error || '名称冲突' }, 409);
+    return c.json(model, 201);
   });
 
-  app.patch('/models/:id', async (c) => {
+  app.patch('/routes/:id', async (c) => {
     const b = await c.req.json().catch(() => ({} as any));
-    const m = store.updateModel(c.req.param('id'), b);
+    const id = c.req.param('id');
+    const found = store.getRoute(id);
+    if (!found) return c.json({ error: 'not found' }, 404);
+    if (found.type === 'auto') {
+      const { auto, error, missing } = store.updateAutoRoute(id, b);
+      if (missing) return c.json({ error: 'not found' }, 404);
+      if (error) return c.json({ error }, 400);
+      return c.json(auto);
+    }
+    const m = store.updateModel(id, b);
     if (m === 'conflict') return c.json({ error: `名称或 tag 与既有模型/auto 路由冲突${b.publicName ? `：${b.publicName}` : ''}` }, 409);
     return m ? c.json(m) : c.json({ error: 'not found' }, 404);
   });
 
-  app.delete('/models/:id', (c) => {
+  app.delete('/routes/:id', (c) => {
+    const id = c.req.param('id');
+    const found = store.getRoute(id);
+    if (!found) return c.json({ error: 'not found' }, 404);
+    if (found.type === 'auto') return store.deleteAutoRoute(id) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
     // C8：被 auto 引用的候选删除后不会自动清理，回引用清单让管理端红标警示
-    const { referencedAutoRoutes } = store.deleteModel(c.req.param('id'));
-    clearHealthFor(c.req.param('id')); // 已删路由的健康窗口条目同步回收
+    const { referencedAutoRoutes } = store.deleteModel(id);
+    clearHealthFor(id); // 已删路由的健康窗口条目同步回收
     return c.json({ ok: true, ...(referencedAutoRoutes.length ? { warning: `已删除的模型被 ${referencedAutoRoutes.length} 个 auto 路由引用，候选将悬空并被自动剔除`, referencedAutoRoutes } : {}) });
   });
 
@@ -474,48 +514,6 @@ export function createAdmin(): Hono {
       codexCli: `# ~/.codex/config.toml\nmodel = "${model}"\n[model_providers.own-api]\nname = "own-api"\nbase_url = "${base}/v1"\nenv_key = "OWN_API_KEY"\n\n# export OWN_API_KEY="${vk.key}"`,
     });
   });
-
-  // ---------- auto routes（docs/model-auto-design.md §5/§8） ----------
-  app.get('/auto-routes', (c) => {
-    const snap = healthSnapshot();
-    return c.json(
-      store.listAutoRoutes().map((a) => ({
-        ...a,
-        candidates: a.candidates.map((cd) => {
-          const m = store.getModel(cd.routeId);
-          const ch = m ? store.getChannel(m.channelId) : undefined;
-          return {
-            ...cd,
-            name: m?.publicName,
-            upstreamModel: m?.upstreamModel,
-            routeEnabled: m?.enabled,
-            channelName: ch?.name,
-            channelEnabled: ch?.enabled,
-            dangling: !m,
-            health: snap.find((h) => h.routeId === cd.routeId)?.health ?? 1,
-            healthDetail: snap.find((h) => h.routeId === cd.routeId),
-          };
-        }),
-      })),
-    );
-  });
-
-  app.post('/auto-routes', async (c) => {
-    const b = await c.req.json().catch(() => ({} as any));
-    const { auto, error } = store.createAutoRoute(b);
-    if (error) return c.json({ error }, 400);
-    return c.json(auto, 201);
-  });
-
-  app.patch('/auto-routes/:id', async (c) => {
-    const b = await c.req.json().catch(() => ({} as any));
-    const { auto, error, missing } = store.updateAutoRoute(c.req.param('id'), b);
-    if (missing) return c.json({ error: 'not found' }, 404);
-    if (error) return c.json({ error }, 400);
-    return c.json(auto);
-  });
-
-  app.delete('/auto-routes/:id', (c) => (store.deleteAutoRoute(c.req.param('id')) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404)));
 
   /** 运行时观测出口（N6）：健康分窗口 + 粘性条目数；reset 供测试与调试 */
   app.get('/auto-health', (c) => {

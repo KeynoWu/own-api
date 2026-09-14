@@ -83,7 +83,6 @@ export const WEB_HTML = `<!doctype html>
   <nav id="nav" hidden>
     <button data-v="overview">概览</button>
     <button data-v="models">模型路由</button>
-    <button data-v="auto">自动路由</button>
     <button data-v="channels">渠道与号池</button>
     <button data-v="vkeys">对外 Key</button>
     <button data-v="connect">接入方式</button>
@@ -302,73 +301,48 @@ views.overview = async () => {
   return frag;
 };
 
-// ---------------- 模型路由 ----------------
+// ---------------- 模型路由（v3 单表：新增时选类型，single/auto 同页管理） ----------------
 views.models = async () => {
-  const [models, channels] = await Promise.all([api('/api/models'), api('/api/channels')]);
+  const [routes, channels, rt] = await Promise.all([api('/api/routes'), api('/api/channels'), api('/api/auto-health')]);
+  const models = routes.filter((r) => r.type === 'single');
   const box = el('div');
+  const hPill = (h) => el('span', { class: 'pill ' + (h >= 0.9 ? 'ok' : h >= 0.4 ? '' : 'err-text') }, '健康 ' + (Math.round(h * 100) / 100).toFixed(2));
+  const typePill = (t) => t === 'auto' ? el('span', { class: 'pill', style: 'margin-left:6px' }, '自动路由') : el('span', { class: 'pill', style: 'margin-left:6px;opacity:.6' }, '单模型');
+
   const addModel = () => form('新增模型路由', [
     { name: 'publicName', label: '对外模型名（agent 请求里传的 model）', ph: 'gpt-4o / claude-sonnet-4' },
-    { name: 'channelId', label: '上游渠道', type: 'select', options: channels.map((c) => ({ value: c.id, label: \`\${c.name} (\${c.protocol})\` })) },
+    { name: 'channelId', label: '上游渠道', type: 'select', options: channels.map((c) => ({ value: c.id, label: c.name + ' (' + c.protocol + ')' })) },
     { name: 'upstreamModel', label: '上游真实模型名（从所选渠道模型列表选）', type: 'select', depends: 'channelId', optionsFor: (cid) => { const l = (channels.find((c) => c.id === cid)?.modelList || []).filter(Boolean); return l.length ? l.map((mm) => ({ value: mm, label: mm })) : [{ value: '', label: '该渠道未配置模型列表，请先在渠道里填', disabled: true }]; } },
     { name: 'protocol', label: '协议（默认跟随渠道）', type: 'select', options: [{ value: '', label: '跟随渠道' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }] },
     { name: 'priceInput', label: '输入 $/百万 token', type: 'number', step: '0.01' },
     { name: 'priceOutput', label: '输出 $/百万 token', type: 'number', step: '0.01' },
     { name: 'maxOutputTokens', label: 'max_tokens 默认值', type: 'number' },
     { name: 'contextWindow', label: '上下文窗口', type: 'number' },
-  ], (v) => api('/api/models', { method: 'POST', body: JSON.stringify({
+  ], (v) => api('/api/routes', { method: 'POST', body: JSON.stringify({
+      type: 'single',
       publicName: v.publicName, channelId: v.channelId, upstreamModel: v.upstreamModel, protocol: v.protocol || undefined,
       priceInput: v.priceInput ? Number(v.priceInput) : undefined, priceOutput: v.priceOutput ? Number(v.priceOutput) : undefined,
       maxOutputTokens: v.maxOutputTokens ? Number(v.maxOutputTokens) : undefined, contextWindow: v.contextWindow ? Number(v.contextWindow) : undefined,
     }) }).then(() => { toast('已创建'); go('models'); }));
 
-  box.append(el('div', { class: 'toolbar' },
-    el('button', { class: 'btn primary', onclick: addModel }, '+ 新增模型'),
-    el('span', { class: 'muted' }, '统一代理只接受这里登记过的 model；切换 model 即自动切换到对应真实 url/key。'),
-  ));
+  const editModel = (m) => form('编辑 ' + m.publicName, [
+    { name: 'publicName', label: '对外模型名', value: m.publicName },
+    { name: 'upstreamModel', label: '上游真实模型名', type: 'select', value: m.upstreamModel, depends: 'channelId', optionsFor: (cid) => { const ch = channels.find((c) => c.id === cid); const l = (ch?.modelList || []).filter(Boolean); const opts = l.map((mm) => ({ value: mm, label: mm })); if (!l.includes(m.upstreamModel)) opts.push({ value: m.upstreamModel, label: m.upstreamModel + '（不在列表，保留原值）' }); return opts.length ? opts : [{ value: '', label: '该渠道未配置模型列表', disabled: true }]; } },
+    { name: 'channelId', label: '渠道', type: 'select', value: m.channelId, options: channels.map((c) => ({ value: c.id, label: c.name })) },
+    { name: 'protocol', label: '协议', type: 'select', value: m.protocol || '', options: [{ value: '', label: '跟随渠道' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }] },
+    { name: 'priceInput', label: '输入 $/M', type: 'number', step: '0.01', value: m.priceInput ?? '' },
+    { name: 'priceOutput', label: '输出 $/M', type: 'number', step: '0.01', value: m.priceOutput ?? '' },
+    { name: 'maxOutputTokens', label: 'max_tokens 默认', type: 'number', value: m.maxOutputTokens ?? '' },
+  ], (v) => api('/api/routes/' + m.id, { method: 'PATCH', body: JSON.stringify({
+      publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || undefined,
+      priceInput: v.priceInput === '' ? null : Number(v.priceInput), priceOutput: v.priceOutput === '' ? null : Number(v.priceOutput),
+      maxOutputTokens: v.maxOutputTokens === '' ? null : Number(v.maxOutputTokens),
+    }) }).then(() => { toast('已更新'); go('models'); }));
 
-  const t = el('table');
-  t.append(el('tr', {}, el('th', {}, '对外模型名'), el('th', {}, '→ 上游'), el('th', {}, '渠道'), el('th', {}, '协议'), el('th', {}, '单价 in/out'), el('th', {}, '状态'), el('th', {}, '')));
-  for (const m of models) {
-    t.append(el('tr', {},
-      el('td', { class: 'mono' }, m.publicName, m.tags?.length ? el('span', { class: 'muted' }, ' · ' + m.tags.join(',')) : null),
-      el('td', { class: 'mono muted' }, m.upstreamModel),
-      el('td', {}, m.channelName),
-      el('td', {}, proto(m.protocol || m.channelProtocol)),
-      el('td', { class: 'mono muted' }, m.priceInput != null ? \`\${m.priceInput} / \${m.priceOutput}\` : '-'),
-      el('td', {}, m.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
-      el('td', {}, el('div', { class: 'row' },
-        el('button', { class: 'btn sm', onclick: () => api(\`/api/models/\${m.id}\`, { method: 'PATCH', body: JSON.stringify({ enabled: !m.enabled }) }).then(() => go('models')) }, m.enabled ? '停用' : '启用'),
-        el('button', { class: 'btn sm', onclick: () => form('编辑 ' + m.publicName, [
-          { name: 'publicName', label: '对外模型名', value: m.publicName },
-          { name: 'upstreamModel', label: '上游真实模型名', type: 'select', value: m.upstreamModel, depends: 'channelId', optionsFor: (cid) => { const ch = channels.find((c) => c.id === cid); const l = (ch?.modelList || []).filter(Boolean); const opts = l.map((mm) => ({ value: mm, label: mm })); if (!l.includes(m.upstreamModel)) opts.push({ value: m.upstreamModel, label: m.upstreamModel + '（不在列表，保留原值）' }); return opts.length ? opts : [{ value: '', label: '该渠道未配置模型列表', disabled: true }]; } },
-          { name: 'channelId', label: '渠道', type: 'select', value: m.channelId, options: channels.map((c) => ({ value: c.id, label: c.name })) },
-          { name: 'protocol', label: '协议', type: 'select', value: m.protocol || '', options: [{ value: '', label: '跟随渠道' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }] },
-          { name: 'priceInput', label: '输入 $/M', type: 'number', step: '0.01', value: m.priceInput ?? '' },
-          { name: 'priceOutput', label: '输出 $/M', type: 'number', step: '0.01', value: m.priceOutput ?? '' },
-          { name: 'maxOutputTokens', label: 'max_tokens 默认', type: 'number', value: m.maxOutputTokens ?? '' },
-        ], (v) => api(\`/api/models/\${m.id}\`, { method: 'PATCH', body: JSON.stringify({
-            publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || undefined,
-            priceInput: v.priceInput === '' ? null : Number(v.priceInput), priceOutput: v.priceOutput === '' ? null : Number(v.priceOutput),
-            maxOutputTokens: v.maxOutputTokens === '' ? null : Number(v.maxOutputTokens),
-          }) }).then(() => { toast('已更新'); go('models'); })) }, '编辑'),
-        el('button', { class: 'btn sm danger', onclick: () => confirm(\`删除模型路由 \${m.publicName}？\`) && api(\`/api/models/\${m.id}\`, { method: 'DELETE' }).then((r) => { if (r?.warning) toast(r.warning, true); go('models'); }) }, '删除'),
-      ))));
-  }
-  if (!models.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有模型路由')));
-  box.append(t);
-  return box;
-};
-
-// ---------------- 自动路由（model_auto） ----------------
-views.auto = async () => {
-  const [autos, models, rt] = await Promise.all([api('/api/auto-routes'), api('/api/models'), api('/api/auto-health')]);
-  const box = el('div');
-  const hPill = (h) => el('span', { class: 'pill ' + (h >= 0.9 ? 'ok' : h >= 0.4 ? '' : 'err-text') }, '健康 ' + (Math.round(h * 100) / 100).toFixed(2));
-  const editAuto = (a) => form(a ? '编辑 ' + a.publicName : '新增 auto 路由', [
+  const editAuto = (a) => form(a ? '编辑 ' + a.publicName : '新增自动路由', [
     { name: 'publicName', label: 'auto 对外名（agent 的 model 里填它）', value: a?.publicName, ph: 'model_auto', hint: '全局唯一：不得与任何模型外名 / tag / 其它 auto 重名' },
-    { name: 'candidates', label: '候选模型（从模型路由选，可多行）', type: 'cands', full: true, value: a?.candidates || [], hint: '权重=相对分配占比；0 = 禁用该候选。要加新候选？先到「模型」页登记路由。',
+    { name: 'candidates', label: '候选模型（从单模型路由选，可多行）', type: 'cands', full: true, value: a?.candidates || [], hint: '权重=相对分配占比；0 = 禁用该候选。要加新候选？先在本页登记单模型路由。',
       options: models.map((m) => ({ value: m.id, label: m.publicName + '（' + m.channelName + (m.enabled ? '' : ' · 已停用') + '）' }))
-        // 编辑悬空 auto：原候选指向已删路由也要可见可删，不能静默吞掉
         .concat((a?.candidates || []).filter((c) => c.routeId && !models.some((m) => m.id === c.routeId)).map((c) => ({ value: c.routeId, label: (c.name || c.routeId) + '（路由已删除·悬空）' }))) },
     { name: 'stickyTtlMs', label: '粘性 TTL（ms，0=关）', type: 'number', value: a?.stickyTtlMs ?? 300000, hint: '同一 key + auto 名命中后滑动续期；重启网关即清空' },
     { name: 'note', label: '备注', value: a?.note || '', full: true },
@@ -378,38 +352,54 @@ views.auto = async () => {
     if (new Set(candidates.map((c) => c.routeId)).size !== candidates.length) throw new Error('候选模型不能重复');
     if (candidates.some((c) => !Number.isFinite(c.weight) || c.weight < 0)) throw new Error('权重须为 ≥0 的数字');
     if (!candidates.length) throw new Error('至少填一个候选');
-    return api(a ? '/api/auto-routes/' + a.id : '/api/auto-routes', {
-      method: a ? 'PATCH' : 'POST',
-      body: JSON.stringify({ publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined }),
-    }).then(() => { toast('已保存'); go('auto'); });
+    const body = a ? { publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined }
+      : { type: 'auto', publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || undefined };
+    return api(a ? '/api/routes/' + a.id : '/api/routes', { method: a ? 'PATCH' : 'POST', body: JSON.stringify(body) })
+      .then((r) => { if (r && r.error) throw new Error(r.error); toast('已保存'); go('models'); });
   });
 
+  const pickTypeAndAdd = () => form('新增路由', [
+    { name: 'type', label: '选类型', type: 'select', options: [
+      { value: 'single', label: '单模型路由——一个对外名固定对应一个上游模型' },
+      { value: 'auto', label: '自动路由——一个对外名聚合一组候选，健康加权选路、失败自动换' },
+    ] },
+  ], (v) => { if (v.type === 'auto') editAuto(null); else addModel(); });
+
   box.append(el('div', { class: 'toolbar' },
-    el('button', { class: 'btn primary', onclick: () => editAuto(null) }, '+ 新增 auto 路由'),
-    el('span', { class: 'muted' }, '一个对外名聚合一组候选：按请求约束硬过滤 → 会话粘性 → 健康加权随机；失败自动换候选。'),
+    el('button', { class: 'btn primary', onclick: pickTypeAndAdd }, '+ 新增模型'),
+    el('span', { class: 'muted' }, '统一代理只接受这里登记过的 model；自动路由的 model_auto 类名字同样在这里管理。'),
   ));
 
   const t = el('table');
-  t.append(el('tr', {}, el('th', {}, 'auto 名'), el('th', {}, '候选（权重 · 健康）'), el('th', {}, '粘性'), el('th', {}, '状态'), el('th', {}, '')));
-  for (const a of autos) {
+  t.append(el('tr', {}, el('th', {}, '对外名'), el('th', {}, '去向 / 候选（权重·健康）'), el('th', {}, '渠道 / 协议'), el('th', {}, '单价 in/out'), el('th', {}, '粘性'), el('th', {}, '状态'), el('th', {}, '')));
+  for (const r of routes) {
+    const dest = r.type === 'single'
+      ? el('td', { class: 'mono muted' }, '→ ' + r.upstreamModel)
+      : el('td', {}, ...(r.candidates.length ? r.candidates.map((c) => el('div', { style: 'margin:2px 0' },
+          el('span', { class: 'mono' + (c.dangling ? ' err-text' : '') }, (c.name || c.routeId) + (c.dangling ? '（悬空）' : '')),
+          el('span', { class: 'muted' }, ' ×' + c.weight + ' '),
+          c.weight === 0 ? el('span', { class: 'pill' }, '禁用') : c.dangling ? null : hPill(c.health ?? 1),
+          c.routeEnabled === false ? el('span', { class: 'pill' }, '路由停用') : null,
+          c.channelEnabled === false ? el('span', { class: 'pill err-text' }, '渠道停用') : null,
+        )) : [el('span', { class: 'muted' }, '（无候选）')]));
+    const chn = r.type === 'single'
+      ? el('td', {}, r.channelName, el('div', { class: 'muted' }, proto(r.protocol || r.channelProtocol)))
+      : el('td', { class: 'muted' }, '多候选');
     t.append(el('tr', {},
-      el('td', { class: 'mono' }, a.publicName, a.note ? el('div', { class: 'muted', style: 'font-size:11px' }, a.note) : null),
-      el('td', {}, ...(a.candidates.length ? a.candidates.map((c) => el('div', { style: 'margin:2px 0' },
-        el('span', { class: 'mono' + (c.dangling ? ' err-text' : '') }, (c.name || c.routeId) + (c.dangling ? '（悬空）' : '')),
-        el('span', { class: 'muted' }, ' ×' + c.weight + ' '),
-        c.weight === 0 ? el('span', { class: 'pill' }, '禁用') : c.dangling ? null : hPill(c.health ?? 1),
-        c.routeEnabled === false ? el('span', { class: 'pill' }, '路由停用') : null,
-        c.channelEnabled === false ? el('span', { class: 'pill err-text' }, '渠道停用') : null,
-      )) : [el('span', { class: 'muted' }, '（无候选）')])),
-      el('td', { class: 'mono muted' }, a.stickyTtlMs ? Math.round(a.stickyTtlMs / 1000) + 's' : '关'),
-      el('td', {}, a.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
+      el('td', { class: 'mono' }, r.publicName, typePill(r.type),
+        r.type === 'single' && r.tags?.length ? el('span', { class: 'muted' }, ' · ' + r.tags.join(',')) : null,
+        r.type === 'auto' && r.note ? el('div', { class: 'muted', style: 'font-size:11px' }, r.note) : null),
+      dest, chn,
+      el('td', { class: 'mono muted' }, r.type === 'single' ? (r.priceInput != null ? r.priceInput + ' / ' + r.priceOutput : '-') : '-'),
+      el('td', { class: 'mono muted' }, r.type === 'auto' ? (r.stickyTtlMs ? Math.round(r.stickyTtlMs / 1000) + 's' : '关') : '-'),
+      el('td', {}, r.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
       el('td', {}, el('div', { class: 'row' },
-        el('button', { class: 'btn sm', onclick: () => api('/api/auto-routes/' + a.id, { method: 'PATCH', body: JSON.stringify({ enabled: !a.enabled }) }).then(() => go('auto')) }, a.enabled ? '停用' : '启用'),
-        el('button', { class: 'btn sm', onclick: () => editAuto(a) }, '编辑'),
-        el('button', { class: 'btn sm danger', onclick: () => confirm('删除 auto 路由 ' + a.publicName + '？') && api('/api/auto-routes/' + a.id, { method: 'DELETE' }).then(() => go('auto')) }, '删除'),
+        el('button', { class: 'btn sm', onclick: () => api('/api/routes/' + r.id, { method: 'PATCH', body: JSON.stringify({ enabled: !r.enabled }) }).then(() => go('models')) }, r.enabled ? '停用' : '启用'),
+        el('button', { class: 'btn sm', onclick: () => (r.type === 'auto' ? editAuto(r) : editModel(r)) }, '编辑'),
+        el('button', { class: 'btn sm danger', onclick: () => confirm('删除路由 ' + r.publicName + '？') && api('/api/routes/' + r.id, { method: 'DELETE' }).then((z) => { if (z?.warning) toast(z.warning, true); go('models'); }) }, '删除'),
       ))));
   }
-  if (!autos.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有 auto 路由。例：model_auto → [gpt-4o ×3, 本地 qwen ×1]')));
+  if (!routes.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有路由：点「+ 新增模型」，可选单模型直连或自动路由（例：model_auto → [gpt-4o ×3, 本地 qwen ×1]）')));
   box.append(t);
 
   const rc = el('div', { class: 'card', style: 'margin-top:16px' });
@@ -423,10 +413,9 @@ views.auto = async () => {
   if (!(rt.windows || []).length) wt.append(el('tr', {}, el('td', { class: 'muted' }, '窗口内暂无候选流量样本')));
   rc.append(wt);
   box.append(rc);
-  timer = setInterval(() => go('auto'), 15000);
+  timer = setInterval(() => go('models'), 15000);
   return box;
 };
-
 // ---------------- 渠道与号池 ----------------
 views.channels = async () => {
   const channels = await api('/api/channels');
@@ -530,7 +519,7 @@ views.channels = async () => {
 
 // ---------------- 对外 Key ----------------
 views.vkeys = async () => {
-  const [vkeys, models] = await Promise.all([api('/api/vkeys'), api('/api/models')]);
+  const [vkeys, models] = await Promise.all([api('/api/vkeys'), api('/api/routes?type=single')]);
   const box = el('div');
   box.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn primary', onclick: () => form('创建对外 Key', [

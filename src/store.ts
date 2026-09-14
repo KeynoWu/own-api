@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, Settings, VirtualKey } from './types.ts';
+import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, VirtualKey } from './types.ts';
 import { envAny, resolveDataDir } from './bootstrap.ts';
 
 const DATA_DIR = resolveDataDir();
@@ -109,7 +109,7 @@ function freshVKey(): VirtualKey {
 }
 
 function emptyDb(): DBShape {
-  return { version: 2, quotas: {}, channels: [], models: [], autoRoutes: [], vkeys: [], logs: [], settings: defaultSettings() };
+  return { version: 3, quotas: {}, channels: [], routes: [], vkeys: [], logs: [], settings: defaultSettings() };
 }
 
 /** 归一化成字符串数组：支持数组，或每行一个的字符串；去重去空 */
@@ -162,17 +162,38 @@ class Store {
       const base = emptyDb();
       // JSON 合法但形状损坏的数组字段统一回落：此前 null/字符串穿透 merge，启动即崩且绕过 corrupt 备份（审查 C-M1）
       const arr = <T>(v: unknown): T[] | undefined => (Array.isArray(v) ? (v as T[]) : undefined);
+      // 单表 routes（模块合并）；v2 旧库的 models/autoRoutes 两表就地迁移（保留 id 与字段）
+      const rawRoutes = arr<RouteEntry>(parsed.routes);
+      let migrated = false;
+      let routes: RouteEntry[];
+      if (rawRoutes) {
+        routes = rawRoutes.filter((r) => r && typeof r.id === 'string' && typeof r.publicName === 'string' && (r.type === 'single' || r.type === 'auto'));
+      } else {
+        const legacy = parsed as unknown as { models?: unknown; autoRoutes?: unknown };
+        routes = [
+          ...(arr<ModelRoute>(legacy.models) ?? []).map((m) => ({ ...m, type: 'single' as const })),
+          ...(arr<AutoRoute>(legacy.autoRoutes) ?? []).map((a) => ({ ...a, type: 'auto' as const })),
+        ];
+        migrated = Array.isArray(legacy.models) || Array.isArray(legacy.autoRoutes);
+      }
       const merged: DBShape = {
         ...base,
         ...parsed,
         channels: arr<Channel>(parsed.channels) ?? base.channels,
-        models: arr<ModelRoute>(parsed.models) ?? base.models,
-        autoRoutes: arr<AutoRoute>(parsed.autoRoutes) ?? [],
+        routes,
         vkeys: arr<VirtualKey>(parsed.vkeys) ?? base.vkeys,
         logs: arr<RequestLog>(parsed.logs) ?? [],
         quotas: parsed.quotas && typeof parsed.quotas === 'object' && !Array.isArray(parsed.quotas) ? parsed.quotas : {},
         settings: { ...base.settings, ...(parsed.settings || {}) },
       };
+      // 旧双表键不得随 ...parsed 扩散进 v3 库（断言实测抓到：回写会带着 models/autoRoutes 永生）
+      delete (merged as any).models;
+      delete (merged as any).autoRoutes;
+      if (migrated) {
+        // 迁移立即回写：崩在半路也不会每次启动重迁
+        merged.version = 3;
+        console.log('[store] 已将 v2 双表(models/autoRoutes)迁移为单表 routes 并回写');
+      }
       // 老库或手工改坏的库兜底：设置项重新过一遍校验
       const { value } = sanitizeSettings(
         Object.fromEntries(Object.entries(merged.settings).filter(([k]) => k !== 'adminToken')),
@@ -180,6 +201,7 @@ class Store {
       );
       merged.settings = { ...merged.settings, ...value, adminToken: merged.settings.adminToken || base.settings.adminToken };
       if (!Array.isArray(merged.vkeys) || merged.vkeys.length === 0) merged.vkeys = [freshVKey()];
+      if (migrated) this.persist(merged);
       return merged;
     } catch (err) {
       const backup = `${DB_FILE}.corrupt-${Date.now()}`;
@@ -305,10 +327,10 @@ class Store {
   }
   deleteChannel(id: string) {
     // 级联：删掉挂在它下面的模型；同时报告哪些 auto 路由的候选会因此悬空（C8）
-    const doomed = new Set(this.db.models.filter((m) => m.channelId === id).map((m) => m.id));
+    const doomed = new Set(this.singles().filter((m) => m.channelId === id).map((m) => m.id));
     const referenced = this.autoRoutesReferencing(doomed);
     this.db.channels = this.db.channels.filter((c) => c.id !== id);
-    this.db.models = this.db.models.filter((m) => m.channelId !== id);
+    this.db.routes = this.db.routes.filter((r) => !(r.type === 'single' && r.channelId === id));
     this.save();
     return { referencedAutoRoutes: referenced.map((a) => ({ id: a.id, publicName: a.publicName })), deletedModelIds: [...doomed] };
   }
@@ -355,21 +377,43 @@ class Store {
     return true;
   }
 
+  // ---------- routes 单表底座（模块合并：对外仍走语义化访问器） ----------
+  private singles(): ModelRoute[] {
+    return this.db.routes.filter((r): r is ModelRoute => r.type === 'single');
+  }
+  private autos(): AutoRoute[] {
+    return this.db.routes.filter((r): r is AutoRoute => r.type === 'auto');
+  }
+  /** 统一列表（建表序）：单页合并视图用 */
+  listRoutes(): RouteEntry[] {
+    return this.db.routes;
+  }
+  /** 管理面按 id 分派用：不区分类型 */
+  getRoute(id: string): RouteEntry | undefined {
+    return this.db.routes.find((r) => r.id === id);
+  }
   // ---------- model ----------
   listModels() {
-    return this.db.models;
+    return this.singles();
   }
   getModel(id: string) {
-    return this.db.models.find((m) => m.id === id);
+    return this.singles().find((m) => m.id === id);
   }
   findModelByName(name: string) {
     const lower = name.toLowerCase();
-    return this.db.models.find(
+    return this.singles().find(
       (m) => m.publicName.toLowerCase() === lower || m.tags?.some((t) => t.toLowerCase() === lower),
     );
   }
-  createModel(input: Partial<ModelRoute> & { publicName: string; channelId: string; upstreamModel: string }) {
+  createModel(input: Partial<ModelRoute> & { publicName: string; channelId: string; upstreamModel: string }): { model?: ModelRoute; error?: string } {
+    // 模块合并后创建与更新同规撞名校验（auto 名/tags 双向）——此前 POST 可造重名歧义路由
+    const taken = this.routeNameTaken(input.publicName.trim());
+    if (taken) return { error: taken };
+    // W7 语义原样保留：tag 不得遮蔽既有 auto 路由名（旧 admin 校验搬进单表底座）
+    const tagHit = Array.isArray(input.tags) ? input.tags.find((t) => typeof t === 'string' && this.autos().some((a) => a.publicName.toLowerCase() === t.trim().toLowerCase())) : undefined;
+    if (tagHit) return { error: `tag「${tagHit}」与 auto 路由名冲突` };
     const m: ModelRoute = {
+      type: 'single',
       id: newId('md'),
       publicName: input.publicName.trim(),
       channelId: input.channelId,
@@ -389,9 +433,9 @@ class Store {
       createdAt: Date.now(),
       note: input.note,
     };
-    this.db.models.push(m);
+    this.db.routes.push(m);
     this.save();
-    return m;
+    return { model: m };
   }
   updateModel(id: string, patch: Partial<ModelRoute>) {
     const m = this.getModel(id);
@@ -410,16 +454,15 @@ class Store {
       if (['contextWindow', 'maxOutputTokens', 'priceInput', 'priceOutput', 'priceCacheRead', 'priceCacheWrite'].includes(k) && v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) continue;
       next[k] = v;
     }
-    if (typeof next.publicName === 'string' && next.publicName !== m.publicName) {
-      const clash = this.findModelByName(next.publicName);
-      if (clash && clash.id !== id) return 'conflict' as const;
+    // 撞名统一走 routeNameTaken（含 auto 名与任意单模型 tags，双向+W7）
+    if (typeof next.publicName === 'string' && next.publicName !== m.publicName && this.routeNameTaken(next.publicName, id)) {
+      return 'conflict' as const;
     }
-    // auto 名唯一性（双向+W7）：改模型外名/改 tags 都不得遮蔽既有 auto 路由名
     if (typeof next.publicName === 'string' || next.tags !== undefined) {
       const names = [typeof next.publicName === 'string' ? next.publicName : m.publicName, ...(Array.isArray(next.tags) ? next.tags : m.tags || [])]
         .filter(Boolean)
         .map((s) => String(s).toLowerCase());
-      if (this.db.autoRoutes.some((a) => names.includes(a.publicName.toLowerCase()))) return 'conflict' as const;
+      if (this.db.routes.some((r) => r.id !== id && r.type === 'auto' && names.includes(r.publicName.toLowerCase()))) return 'conflict' as const;
     }
     Object.assign(m, next);
     this.save();
@@ -427,27 +470,32 @@ class Store {
   }
   deleteModel(id: string) {
     const referenced = this.autoRoutesReferencing(new Set([id]));
-    this.db.models = this.db.models.filter((m) => m.id !== id);
+    this.db.routes = this.db.routes.filter((r) => r.id !== id);
     this.save();
     return { referencedAutoRoutes: referenced.map((a) => ({ id: a.id, publicName: a.publicName })) };
   }
 
   // ---------- auto routes ----------
   listAutoRoutes() {
-    return this.db.autoRoutes;
+    return this.autos();
   }
   /** auto 名只按 publicName 精确匹配（大小写不敏感）；模型 tags 不参与 auto 名解析 */
   findAutoRouteByName(name: string) {
     const lower = String(name || '').toLowerCase();
-    return this.db.autoRoutes.find((a) => a.publicName.toLowerCase() === lower);
+    return this.autos().find((a) => a.publicName.toLowerCase() === lower);
   }
-  /** 唯一性：不得与其它 auto、ModelRoute.publicName 或其任一 tag 同名 */
+  /** 全局撞名（单表后天然统一）：不得与任一 single 的 publicName/tag 或其它 auto 的 publicName 同名 */
+  private routeNameTaken(name: string, excludeId?: string): string | undefined {
+    const lower = String(name || '').toLowerCase();
+    const hit = this.db.routes.find(
+      (r) => r.id !== excludeId && (r.publicName.toLowerCase() === lower || (r.type === 'single' && r.tags?.some((t) => t.toLowerCase() === lower))),
+    );
+    if (!hit) return undefined;
+    return hit.type === 'auto' ? '已有同名 auto 路由' : `与模型路由「${hit.publicName}」的外名或 tag 冲突`;
+  }
+  /** @deprecated 用 routeNameTaken；保留名给 auto 侧调用的语义 */
   private autoNameTaken(name: string, excludeId?: string): string | undefined {
-    const lower = name.toLowerCase();
-    if (this.db.autoRoutes.some((a) => a.id !== excludeId && a.publicName.toLowerCase() === lower)) return '已有同名 auto 路由';
-    const m = this.db.models.find((x) => x.publicName.toLowerCase() === lower || x.tags?.some((t) => t.toLowerCase() === lower));
-    if (m) return `与模型路由「${m.publicName}」的外名或 tag 冲突`;
-    return undefined;
+    return this.routeNameTaken(name, excludeId);
   }
   private sanitizeCandidates(v: unknown): { candidates?: AutoCandidate[]; error?: string } {
     if (!Array.isArray(v)) return { error: 'candidates 必须是数组' };
@@ -461,6 +509,9 @@ class Store {
       if (typeof weight !== 'number' || !Number.isInteger(weight) || weight < 0 || weight > 10_000) {
         return { error: '候选 weight 必须是 0~10000 的整数（0=禁用）' };
       }
+      // 禁嵌套：候选只能引用单模型路由（悬空 id 仍放行，由删除侧 C8 报告 + 运行时硬过滤兜底）
+      const ref = this.getRoute(routeId);
+      if (ref && ref.type !== 'single') return { error: '候选只能引用单模型路由（auto 不可嵌套）' };
       seen.add(routeId);
       out.push({ routeId, weight });
     }
@@ -476,6 +527,7 @@ class Store {
     const ttl = input?.stickyTtlMs === undefined ? 300_000 : Number(input.stickyTtlMs);
     if (!Number.isInteger(ttl) || ttl < 0 || ttl > 86_400_000) return { error: 'stickyTtlMs 必须是 0~86400000 的整数（0=关粘性）' };
     const auto: AutoRoute = {
+      type: 'auto',
       id: newId('auto'),
       publicName,
       candidates: candidates ?? [],
@@ -484,13 +536,14 @@ class Store {
       createdAt: Date.now(),
       note: typeof input?.note === 'string' ? input.note : undefined,
     };
-    this.db.autoRoutes.push(auto);
+    this.db.routes.push(auto);
     this.save();
     return { auto };
   }
   updateAutoRoute(id: string, patch: any): { auto?: AutoRoute; error?: string; missing?: boolean } {
-    const a = this.db.autoRoutes.find((x) => x.id === id);
-    if (!a) return { missing: true };
+    const found = this.getRoute(id);
+    if (!found || found.type !== 'auto') return { missing: true };
+    const a = found;
     const next: Record<string, unknown> = {};
     if (patch?.publicName !== undefined) {
       const name = typeof patch.publicName === 'string' ? patch.publicName.trim() : '';
@@ -522,15 +575,15 @@ class Store {
     return { auto: a };
   }
   deleteAutoRoute(id: string) {
-    const before = this.db.autoRoutes.length;
-    this.db.autoRoutes = this.db.autoRoutes.filter((a) => a.id !== id);
+    const before = this.db.routes.length;
+    this.db.routes = this.db.routes.filter((r) => !(r.id === id && r.type === 'auto'));
     this.save();
-    return this.db.autoRoutes.length < before;
+    return this.db.routes.length < before;
   }
   /** 哪些 auto 路由引用了这些模型路由（删除前告警，C8） */
   autoRoutesReferencing(routeIds: Set<string>): AutoRoute[] {
     if (!routeIds.size) return [];
-    return this.db.autoRoutes.filter((a) => a.candidates.some((c) => routeIds.has(c.routeId)));
+    return this.autos().filter((a) => a.candidates.some((c) => routeIds.has(c.routeId)));
   }
 
   // ---------- virtual keys ----------

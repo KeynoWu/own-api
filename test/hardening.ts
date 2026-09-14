@@ -296,7 +296,7 @@ const mkChannel = async (name: string, path: string, protocol: 'openai' | 'anthr
   return ch;
 };
 const mkModel = async (publicName: string, channelId: string, upstreamModel: string, extra: any = {}) =>
-  (await admin('/api/models', 'POST', { publicName, channelId, upstreamModel, ...extra })).body;
+  (await admin('/api/routes', 'POST', { type: 'single', publicName, channelId, upstreamModel, ...extra })).body;
 
 // ============================ 1. SSE 分帧与类型嗅探 ============================
 section('1. SSE 分帧与响应类型嗅探');
@@ -570,11 +570,11 @@ section('10. 转换层');
 // ============================ 11. 数据完整性 ============================
 section('11. 数据完整性');
 {
-  const ms: any = await admin('/api/models');
+  const ms: any = await admin('/api/routes?type=single');
   const a = ms.body[0];
   const b = ms.body.find((m: any) => m.publicName !== a.publicName);
-  const clash = await admin(`/api/models/${b.id}`, 'PATCH', { publicName: a.publicName });
-  const after: any = await admin('/api/models');
+  const clash = await admin(`/api/routes/${b.id}`, 'PATCH', { publicName: a.publicName });
+  const after: any = await admin('/api/routes?type=single');
   const dup = after.body.filter((m: any) => m.publicName === a.publicName).length;
   check('模型改名撞名返回 409（审查探针8）', clash.status === 409, String(clash.status));
   check('不再存在两条同名路由', dup === 1, String(dup));
@@ -640,9 +640,9 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('OpenAI→Anthropic 响应：input_tokens 不含缓存（客户端求和不双算）', u?.input_tokens === 20 && u?.cache_read_input_tokens === 80 && u.input_tokens + u.cache_read_input_tokens === 100, JSON.stringify(u));
 }
 {
-  const ms: any = await admin('/api/models');
+  const ms: any = await admin('/api/routes?type=single');
   const m = ms.body[0];
-  const patched: any = await admin(`/api/models/${m.id}`, 'PATCH', { id: 'md_HACKED', note: 'ok' });
+  const patched: any = await admin(`/api/routes/${m.id}`, 'PATCH', { id: 'md_HACKED', note: 'ok' });
   check('PATCH 改不动模型主键 id（note 正常生效）', patched.status === 200 && patched.body?.id === m.id && patched.body?.note === 'ok', `id=${patched.body?.id}`);
   const chs: any = await admin('/api/channels');
   const ch = chs.body[0];
@@ -762,6 +762,43 @@ section('14. 信息暴露、usage 口径与主键完整性');
   blocker.close();
 }
 
+// ---------- 模块合并：v2 双表旧库自动迁移单表（真 spawn 证明升级路径不空库） ----------
+{
+  const { spawn } = await import('node:child_process');
+  const fs3 = await import('node:fs');
+  const migDir = mkdtempSync(join(tmpdir(), 'ownapi-v2mig-'));
+  const legacy = {
+    version: 2, quotas: {},
+    channels: [{ id: 'ch_a', name: 'A', baseUrl: 'http://127.0.0.1:1', protocol: 'openai', keys: [{ id: 'k1', key: 'x', status: 'active', totalRequests: 0, totalErrors: 0, weight: 1 }], enabled: true, createdAt: 1 }],
+    models: [{ id: 'md_a', publicName: 'm-old', channelId: 'ch_a', upstreamModel: 'u', enabled: true, createdAt: 2 }],
+    autoRoutes: [{ id: 'auto_a', publicName: 'auto-old', candidates: [{ routeId: 'md_a', weight: 1 }], stickyTtlMs: 300000, enabled: true, createdAt: 3 }],
+    vkeys: [{ id: 'vk1', key: 'sk-lm-migtestkey0123456789ab', name: 'd', enabled: true, allowedModels: [], createdAt: 4 }],
+    logs: [],
+    settings: { adminToken: 'mig-admin', defaultUpstreamTimeoutMs: 300000, upstreamIdleTimeoutMs: 120000, maxBodyBytes: 67108864, debugHeaders: false, maxKeyRetries: 3, errorThreshold: 3, cooldownBaseMs: 30000, cooldownMaxMs: 900000, logRetention: 2000, autoMaxChainSeconds: 300 },
+  };
+  fs3.writeFileSync(join(migDir, 'db.json'), JSON.stringify(legacy));
+  const mchild = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, LLM_DATA_DIR: undefined, LLM_ADMIN_TOKEN: undefined, OWN_API_DATA_DIR: migDir, OWN_API_PORT: '18820', HOST: '127.0.0.1', OWN_API_OPEN_BROWSER: undefined },
+    stdio: 'ignore', cwd: process.cwd(),
+  });
+  let migUp = false;
+  for (let i = 0; i < 80 && !migUp; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { const rr = await fetch('http://127.0.0.1:18820/api/routes?type=auto', { headers: { 'x-admin-token': 'mig-admin' } }); migUp = rr.status === 200; } catch { /* 还没起来 */ }
+  }
+  check('v2 旧库直接可启动且 /api/routes 工作（升级不空库）', migUp);
+  if (migUp) {
+    const all: any = await (await fetch('http://127.0.0.1:18820/api/routes', { headers: { 'x-admin-token': 'mig-admin' } })).json();
+    check('双表迁移为单表 routes（type 回填、id 保留、候选引用不断）',
+      all.length === 2 && all.some((r: any) => r.type === 'single' && r.id === 'md_a' && r.publicName === 'm-old') && all.some((r: any) => r.type === 'auto' && r.id === 'auto_a' && r.candidates[0]?.routeId === 'md_a'),
+      JSON.stringify(all.map((r: any) => [r.type, r.id])));
+  }
+  mchild.kill();
+  await new Promise<void>((r) => { mchild.on('exit', () => r()); setTimeout(r, 4000); });
+  const migDb = JSON.parse(fs3.readFileSync(join(migDir, 'db.json'), 'utf8'));
+  check('迁移落盘回写：routes 取代 models/autoRoutes（v3）', migDb.version === 3 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined, JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
+  rmSync(migDir, { recursive: true, force: true });
+}
 // RST 面（审查需确认项定案）：客户端 socket 硬断（resetAndDestroy=RST 非 FIN），
 // 必须同样落 499 取消终态且不冷却 key——signal 桥对 RST 的覆盖制度化
 {

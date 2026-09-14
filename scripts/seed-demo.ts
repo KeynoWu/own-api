@@ -44,10 +44,10 @@ const main = async () => {
     keys: [{ key: 'k-ok-claude' }],
   });
 
-  const models = await call('/api/models');
+  const models = await call('/api/routes?type=single');
   const addModel = async (body: any) => {
     if (models.some((m: any) => m.publicName === body.publicName)) return;
-    await call('/api/models', { method: 'POST', body: JSON.stringify(body) });
+    await call('/api/routes', { method: 'POST', body: JSON.stringify({ type: 'single', ...body }) });
     console.log(`  + 模型 ${body.publicName} → ${body.upstreamModel}`);
   };
   await addModel({ publicName: 'gpt-4o', channelId: oa.id, upstreamModel: 'mock-gpt-5', priceInput: 2.5, priceOutput: 10, contextWindow: 128000, maxOutputTokens: 16000 });
