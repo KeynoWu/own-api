@@ -38,6 +38,7 @@ function defaultSettings(): Settings {
     cooldownMaxMs: 15 * 60_000,
     logRetention: 2000,
     autoMaxChainSeconds: n(envAny(['OWN_API_AUTO_CHAIN_SECONDS', 'LLM_AUTO_CHAIN_SECONDS']), 300),
+    autoSaturation: { enabled: true, baseSec: 60, maxSec: 1800 },
   };
 }
 
@@ -85,6 +86,25 @@ export function sanitizeSettings(patch: any, current: Settings): { value: Partia
         }
         out[k] = (v as string) || undefined;
       }
+    } else if (k === 'autoSaturation') {
+      if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+        rejected.push('autoSaturation：需为 { enabled, baseSec, maxSec } 对象');
+        continue;
+      }
+      const cur = current.autoSaturation || { enabled: true, baseSec: 60, maxSec: 1800 };
+      const nv = v as Record<string, unknown>;
+      const enabled = nv.enabled === undefined ? cur.enabled : nv.enabled === true;
+      const nb = (x: unknown, d: number, lo: number, hi: number) => {
+        const x2 = Number(x);
+        return Number.isFinite(x2) ? Math.min(hi, Math.max(lo, Math.floor(x2))) : d;
+      };
+      const baseSec = nb(nv.baseSec, cur.baseSec, 5, 600);
+      const maxSec = nb(nv.maxSec, cur.maxSec, 30, 86_400);
+      if (baseSec > maxSec) {
+        rejected.push('autoSaturation.baseSec：不能大于 maxSec');
+        continue;
+      }
+      out.autoSaturation = { enabled, baseSec, maxSec };
     } else if (k in NUM_BOUNDS) {
       const x = Number(v);
       const bound = NUM_BOUNDS[k];

@@ -457,6 +457,95 @@ const rBadp = await autoReq('auto_badp');
 check('F2.1 对照：无能力声明 400 → D 格短接顶层 400', rBadp.status === 400 && String(rBadp.body?.error?.message).includes('temperature'), String(rBadp.status));
 check('F2.1 对照：D 格短接不烧全链（mGpt 未被尝试）', ((await getLogs('auto_badp'))[0]?.chainAttempts || []).length === 1, JSON.stringify((await getLogs('auto_badp'))[0]?.chainAttempts));
 
+// —— 饱和态（P1 §2）：SAT-1/2/3/4/5/6/7 ——
+const origSettingsP1 = (await api('/api/settings', { headers: ADMIN })).body;
+const patchSt = async (b: any) => api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify(b) });
+await patchSt({ cooldownBaseMs: 1000 }); // key 冷却 1s：配合假时钟让「key 已恢复 + 饱和将尽」可测
+await resetAutoRT();
+// SAT-1：双 k-429 key 渠道单链内两 key 均 429 → 触发 (a) 进入饱和；后续请求不再选它
+const chSat = await mkCh('Auto Sat', 'openai', ['k-429-sat1', 'k-429-sat2']);
+const mSatR = (await mkModel({ publicName: 'auto-m-sat', channelId: chSat.id, upstreamModel: 'mock-gpt-5' })).body;
+const aSat = await mkAuto({ publicName: 'auto_sat', candidates: [{ routeId: mSatR.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const rSat1 = await autoReq('auto_sat');
+check('SAT-1 双 k-429 触发饱和、链续到 200', rSat1.status === 200 && (await getLogs('auto_sat'))[0]?.routedTo === 'auto-m-gpt', String(rSat1.status));
+const sat1 = (await autoHealth()).saturation?.find((s: any) => s.routeId === mSatR.id);
+check('SAT-1 /auto-health 出饱和条目（60s 首档退避）', sat1?.leftSec > 50 && sat1?.leftSec <= 60, JSON.stringify(sat1));
+const rSat2 = await autoReq('auto_sat');
+check('SAT-1 饱和期内不再尝试该候选（chainAttempts 无它）', rSat2.status === 200 && !(await getLogs('auto_sat'))[0]?.chainAttempts?.some((x: any) => x.routeId === mSatR.id), JSON.stringify((await getLogs('auto_sat'))[0]?.chainAttempts));
+// SAT-2/7：retry-after 7200s 突破 maxSec；合成 429 响应头不被 cooldownMaxMs(900s) 钳制；报错可区分
+const chSatRa = await mkCh('Auto SatRa', 'openai', ['k-429ra7200-a', 'k-429ra7200-b']);
+const mSatRaR = (await mkModel({ publicName: 'auto-m-satra', channelId: chSatRa.id, upstreamModel: 'mock-gpt-5' })).body;
+await mkAuto({ publicName: 'auto_satra', candidates: [{ routeId: mSatRaR.id, weight: 1 }], stickyTtlMs: 0 });
+const rSatRa1 = await autoReq('auto_satra');
+check('SAT-2 触发请求 429（单候选链耗尽透传）', rSatRa1.status === 429, String(rSatRa1.status));
+const rSatRa2 = await autoReq('auto_satra');
+const raHdr = Number(rSatRa2.headers.get('retry-after'));
+check('SAT-2 合成 429 retry-after≈7200（>cooldownMaxMs 900s，未钳制）', rSatRa2.status === 429 && raHdr > 3600 && raHdr <= 7200, String(raHdr));
+check('SAT-7 合成 429 报错含「所有候选饱和」（F2.2 可区分）', String(rSatRa2.body?.error?.message).includes('所有候选饱和'), String(rSatRa2.body?.error?.message).slice(0, 80));
+// SAT-3 后半：剩余 <5s → 探测例外仍尝试（假时钟 +57s；key 冷却 1s 已真实恢复）
+const chSatP = await mkCh('Auto SatP', 'openai', ['k-429-satp1', 'k-429-satp2']);
+const mSatPR = (await mkModel({ publicName: 'auto-m-satp', channelId: chSatP.id, upstreamModel: 'mock-gpt-5' })).body;
+const aSatP = await mkAuto({ publicName: 'auto_satp', candidates: [{ routeId: mSatPR.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+await autoReq('auto_satp'); // 触发饱和（ra '1' → 退避 60s 主导）
+await new Promise((r) => setTimeout(r, 2100)); // key 冷却 1s 真实过期
+const autoMod = await import('../src/auto.ts');
+autoMod.setClockForTest(() => Date.now() + 57_000); // 假时钟：饱和剩 ~3s <5s
+const rSatP2 = await autoReq('auto_satp');
+autoMod.setClockForTest(() => Date.now());
+check('SAT-3 剩余<5s 探测例外仍尝试饱和候选', (await getLogs('auto_satp'))[0]?.chainAttempts?.[0]?.routeId === mSatPR.id && rSatP2.status === 200, JSON.stringify((await getLogs('auto_satp'))[0]?.chainAttempts));
+// SAT-4：探测出成功 → 饱和清零退避回 1 档
+const chSat4 = await mkCh('Auto Sat4', 'openai', ['k-429once1-s4a', 'k-429once1-s4b']);
+const mSat4R = (await mkModel({ publicName: 'auto-m-sat4', channelId: chSat4.id, upstreamModel: 'mock-gpt-5' })).body;
+const aSat4 = await mkAuto({ publicName: 'auto_sat4', candidates: [{ routeId: mSat4R.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const rSat41 = await autoReq('auto_sat4');
+await new Promise((r) => setTimeout(r, 2100));
+autoMod.setClockForTest(() => Date.now() + 57_000);
+const rSat42 = await autoReq('auto_sat4');
+autoMod.setClockForTest(() => Date.now());
+check('SAT-4 探测成功 → 200 且饱和清零', rSat42.status === 200 && (await getLogs('auto_sat4'))[0]?.routedTo === 'auto-m-sat4' && !(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat4R.id), `${rSat42.status} ${JSON.stringify((await autoHealth()).saturation)}`);
+// SAT-5：粘性目标饱和 → 绕行 + 续期 + degraded 标；恢复后非绕行命中转正
+await resetAutoRT();
+// 粘性须建在 mSat5 上：先经 k-ok 渠道成功建粘，再 PATCH 模型 channelId 切到 429 渠道（一次性 429 key）
+const chSat5 = await mkCh('Auto Sat5', 'openai', ['k-429once1-s5a', 'k-429once1-s5b']);
+const chOk5 = await mkCh('Auto Ok5', 'openai', ['k-ok-s5']);
+const mSat5R = (await mkModel({ publicName: 'auto-m-sat5', channelId: chOk5.id, upstreamModel: 'mock-gpt-5' })).body;
+await mkAuto({ publicName: 'auto_sats', candidates: [{ routeId: mSat5R.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 60000 });
+await autoReq('auto_sats'); // 命中 mSat5 200 → 建粘（health 1.0 ≥ 0.6）
+await patchModel(mSat5R.id, { channelId: chSat5.id });
+const rS2 = await autoReq('auto_sats'); // 粘性命中 → 链内双 429 → 饱和；M1 绕行；gpt 200
+check('SAT-5 前置：饱和由粘性目标触发且本轮绕行 200', rS2.status === 200 && (await getLogs('auto_sats'))[0]?.routedTo === 'auto-m-gpt', `${rS2.status} ${(await getLogs('auto_sats'))[0]?.routedTo}`);
+const rS3 = await autoReq('auto_sats'); // 假时钟未到（60s 内 >5s）→ 绕行 + 续期 + degraded
+let stickyNow = (await api('/api/auto-health?route=auto_sats', { headers: ADMIN })).body.stickyList?.[0];
+check('SAT-5 饱和绕行：绑定保留 + degraded 标', stickyNow?.routeId === mSat5R.id && stickyNow?.degraded === true, JSON.stringify(stickyNow));
+const sat5 = (await autoHealth()).saturation?.find((s: any) => s.routeId === mSat5R.id);
+const fakeSkew = sat5 ? Math.max(0, (sat5.until - Date.now()) - 3000) : 0; // 推进到剩 ~3s
+await new Promise((r) => setTimeout(r, 2100)); // key 冷却 1s 真实过期
+autoMod.setClockForTest(() => Date.now() + fakeSkew);
+const rS4 = await autoReq('auto_sats'); // 探测例外放回 → 粘性正常命中转正 + 成功清零
+autoMod.setClockForTest(() => Date.now());
+stickyNow = (await api('/api/auto-health?route=auto_sats', { headers: ADMIN })).body.stickyList?.[0];
+check('SAT-5 探测命中：degraded 转正 + 饱和清零', rS4.status === 200 && (await getLogs('auto_sats'))[0]?.routedTo === 'auto-m-sat5' && stickyNow?.degraded === false && !(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat5R.id), `${rS4.status} ${(await getLogs('auto_sats'))[0]?.routedTo} ${JSON.stringify(stickyNow)}`);
+// SAT-6：滑动窗 (b)——跨 key 各计 1、单次不触发、G7 成功清零；maxKeyRetries=1 让每请求只打一把 key。
+// 冷却恢复默认 30s（1s 冷却会让 key 太快复活打乱序列）；渠道 keys 不可 PATCH（SEC 白名单）→ 模型 channelId 切换
+await patchSt({ cooldownBaseMs: origSettingsP1.cooldownBaseMs, maxKeyRetries: 1 });
+await resetAutoRT();
+const chSat6 = await mkCh('Auto Sat6', 'openai', ['k-429-s6a', 'k-429-s6b', 'k-429-s6c']);
+const chOk6 = await mkCh('Auto Ok6', 'openai', ['k-ok-s6']);
+const mSat6R = (await mkModel({ publicName: 'auto-m-sat6', channelId: chSat6.id, upstreamModel: 'mock-gpt-5' })).body;
+await mkAuto({ publicName: 'auto_sat6', candidates: [{ routeId: mSat6R.id, weight: 1 }], stickyTtlMs: 0 });
+const r61 = await autoReq('auto_sat6'); // g1 429（win=1，g2/g3 可用 → (a) 不触发）
+check('SAT-6 单次 429 不触发饱和', r61.status === 429 && !(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat6R.id), String(r61.status));
+await patchModel(mSat6R.id, { channelId: chOk6.id });
+await autoReq('auto_sat6'); // ok → 200 → G7 窗清零
+check('SAT-6/G7 前置：成功后窗清零', !(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat6R.id), 'win cleared');
+await patchModel(mSat6R.id, { channelId: chSat6.id });
+await autoReq('auto_sat6'); // g1 冷却中 → g2 429 → win={g2}=1 → 不触发
+check('SAT-6/G7 清零后单次 429 仍不触发（旧 g1 计数未阴魂不散）', !(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat6R.id), 'still 1');
+await autoReq('auto_sat6'); // g2 冷却 → g3 429 → win={g2,g3} 跨 key ≥2 → 触发 (b)
+check('SAT-6 60s 滑动窗跨 key ≥2 触发（不以链为作用域）', !!(await autoHealth()).saturation?.some((s: any) => s.routeId === mSat6R.id), JSON.stringify((await autoHealth()).saturation));
+await patchSt({ cooldownBaseMs: origSettingsP1.cooldownBaseMs, maxKeyRetries: origSettingsP1.maxKeyRetries });
+await resetAutoRT();
+
 await resetAutoRT();
 const aR429 = await mkAuto({ publicName: 'auto_429', candidates: [{ routeId: mRateR.id, weight: 1 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
 const r429 = await autoReq('auto_429');

@@ -129,12 +129,12 @@ export function recordSuccess(channel: Channel, key: ChannelKey) {
   store.save();
 }
 
-/** 从 429 响应头解析 retry-after（秒或 http-date） */
+/** 从 429 响应头解析 retry-after（秒或 http-date）；G10：0/负数视同未给（'0' 语义是立即可用，交退避基线而非钉 0ms） */
 export function parseRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
   const secs = Number(header);
-  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  if (Number.isFinite(secs) && secs > 0) return secs * 1000;
   const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  if (!Number.isNaN(date) && date - Date.now() > 0) return date - Date.now();
   return undefined;
 }

@@ -9,7 +9,7 @@ import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
 import { APP_VERSION } from './version.gen.ts';
-import { clearHealth, clearHealthFor, clearSticky, clearStickyForRoute, healthSnapshot, stickyCount, stickyCountForRoute } from './auto.ts';
+import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
 import type { Channel } from './types.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -645,20 +645,32 @@ export function createAdmin(): Hono {
     });
   });
 
-  /** 运行时观测出口（N6）：健康分窗口 + 粘性条目数；reset 供测试与调试 */
+  /** 运行时观测出口（N6 + R8）：健康分窗口 + 粘性 + 饱和态；reset 供测试与调试 */
   app.get('/auto-health', (c) => {
     const snap = healthSnapshot().map((h) => {
       const m = store.getModel(h.routeId);
       return { ...h, name: m?.publicName, channel: m ? store.getChannel(m.channelId)?.name : undefined };
     });
+    // 饱和观测（R8）：行内并 saturatedUntil/leftSec/n；saturation 数组单列全量
+    const satMap = new Map(saturationSnapshot().map((s) => [s.routeId, s]));
+    const windows = snap.map((h) => {
+      const s = satMap.get(h.routeId);
+      return s ? { ...h, saturatedUntil: s.until, satLeftSec: s.leftSec, satN: s.n } : h;
+    });
     const routeQ = c.req.query('route');
-    if (routeQ) return c.json({ windows: snap, stickyEntries: stickyCount(), stickyForRoute: stickyCountForRoute(String(routeQ)) });
-    return c.json({ windows: snap, stickyEntries: stickyCount() });
+    if (routeQ) return c.json({ windows, stickyEntries: stickyCount(), stickyForRoute: stickyCountForRoute(String(routeQ)), stickyList: stickyListForRoute(String(routeQ)), saturation: [...satMap.values()] });
+    return c.json({ windows, stickyEntries: stickyCount(), saturation: [...satMap.values()] });
   });
   app.post('/auto-health/reset', (c) => {
     clearHealth();
     clearSticky();
+    clearSaturation(); // 四态复位（§2 复位口：health/sticky/saturation/speed——speed 于 P2 接入）
     return c.json({ ok: true });
+  });
+  app.post('/auto-health/saturation/clear', (c) => {
+    const b = c.req.query('route');
+    const n = b ? clearSaturationForRoute(String(b)) : clearSaturation();
+    return c.json({ ok: true, cleared: n });
   });
 
   app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));

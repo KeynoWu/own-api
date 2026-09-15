@@ -75,7 +75,7 @@ export function health(routeId: string): number {
 
 /** 管理台观测出口：窗口内所有候选的 ok/fail/health */
 export function healthSnapshot() {
-  const now = Date.now();
+  const now = clockNow();
   const out: { routeId: string; ok: number; fail: number; health: number }[] = [];
   for (const [routeId, raw] of windows) {
     const list = prune(raw, now);
@@ -102,6 +102,8 @@ export function clearHealthFor(routeId: string) {
 export interface StickyEntry {
   routeId: string;
   expiresAt: number;
+  /** 饱和绕行续期标记（F1.1/SAT-5）：绑定在目标的兜档期续上的；非绕行命中即清除转正 */
+  degraded?: boolean;
 }
 const STICKY_MAX = 1000;
 const sticky = new Map<string, StickyEntry>();
@@ -113,20 +115,21 @@ export function getSticky(vkeyId: string, autoName: string): StickyEntry | undef
   const k = stickKey(vkeyId, autoName);
   const e = sticky.get(k);
   if (!e) return undefined;
-  if (e.expiresAt <= Date.now()) {
+  if (e.expiresAt <= clockNow()) {
     sticky.delete(k);
     return undefined;
   }
   return e;
 }
 
-/** 命中续期（滑动 TTL，C5）；顺带刷新 LRU 位置 */
-export function touchSticky(vkeyId: string, autoName: string, ttlMs: number) {
+/** 命中续期（滑动 TTL，C5）；顺带刷新 LRU 位置。degraded=true 仅饱和绕行续期（F1.1），命中转正默认 false */
+export function touchSticky(vkeyId: string, autoName: string, ttlMs: number, degraded = false) {
   const k = stickKey(vkeyId, autoName);
   const e = sticky.get(k);
   if (!e) return;
   sticky.delete(k);
-  e.expiresAt = Date.now() + ttlMs;
+  e.expiresAt = clockNow() + ttlMs;
+  e.degraded = degraded || undefined;
   sticky.set(k, e);
 }
 
@@ -134,7 +137,7 @@ export function touchSticky(vkeyId: string, autoName: string, ttlMs: number) {
 export function setSticky(vkeyId: string, autoName: string, routeId: string, ttlMs: number) {
   const k = stickKey(vkeyId, autoName);
   sticky.delete(k);
-  sticky.set(k, { routeId, expiresAt: Date.now() + ttlMs });
+  sticky.set(k, { routeId, expiresAt: clockNow() + ttlMs });
   while (sticky.size > STICKY_MAX) sticky.delete(sticky.keys().next().value as string);
 }
 
@@ -192,4 +195,127 @@ export function pickWeighted<T>(items: T[], weightOf: (t: T) => number, rand: ()
     if (r < 0) return items[i];
   }
   return items[items.length - 1];
+}
+
+// ---------------------------------------------------------------- 饱和态（§2，AR-4）
+
+/** 饱和配置（settings.autoSaturation，热读；缺省兜底开） */
+export interface SaturationConfig { enabled: boolean; baseMs: number; maxMs: number }
+export const SAT_DEFAULTS: SaturationConfig = { enabled: true, baseMs: 60_000, maxMs: 1_800_000 };
+/** settings.autoSaturation（秒）→ 运行时配置（毫秒）；未配置时兜底开（旧库升级不回退语义） */
+export function satConfigOf(s?: { enabled: boolean; baseSec: number; maxSec: number }): SaturationConfig {
+  if (!s) return SAT_DEFAULTS;
+  return { enabled: s.enabled, baseMs: s.baseSec * 1000, maxMs: s.maxSec * 1000 };
+}
+
+interface SatEntry { until: number; n: number }
+const saturated = new Map<string, SatEntry>();
+
+// 触发 (b)（F1.2/G7/G10）：60s 滑动窗内跨 key 累计 ≥2 次 429——同 key 只计首值，
+// 窗内出现成功样本即整窗清零（G7：健康高并发候选的零星 429 是常态，绝不误杀）
+const SAT_WINDOW_MS = 60_000;
+const satWin = new Map<string, Map<string, number>>(); // routeId → (keyId → 首次 429 ts)
+const SAT_ABS_MAX_MS = 24 * 3_600_000; // G8：retry-after 可突破 maxSec，但 24h 绝对帽（pool 实证过 11.6 天响应头）
+export const SAT_PROBE_MS = 5_000;     // 剩余 <5s 且预算足 → 仍试（探测例外）
+
+/** 饱和剩余毫秒（0=未饱和）。gateway 的存活集过滤/探测例外/G1 合成 429 全走此口——与时钟钩子一致，可测 */
+export function satLeftMs(routeId: string): number {
+  const until = saturatedUntil(routeId);
+  return until ? until - clockNow() : 0;
+}
+
+/** 候选是否处于饱和期；返回 0 = 未饱和。过期惰性清除 */
+export function saturatedUntil(routeId: string): number {
+  const e = saturated.get(routeId);
+  if (!e) return 0;
+  if (e.until <= clockNow()) {
+    saturated.delete(routeId);
+    return 0;
+  }
+  return e.until;
+}
+
+/**
+ * 429 入窗（attemptRoute key 循环逐 key 调用）。同 key 窗内只计首值（G10：key 级冷却已罚过）；
+ * 跨 key ≥2 → 触发 (b)。饱和期内的探测 429 不入窗。仅记状态，不参与健康分（C11 不变）。
+ */
+export function satNote429(routeId: string, keyId: string, upstreamRetryAfterMs: number | undefined, cfg: SaturationConfig) {
+  if (!routeId || !cfg.enabled) return;
+  const now = clockNow();
+  if (saturatedUntil(routeId)) return;
+  const win = satWin.get(routeId) || new Map<string, number>();
+  for (const [k, ts] of win) if (now - ts > SAT_WINDOW_MS) win.delete(k);
+  if (!win.has(keyId)) win.set(keyId, now);
+  satWin.set(routeId, win);
+  if (win.size >= 2) triggerSaturation(routeId, undefined, cfg, now);
+}
+
+/** 成功样本（G7 + SAT-4）：清零滑动窗计数；若处于饱和期（只可能是 <5s 探测路径试出来的）→ 整个饱和态清零、退避回 1 档 */
+export function satNoteSuccess(routeId: string) {
+  if (!routeId) return;
+  satWin.delete(routeId);
+  saturated.delete(routeId);
+}
+
+/**
+ * 进入/续期饱和（触发 (a)：号池全 key 429，由 gateway 在 candidate_fail 后调用；(b)：滑动窗，内部调用）。
+ * 时长 = min(base × 2^(n-1), maxSec)；上游显式 retry-after 取 max(退避, retry-after) 且不受 maxSec 约束，
+ * 但受 24h 绝对帽（F4.3/G8）。G11 单调：已饱和时只延长不缩短；同一饱和 episode 内重触发不递增 n
+ * （防 (a)+(b) 同请求双触发把退避翻两档）；探测成功（SAT-4）是唯一清零路径。
+ */
+export function triggerSaturation(routeId: string, upstreamRetryAfterMs: number | undefined, cfg: SaturationConfig, now = clockNow()): number {
+  if (!routeId || !cfg.enabled) return 0;
+  const prev = saturated.get(routeId);
+  if (prev && prev.until > now) {
+    const backoff = Math.min(cfg.baseMs * Math.pow(2, prev.n - 1), cfg.maxMs); // 同一 episode：当档公式，不预支下一档
+    let until2 = now + backoff;
+    if (upstreamRetryAfterMs && upstreamRetryAfterMs > 0) until2 = Math.max(until2, now + upstreamRetryAfterMs);
+    saturated.set(routeId, { until: Math.max(prev.until, Math.min(until2, now + SAT_ABS_MAX_MS)), n: prev.n });
+    satWin.delete(routeId);
+    return saturated.get(routeId)!.until;
+  }
+  const n = (prev?.n ?? 0) + 1;
+  const backoff = Math.min(cfg.baseMs * Math.pow(2, n - 1), cfg.maxMs);
+  let until = now + backoff;
+  if (upstreamRetryAfterMs && upstreamRetryAfterMs > 0) until = Math.max(until, now + upstreamRetryAfterMs);
+  saturated.set(routeId, { until: Math.min(until, now + SAT_ABS_MAX_MS), n });
+  satWin.delete(routeId);
+  return saturated.get(routeId)!.until;
+}
+
+/** 管理台观测（R8）：未过期饱和条目（含剩余秒数与连续档位） */
+export function saturationSnapshot() {
+  const now = clockNow();
+  const out: { routeId: string; until: number; leftSec: number; n: number }[] = [];
+  for (const [routeId, e] of saturated) {
+    if (e.until <= now) {
+      saturated.delete(routeId);
+      continue;
+    }
+    out.push({ routeId, until: e.until, leftSec: Math.ceil((e.until - now) / 1000), n: e.n });
+  }
+  return out;
+}
+
+export function clearSaturation() {
+  saturated.clear();
+  satWin.clear();
+}
+
+/** 按路由名清饱和（管理台「清除饱和」按钮；返回清除条数） */
+export function clearSaturationForRoute(routeId: string): number {
+  const had = saturated.delete(routeId) ? 1 : 0;
+  satWin.delete(routeId);
+  return had;
+}
+
+/** /auto-health?route= 的粘性明细出口（SAT-5 断言 degraded 用） */
+export function stickyListForRoute(autoName: string): { vkeyId: string; routeId: string; expiresAt: number; degraded: boolean }[] {
+  const suffix = stickySuffix(autoName);
+  const out: { vkeyId: string; routeId: string; expiresAt: number; degraded: boolean }[] = [];
+  for (const [k, e] of sticky) {
+    if (!k.endsWith(suffix)) continue;
+    out.push({ vkeyId: k.slice(0, k.indexOf('\u0000')), routeId: e.routeId, expiresAt: e.expiresAt, degraded: !!e.degraded });
+  }
+  return out;
 }

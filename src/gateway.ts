@@ -26,7 +26,7 @@ import {
 import { availableKeyCount, classifyFailure, parseRetryAfter, pickKey, recordFailure, recordSuccess } from './pool.ts';
 import { callUpstream, extractUpstreamError, sniffStreamBody, type Endpoint } from './upstream.ts';
 import { admitDailyQuota, admitRequest, computeCost, recordQuota, releaseQuota } from './usage.ts';
-import { STICKY_KEEP, STICKY_RESTICK, deleteSticky, getSticky, health as healthOf, pickWeighted, recordAttempt, setSticky, touchSticky } from './auto.ts';
+import { SAT_PROBE_MS, satConfigOf, satLeftMs, STICKY_KEEP, STICKY_RESTICK, deleteSticky, getSticky, health as healthOf, pickWeighted, recordAttempt, satNote429, satNoteSuccess, setSticky, touchSticky, triggerSaturation } from './auto.ts';
 import type { AutoCandidate, AutoRoute, ChainAttempt, Channel, ModelRoute, Protocol, RequestLog, Settings, VirtualKey } from './types.ts';
 
 export type ClientProtocol = 'openai' | 'anthropic';
@@ -400,6 +400,9 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
       }
       const upstreamRetryAfter = parseRetryAfter(up.headers.get('retry-after'));
       const { retryable } = recordFailure(channel, key, kind, brief, upstreamRetryAfter);
+      // 饱和滑动窗记账（AR-4 触发 (b)）：429 逐 key 入 60s 窗（G10 同 key 只计首值），跨 key ≥2 即触发；
+      // 只对真实路由记（route 缺失的兜底路径无候选概念）
+      if (kind === 'rate_limit' && route) satNote429(route.id, key.id, upstreamRetryAfter, satConfigOf(a.settings.autoSaturation));
       retries.push(`[${channel.name}/${maskKey(key.key)}] ${up.status} ${brief}`);
       lastStatus = up.status >= 500 ? 502 : up.status;
       lastMessage = brief;
@@ -424,6 +427,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
 
     // ---------- 成功 ----------
     recordSuccess(channel, key);
+    if (route) satNoteSuccess(route.id); // G7/SAT-4：滑动窗清零；探测命中则整个饱和态清零
     const usage: Usage = emptyUsage();
     const meta: StreamMeta = { publicName: aliasName, usage, scrub: (s) => scrubOut(s, key.key) };
     let firstContentAt = 0;
@@ -871,7 +875,39 @@ async function runAuto(ctx: AutoRunCtx) {
 
   const inputEst = estimateInputTokens(chatBody);
   const evals = evaluateCandidates(autoRoute, vkey, chatBody, wire, wantsStream, inputEst);
-  const survivors = evals.filter((e): e is SurvivingEval => e.ok);
+  // ② 饱和过滤（AR-4）：饱和候选保留在 evals（transient=true/reason=saturated——粘性绕行分支读它判定"不删绑定"），
+  // 仅移出存活集。探测例外（SAT-3 后半）：剩余 <5s 且链预算装得下最坏一跳 → 放回（成败照常，成功即清零）
+  const satCfg = satConfigOf(settings.autoSaturation);
+  const satLeft = new Map<string, number>(); // routeId → 剩余 ms（仅未放回探测的）
+  if (satCfg.enabled) {
+    // G1 口径：软排除（含「key 全冷却」瞬态）不掩盖饱和——硬排除才不参与饱和回退。
+    // 软排除者覆写 reason='saturated'：粘性绕行续期（F1.1）按饱和语义走
+    for (const e of evals) {
+      if (!e.ok && !e.transient) continue;
+      const left = satLeftMs(e.cand.routeId);
+      if (left <= 0) continue;
+      if (e.ok) {
+        e.transient = true;
+        e.reason = 'saturated';
+      } else {
+        e.reason = 'saturated';
+      }
+      satLeft.set(e.cand.routeId, left);
+    }
+    // 探测例外（SAT-3 后半）：剩余 <5s 且链预算装得下最坏一跳 → 放回存活集（仅 ①通过者——
+    // key 全冷却的探测无意义，放回也只会空池速败）
+    const entryBudgetMs = Math.max(10, settings.autoMaxChainSeconds || 300) * 1000;
+    for (const e of evals) {
+      if (!e.ok || e.reason !== 'saturated') continue;
+      const left = satLeft.get(e.cand.routeId) || 0;
+      if (left < SAT_PROBE_MS && entryBudgetMs >= Math.max(5_000, e.channel?.timeoutMs || settings.defaultUpstreamTimeoutMs)) {
+        satLeft.delete(e.cand.routeId);
+        e.reason = undefined;
+        e.transient = false;
+      }
+    }
+  }
+  const survivors = evals.filter((e): e is SurvivingEval => e.ok && !satLeft.has(e.cand.routeId));
   // F5.2/G19 excluded 层快照：入口评估的剔除明细落日志（文案与空存活 404 同源、同一脱敏规则：
   // 未授权候选名退化序号防 ACL 探针、渠道名抹掉防拓扑外泄）
   const chainExcluded = evals
@@ -889,6 +925,17 @@ async function runAuto(ctx: AutoRunCtx) {
     });
   if (chainExcluded.length) log.chainExcluded = chainExcluded;
   if (!survivors.length) {
+    // G1 空存活三分支：存在饱和候选（无论是否同时软排除，含「key 全冷却」瞬态）→ 合成 429；
+    // 仅硬过滤 / 仅软排除 → 404（现状）。合成 retry-after = clamp(min(until)-now, 1s, 24h)，
+    // 不经 retryAfterHeader（其 900s 钳制会吃掉 F4.3 的突破语义，SAT-2 断言对象是响应头）。
+    // 报错固定「所有候选饱和」（F2.2，与上游透传 429 可区分）。
+    if (satLeft.size) {
+      const earliestLeft = Math.min(...satLeft.values());
+      const waitSec = Math.min(86_400, Math.max(1, Math.ceil(earliestLeft / 1000)));
+      const msg = `所有候选饱和（最早 ${waitSec}s 后恢复）`;
+      finalize({ status: 429, ok: false, error: msg, retries: [] });
+      return fail(c, wire, 429, msg, { 'retry-after': String(waitSec) });
+    }
     // 理由保留（运维排障刚需）但按 key 脱敏（审查 A-L 拓扑外泄）：未授权候选名退化为序号（不得成为 ACL 探针），
     // 渠道名一律抹掉——渠道命名是内部拓扑
     const detail = evals.length
@@ -934,7 +981,12 @@ async function runAuto(ctx: AutoRunCtx) {
       } else if (!target) {
         const failedEval = evals.find((e) => e.cand.routeId === entry.routeId);
         if (!failedEval || !failedEval.transient) deleteSticky(vkey.id, autoName); // 改写清单：彻底换绑定
-        else stickyBypassed = true; // 瞬态：记录保留，本轮绕行
+        else {
+          stickyBypassed = true; // 瞬态：记录保留，本轮绕行
+          // F1.1 作用域三分：饱和绕行 → 续期 + degraded 标（SAT-5；非绕行命中经 touchSticky 默认转正）；
+          // 慢降级（P2）与结构性排除（tools/视觉）→ 不续期——绑定自然过期后按重粘条件重建，避免锁死在不可用目标
+          if (failedEval.reason === 'saturated') touchSticky(vkey.id, autoName, autoRoute.stickyTtlMs, true);
+        }
       } else if (target.health < STICKY_KEEP) {
         deleteSticky(vkey.id, autoName);
       }
@@ -1061,6 +1113,11 @@ async function runAuto(ctx: AutoRunCtx) {
     if (outcome.status === 400 && outcome.message.includes('超出候选窗口')) {
       overflowAttempts++;
       overflowMaxWin = Math.max(overflowMaxWin, cur.route.contextWindow || 0);
+    }
+    // 饱和触发 (a)（AR-4）：号池所有可用 key 在链内均 429（key 级冷却先行且已耗尽）；
+    // retry-after 优先取聚合值（F4.3，突破 maxSec 但 24h 帽在 triggerSaturation 内）
+    if (outcome.rateLimit && satCfg.enabled && availableKeyCount(cur.channel) === 0) {
+      triggerSaturation(cur.cand.routeId, outcome.retryAfterMs, satCfg);
     }
     // M1（v2.4 裁决）：粘性命中候选运行时判负（N8 掏空/5xx/超时）→ 本轮视同绕行：
     // 其后成功候选不得覆写原绑定。瞬态运行时失败不在改写清单；health<0.4 由下轮自然松手

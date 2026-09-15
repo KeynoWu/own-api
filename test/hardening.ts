@@ -1295,9 +1295,38 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   check('NAN-1 单个 NaN 权重按 0 兜底（不触发均匀退化）', picked?.n === 'b', String(picked?.n));
   const picked2 = auto.pickWeighted(items, () => Number.NaN, () => 0.5);
   check('NAN-1 全 NaN 退化为均匀（不抛错不卡死）', !!picked2, String(picked2?.n));
+  // SAT-8/G8/SAT-4 单元：饱和态状态机（时钟注入直测）
+  auto.clearSaturation();
+  now = 1_900_000_000_000;
+  const cfgS = auto.satConfigOf({ enabled: true, baseSec: 60, maxSec: 1800 });
+  auto.triggerSaturation('u-sat8', 7_200_000, cfgS); // ra 2h：突破 maxSec(1800s)
+  check('SAT-2/F4.3 retry-after 突破 maxSec', auto.saturatedUntil('u-sat8') - now === 7_200_000, String(auto.saturatedUntil('u-sat8') - now));
+  now += 3_600_000; // +1h
+  auto.triggerSaturation('u-sat8', 600_000, cfgS); // 饱和期内重触发 ra 10min
+  check('SAT-8/G11 单调：重触发不得缩短 until', auto.saturatedUntil('u-sat8') === 1_900_000_000_000 + 7_200_000, String(auto.saturatedUntil('u-sat8')));
+  auto.triggerSaturation('u-sat8', 30 * 24 * 3_600_000, cfgS); // ra 30 天
+  check('G8 24h 绝对帽（撒谎响应头上限）', auto.saturatedUntil('u-sat8') - now <= 24 * 3_600_000, String(auto.saturatedUntil('u-sat8') - now));
+  auto.satNoteSuccess('u-sat8');
+  check('SAT-4 探测成功 → 饱和清零（退避回 1 档）', auto.saturatedUntil('u-sat8') === 0, String(auto.saturatedUntil('u-sat8')));
+  // SAT-6 单元：(b) 滑动窗口径
+  auto.clearSaturation();
+  auto.satNote429('u-b', 'k1', undefined, cfgS);
+  auto.satNote429('u-b', 'k1', undefined, cfgS);
+  check('SAT-6/G10 同 key 重复 429 只计首值（不触发）', auto.saturatedUntil('u-b') === 0, String(auto.saturatedUntil('u-b')));
+  auto.satNote429('u-b', 'k2', undefined, cfgS);
+  check('SAT-6 跨 key ≥2 触发 (b)', auto.saturatedUntil('u-b') > 0, String(auto.saturatedUntil('u-b')));
+  auto.clearSaturation();
+  auto.satNote429('u-g7', 'k1', undefined, cfgS);
+  auto.satNoteSuccess('u-g7'); // G7：窗内成功清零
+  auto.satNote429('u-g7', 'k2', undefined, cfgS);
+  check('G7 窗内出现成功 → 计数清零（1+1 不触发）', auto.saturatedUntil('u-g7') === 0, String(auto.saturatedUntil('u-g7')));
+  // G10：parseRetryAfter 0/负/非数字归一 undefined
+  const { parseRetryAfter } = await import('../src/pool.ts');
+  check('G10 parseRetryAfter：0/负/非数字 → undefined，正数 → ms', parseRetryAfter('0') === undefined && parseRetryAfter('-5') === undefined && parseRetryAfter('abc') === undefined && parseRetryAfter('3600') === 3_600_000, JSON.stringify([parseRetryAfter('0'), parseRetryAfter('-5'), parseRetryAfter('abc'), parseRetryAfter('3600')]));
   // 时钟恢复 + 清场（置于末节，不影响此前服务器域断言）
   auto.setClockForTest(() => Date.now());
   auto.clearHealth();
+  auto.clearSaturation();
 }
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

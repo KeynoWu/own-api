@@ -203,6 +203,8 @@ export interface Settings {
   logRetention: number;
   /** auto 路由跨候选链的硬预算（秒，C16：本地模型加载首请求可达数十秒，默认 300） */
   autoMaxChainSeconds: number;
+  /** 饱和态开关与退避参数（§6/F5.3：热读，enabled=false 即整体回滚饱和语义） */
+  autoSaturation: { enabled: boolean; baseSec: number; maxSec: number };
   /** 未知模型时是否透传给默认兜底渠道 */
   fallbackChannelId?: string;
 }

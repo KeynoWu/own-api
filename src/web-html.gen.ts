@@ -399,7 +399,10 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
   };
   views.overview = async () => {
     const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
-    const [o, allLogs] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000')]);
+    // 号池健康页才顺带取 auto-health/routes（饱和观测 R8）——其他页不加请求
+    const [o, allLogs, ah, allRoutes] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000'),
+      ovSt.tab === 'pool' ? api('/api/auto-health').catch(() => null) : Promise.resolve(null),
+      ovSt.tab === 'pool' ? api('/api/routes').catch(() => null) : Promise.resolve(null)]);
     const box = el('div');
     if (updateState && updateState.updateAvailable && !updateState.error) box.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px' },
       '检测到新版本 v' + updateState.latest + '（当前 v' + updateState.current + '）——',
@@ -523,6 +526,18 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       }
       if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
       box.append(t);
+      // 饱和候选观测（R8/P1）：自动路由正在对该候选走回退退避；剩余秒数倒计、档位、一键清
+      const sat = (ah && ah.saturation) || [];
+      if (sat.length) {
+        const rname = new Map(((allRoutes && allRoutes.routes) || allRoutes || []).map((r) => [r.id, r.publicName || r.name || r.id]));
+        box.append(el('div', { class: 'card', style: 'padding:10px 12px;margin-top:12px' },
+          el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' },
+            el('h2', { style: 'margin:0' }, '饱和候选（自动路由回退中）'),
+            el('button', { class: 'btn sm', onclick: async () => { await api('/api/auto-health/saturation/clear', { method: 'POST' }); toast('已清除全部饱和态'); go('overview'); } }, '清除饱和')),
+          el('table', {}, sat.map((sn) => el('tr', {},
+            el('td', {}, rname.get(sn.routeId) || sn.routeId),
+            el('td', { class: 'muted' }, \`剩余 ~\${sn.leftSec}s（第 \${sn.n} 档退避）\`))))));
+      }
     }
     if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
     return box;
