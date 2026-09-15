@@ -155,8 +155,17 @@ jobs:
       - name: 发布后资产硬校验（软校验不可靠，传完必须见真资产）
         shell: bash
         run: |
-          N=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '[.assets] | length')
-          echo "release 资产数: $N"
-          [ "$N" -ge 7 ] || { echo "::error::release 资产少于 7（3 平台包 + 3 别名直链 + sha256sums）——上传环节静默失败"; exit 1; }
+          # v0.1.14 事故：上传步骤已逐个 ✅ 且 softprops 已报 "Release ready"，紧随其后的单次
+          # API 查询却只看到 1 个资产——/releases/tags 视图有最终一致性延迟，查早了就是假红
+          # （release 本体 7/7 齐全，run 却被标 failure）。改为退避轮询：资产数只增不减，
+          # 读到 ≥7 即为真；轮询耗尽仍不足才是上传环节真失败。
+          ok=""
+          for i in 1 2 3 4 5 6 7 8; do
+            N=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '[.assets] | length')
+            echo "第 $i 次查询 release 资产数: $N"
+            [ "$N" -ge 7 ] && { ok=1; break; }
+            sleep 5
+          done
+          [ -n "$ok" ] || { echo "::error::轮询 8 次后 release 资产仍少于 7（3 平台包 + 3 别名直链 + sha256sums）——上传环节真失败"; exit 1; }
         env:
           GH_TOKEN: ${{ github.token }}
