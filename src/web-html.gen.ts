@@ -305,7 +305,7 @@ const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' 
 
 // ---------------- 概览 ----------------
 // ---------------- 使用统计（首页） ----------------
-const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
+const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; // hours: 'day'=自然日（本地零点起）；数字=滚动小时窗
 {
   const newAgg = () => ({ requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, cost: 0 });
   const addAgg = (b, l) => {
@@ -373,7 +373,10 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
     if (updateState && updateState.updateAvailable && !updateState.error) box.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px' },
       '检测到新版本 v' + updateState.latest + '（当前 v' + updateState.current + '）——',
       el('a', { href: '#settings', style: 'color:var(--accent)' }, '到「设置」安装')));
-    const from = (() => { const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); })(); // L6：KPI 与图表桶同锚
+    const from = (() => {
+      if (ovSt.hours === 'day') { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); } // 「今天」=本地自然日，不混昨天
+      const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime();
+    })(); // L6：KPI 与图表桶同锚
     let logs = allLogs.filter((l) => l.ts >= from);
     const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
     if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
@@ -385,7 +388,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
       el('div', { class: 'row', style: 'gap:8px' },
         sel([['', '全部模型'], ...modelNames.map((m) => [m, m])], ovSt.model, (v) => { ovSt.model = v; go('overview'); }),
         sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
-        sel([['24', '当天'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = Number(v); go('overview'); }),
+        sel([['day', '今天'], ['24', '近 24 小时'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = v === 'day' ? 'day' : Number(v); go('overview'); }),
       )));
     // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
     if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
@@ -411,11 +414,11 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
       sub('缓存命中', num(tot.cr)),
       el('div', { class: 'card' }, el('div', { class: 'row', style: 'justify-content:space-between' }, el('span', { class: 'k' }, '缓存命中率'), el('b', { style: hitRate >= 30 ? 'color:var(--ok)' : '' }, hitRate + '%')),
         el('div', { class: 'bar', style: 'margin-top:8px' }, el('i', { style: 'width:' + Math.min(100, hitRate) + '%' })))));
-    const hourly = ovSt.hours <= 48;
+    const hourly = ovSt.hours === 'day' || ovSt.hours <= 48;
     const step = hourly ? 3600e3 : 86400e3;
     const align = (t) => { const d = new Date(t); if (hourly) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); };
     const buckets = new Map();
-    const startT = align(Date.now() - (ovSt.hours * 3600e3 - step));
+    const startT = ovSt.hours === 'day' ? align(from) : align(Date.now() - (ovSt.hours * 3600e3 - step));
     for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
     for (const l of logs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
     const bArr = [...buckets.values()];
@@ -440,7 +443,7 @@ const ovSt = { hours: 24, model: '', fstat: '', tab: 'logs', refresh: 30 };
       const fbar = el('div', { class: 'card', style: 'padding:10px 12px;margin-bottom:10px' },
         el('div', { class: 'row', style: 'gap:8px' },
           sel([['', '全部'], ['ok', '仅成功'], ['err', '仅失败']], ovSt.fstat, (v) => { ovSt.fstat = v; go('overview'); }),
-          el('span', { class: 'muted' }, ovSt.hours === 24 ? '当天' : ovSt.hours === 168 ? '近 7 天' : '近 30 天' + (ovSt.model ? ' · ' + ovSt.model : ''))));
+          el('span', { class: 'muted' }, (ovSt.hours === 'day' ? '今天' : ovSt.hours === 24 ? '近 24 小时' : ovSt.hours === 168 ? '近 7 天' : '近 30 天') + (ovSt.model ? ' · ' + ovSt.model : ''))));
       box.append(fbar);
       let rows = logs;
       if (ovSt.fstat === 'ok') rows = rows.filter((l) => l.ok);
