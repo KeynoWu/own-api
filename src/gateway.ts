@@ -466,13 +466,18 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
         finished(undefined, 'cancel');
         return;
       }
-      if (routeId) a.onSample(routeId, !err); // stream 失败（提交后）也计候选失败样本（F4 两分法）
-      if (!err && route && firstContentAt) {
+      // 审查修复（v2.3）：流可持续分钟级，收尾时路由可能已被并发删除——存活校验防止幽灵观测行
+      // 复活已清窗口（health/speed 五态/饱和条目），也堵住为已删 id 重建速度状态
+      const routeAlive = !route || !!store.getModel(route.id);
+      if (routeId && routeAlive) a.onSample(routeId, !err); // stream 失败（提交后）也计候选失败样本（F4 两分法）
+      if (!err && route && firstContentAt && routeAlive) {
         // AR-5 速度采样（G14/G15）：per-attempt 口径——decode 窗 = 流末−首包（不含 prefill/前序候选）；
         // completionTokens≥16 才入权重层（废掉 max_tokens=1 + 巨 prefill 的吞吐毒样本）；
+        // decode 窗 ≥50ms 才可测（审查 M2：亚毫秒窗经下界钳制产生 ct×1000 tok/s 毒样本，实测 17tok→17000）；
         // TTFT = 首包 − 本 attempt 起点（attemptT0），非流式不采（F3.3 仅观测，落日志）
         const ct = usage.completionTokens || 0;
-        if (ct >= 16 && a.speedCfg) speedNote(route.id, ct / Math.max(0.001, (Date.now() - firstContentAt) / 1000), firstContentAt - attemptT0, a.speedCfg);
+        const decodeMs = Date.now() - firstContentAt;
+        if (ct >= 16 && decodeMs >= 50 && a.speedCfg) speedNote(route.id, ct / (decodeMs / 1000), firstContentAt - attemptT0, a.speedCfg);
       }
       a.finalize(
         err
@@ -589,7 +594,7 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
 
     a.onCommitted();
     a.onPreFinalize?.(); // 链记录先落账，再交给内部 finalize（快照时序）
-    if (routeId) a.onSample(routeId, true);
+    if (routeId && (!route || store.getModel(route.id))) a.onSample(routeId, true); // 存活校验同流末（审查修复）
     // 客户端要流式但上游只给了 JSON：把完整响应合成成 SSE，别回空响应
     if (wantsStream) {
       // 合成时统一用 chat 结构（legacy 对象没有 message.content，喂进去会合成出空文本）
@@ -1143,7 +1148,7 @@ async function runAuto(ctx: AutoRunCtx) {
     if (firstPick && cur.cand.routeId === firstPick.cand.routeId) stickyBypassed = true;
     if (outcome.rateLimit) sawRateLimit = true;
     if (outcome.retryAfterMs !== undefined) retryAfterMs = retryAfterMs === undefined ? outcome.retryAfterMs : Math.min(retryAfterMs, outcome.retryAfterMs);
-    if (outcome.sample) recordAttempt(cur.cand.routeId, false, vkey.id); // 链级失败记账带 vkey（SEC-1 限频依据）
+    if (outcome.sample && store.getModel(cur.cand.routeId)) recordAttempt(cur.cand.routeId, false, vkey.id); // 链级失败记账带 vkey（SEC-1 限频依据）；存活校验（审查修复）
     pick = chooseNext();
   }
 

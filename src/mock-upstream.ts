@@ -171,6 +171,31 @@ app.post('/v1/chat/completions', async (c) => {
   const text = `mock(openai:${body.model}) 收到: ${prompt.slice(0, 40)}`;
   const tools = Array.isArray(body.tools) && body.tools.length && /工具|tool/i.test(prompt);
 
+  // 审查修复 fixture：spaced 流——chunk 间隔 spacing ms（decode 窗可测，≥50ms 采样准入线下唯一能产出速度样本的形态）；
+  // tok<N> 覆写 completion_tokens（G15 准入线 15/16 边界钉）。ttft<N> 前缀继续控制首包延迟。
+  const spacing = Number((String(body.model || '').match(/spaced(\d+)/) || [])[1] || 0);
+  if (body.stream && spacing > 0) {
+    const ct = Number((String(body.model || '').match(/tok(\d+)/) || [])[1] || 17);
+    const enc = new TextEncoder();
+    const pieces = text.match(/.{1,6}/g) || ['m'];
+    const frames: any[] = [
+      { choices: [{ index: 0, delta: { role: 'assistant', content: '' } }] },
+      ...pieces.map((p) => ({ choices: [{ index: 0, delta: { content: p } }] })),
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 11, completion_tokens: ct, total_tokens: 11 + ct } },
+    ];
+    const stream = new ReadableStream({
+      start(ctrl) {
+        frames.forEach((f, i) => setTimeout(() => {
+          try {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(f)}\n\n`));
+            if (i === frames.length - 1) { ctrl.enqueue(enc.encode('data: [DONE]\n\n')); ctrl.close(); }
+          } catch { /* 客户端已断开 */ }
+        }, i * spacing));
+      },
+    });
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+  }
+
   if (body.stream) {
     return new Response(
       new ReadableStream({

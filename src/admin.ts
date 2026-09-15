@@ -9,7 +9,7 @@ import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
 import { APP_VERSION } from './version.gen.ts';
-import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSpeed, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, speedSnapshotForAdmin, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
+import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSpeed, clearSpeedForRoute, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, speedSnapshotForAdmin, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
 import { clearVisionLearning } from './vision.ts';
 import type { Channel } from './types.ts';
 
@@ -220,7 +220,7 @@ export function createAdmin(): Hono {
 
   app.delete('/channels/:id', (c) => {
     const { referencedAutoRoutes, deletedModelIds } = store.deleteChannel(c.req.param('id'));
-    for (const mid of deletedModelIds || []) clearHealthFor(mid);
+    for (const mid of deletedModelIds || []) { clearHealthFor(mid); clearSpeedForRoute(mid); clearSaturationForRoute(mid); clearVisionLearning(mid); } // 五态聚合回收（审查修复）
     return c.json({ ok: true, ...(referencedAutoRoutes.length ? { warning: `级联删除的模型被 ${referencedAutoRoutes.length} 个 auto 路由引用，候选将悬空并被自动剔除`, referencedAutoRoutes } : {}) });
   });
 
@@ -458,7 +458,11 @@ export function createAdmin(): Hono {
     }
     // C8：被 auto 引用的候选删除后不会自动清理，回引用清单让管理端红标警示
     const { referencedAutoRoutes } = store.deleteModel(id);
-    clearHealthFor(id); // 已删路由的健康窗口条目同步回收
+    // 五态聚合回收（审查修复：clearSpeedForRoute 此前零调用；饱和窗/视觉学习记忆此前无任何删除路径）
+    clearHealthFor(id);
+    clearSpeedForRoute(id);
+    clearSaturationForRoute(id);
+    clearVisionLearning(id);
     return c.json({ ok: true, ...(referencedAutoRoutes.length ? { warning: `已删除的模型被 ${referencedAutoRoutes.length} 个 auto 路由引用，候选将悬空并被自动剔除`, referencedAutoRoutes } : {}) });
   });
 

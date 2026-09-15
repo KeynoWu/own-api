@@ -895,21 +895,24 @@ check('N11：命中失败后成功候选不得覆写——绑定回到 n11（覆
 
 // —— SPD-3 集成钉（P2 §3/G16/F3.2：粘性慢降级绕行——绑定保留、不续期；F5.2 pickSnapshot.factor 观测）——
 await resetAutoRT();
-const mSpdM = (await mkModel({ publicName: 'spd-m', channelId: chAuto.id, upstreamModel: 'mock-ttft0' })).body; // F5.1 fixture：ttft<N> 首包延迟 N ms
+const mSpdM = (await mkModel({ publicName: 'spd-m', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60' })).body; // F5.1 fixture：ttft<N> 首包延迟 + spaced 分块（decode 窗 ~300ms，过 50ms 采样准入线）
 const aSpd = await mkAuto({ publicName: 'auto_spd', candidates: [{ routeId: mSpdM.id, weight: 10000 }, { routeId: mGpt2R.id, weight: 1 }], stickyTtlMs: 60000 });
 for (let i = 0; i < 4; i++) await autoReq('auto_spd', { stream: true }); // 快基线样本 ×4 + 建粘
 const stkProbeSpd = async () => ((await api('/api/auto-health?route=auto_spd', { headers: ADMIN })).body.stickyList || []);
 check('SPD-3 前置：粘性已建立在 spd-m', (await stkProbeSpd()).some((x: any) => x.routeId === mSpdM.id), JSON.stringify(await stkProbeSpd()));
 const ahSpd0 = await autoHealth();
-check('SPD-2/R8 观测面：windows 行带 speedFactor、全局带 speedBench', typeof (((ahSpd0.windows || []).find((w: any) => w.routeId === mSpdM.id) || {}).speedFactor) === 'number' && ahSpd0.speedBench != null, JSON.stringify(ahSpd0.windows));
-await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft400' }); // 切慢 TTFT（同模型换上游，SAT-5 模式）
-for (let i = 0; i < 6; i++) await autoReq('auto_spd', { stream: true }); // 慢样本 ×6（400ms）→ recent-8 p50 ≥3× 历史基线 → 降粘
+const spdRow0 = (ahSpd0.windows || []).find((w: any) => w.routeId === mSpdM.id) || {};
+// 审查强化（T5）：单候选 bench=自身 p50 → speedBench === tokP50、factor 恒 1——实值断言替代 typeof 弱断言
+check('SPD-2/R8 观测面实值：tokP50∈(20,200)、speedBench=自身 p50、factor=1', typeof spdRow0.tokP50 === 'number' && spdRow0.tokP50 > 20 && spdRow0.tokP50 < 200 && ahSpd0.speedBench === spdRow0.tokP50 && spdRow0.speedFactor === 1, JSON.stringify({ row: spdRow0, bench: ahSpd0.speedBench }));
+await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft400spaced60' }); // 切慢 TTFT（同模型换上游，SAT-5 模式）
+for (let i = 0; i < 6; i++) await autoReq('auto_spd', { stream: true }); // 慢样本 ×6（TTFT 400ms）→ recent-8 p50 ≥3× 历史基线 → 降粘
+// （第 5 个慢样本即置位：4快+5慢 recent-8 下中位已转慢；第 6 个的保持依赖 s≥3.5×被抬升基线——T5 复核口径）
 const ahSpd = await autoHealth();
 const spdRow = (ahSpd.windows || []).find((w: any) => w.routeId === mSpdM.id);
 check('SPD-3 观测面：/auto-health ttftSlow 置位（≥3× 历史基线）', spdRow && spdRow.ttftSlow === true, JSON.stringify(spdRow));
 const lSpd = (await getLogs('auto_spd'))[0];
 const snapSpd = lSpd?.chainAttempts?.[0]?.pickSnapshot || [];
-check('F5.2 pickSnapshot 带 factor（速度因子进观测快照）', snapSpd.length > 0 && snapSpd.every((x: any) => typeof x.factor === 'number'), JSON.stringify(snapSpd).slice(0, 160));
+check('F5.2 pickSnapshot factor 实值=1（单候选 bench 自锚，EMA 恰为 1）', snapSpd.length > 0 && snapSpd.every((x: any) => x.factor === 1), JSON.stringify(snapSpd).slice(0, 160));
 const rSpdByp = await autoReq('auto_spd', { stream: true });
 const lSpdByp = (await getLogs('auto_spd'))[0];
 check('SPD-3 慢降级 → 粘性绕行：pickBasis=weighted（非 sticky 命中）', rSpdByp.status === 200 && lSpdByp?.chainAttempts?.[0]?.pickBasis === 'weighted', JSON.stringify({ basis: lSpdByp?.chainAttempts?.[0]?.pickBasis }));
@@ -920,7 +923,7 @@ check('F3.2 迟滞自动回粘：基线吸收慢态后 ttftSlow 自动翻回', (
 await autoReq('auto_spd', { stream: true }); // TTFT 关已翻回 + 健康关通过 → 重粘双过（STK-2/F3.2）
 const lStk2 = (await getLogs('auto_spd'))[0];
 check('STK-2 重粘双过（健康关且 TTFT 关）→ 恢复粘性命中续期', lStk2?.chainAttempts?.[0]?.pickBasis === 'sticky', JSON.stringify({ basis: lStk2?.chainAttempts?.[0]?.pickBasis }));
-await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft0' });
+await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft0spaced60' });
 await api('/api/routes/' + aSpd.body.id, { method: 'DELETE', headers: ADMIN });
 
 // —— L1 前置顺序（二轮 F10：只测"403 存在"不够，要测"403 先于探测面"）——

@@ -1367,19 +1367,39 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   // bench = median(p50A=100, p50Fast=200, p50Slow=40) = 100 → raw: A=1, Fast=2→cap, Slow=0.4→floor
   check('SPD-1 快候选 raw=2.0 顶格 cap（EMA 首样本=raw）', fFast === 2.0, String(fFast));
   check('SPD-1 慢候选 raw=0.4 → floor 0.5', fSlow === 0.5, String(fSlow));
-  // SPD-4 衰减回 1（F3.4）：1h 半衰期——快候选 1h 后 factor 从 2 衰到 1.5，无硬跳 1
-  now += 3_600_000;
+  // SPD-4 衰减（F3.4，审查修复后口径）：1h 半衰期——快候选 1h 后 2.0 → 1.5（窗内指数连续，无硬跳）；
+  // 样本滚出 1h 窗后 fresh<3 → 按冷启动口径归 1（读侧统一公式：存量 EMA 不得被涓流样本无限期外插）
+  now += 1_800_000; // dt=0.5h：窗内首个内点
+  const fFastDecay05 = auto.speedFactorOf('u-spdFast', speedCfg);
+  check('SPD-4 dt=0.5h（窗内）：→ 1.7071（0.5^0.5 指数连续）', Math.abs(fFastDecay05 - 1.7071067811865476) < 1e-9, String(fFastDecay05));
+  now += 1_800_000; // dt=1h：窗边界（fresh 判据 <=）
   const fFastDecay = auto.speedFactorOf('u-spdFast', speedCfg);
   check('SPD-4 1h 半衰期：factor 2.0 → 1.5（平滑衰减非硬重置）', Math.abs(fFastDecay - 1.5) < 1e-9, String(fFastDecay));
   now += 3_600_000 * 4;
   const fFastDecay2 = auto.speedFactorOf('u-spdFast', speedCfg);
-  check('SPD-4 累计 5h：2.0 → 1.03125（指数逼近 1 不越过）', Math.abs(fFastDecay2 - 1.03125) < 1e-9, String(fFastDecay2));
+  check('SPD-4 窗外归 1（fresh<3 冷启动口径，杜绝涓流钉死）', fFastDecay2 === 1, String(fFastDecay2));
+  // 审查修复（A7-a）：墙钟回拨 dt 下钳 0——回拨 6h 后 factor 不爆不越带（pow(0.5, 负) 曾实测 → 65）
+  now -= 3_600_000 * 10;
+  const fFastRewind = auto.speedFactorOf('u-spdFast', speedCfg);
+  check('SPD-4 墙钟回拨 10h：dt 钳 0，factor 不爆炸', Number.isFinite(fFastRewind) && fFastRewind >= speedCfg.floor && fFastRewind <= speedCfg.cap, String(fFastRewind));
+  now += 3_600_000 * 10; // → t0+5h：全部旧样本出窗
+  // 审查修复（A7-a 涓流钉死）：窗空后的涓流单样本 fresh=1<3——读值必须归 1，存量 EMA（=2）不得经单样本外插复活
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  check('审查钉：涓流单样本（fresh<3）读值仍归 1，EMA 存量不外插', auto.speedFactorOf('u-spdFast', speedCfg) === 1, String(auto.speedFactorOf('u-spdFast', speedCfg)));
+  // 审查修复（A7-b 热改重钳）：补满 fresh≥3 造出高 EMA（raw=200/50→cap2），再用 tightCfg 收带——读值必须按新带钳制
+  for (let i = 0; i < 3; i++) auto.speedNoteForTest('u-spdSlow', 50, 900, speedCfg);
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  check('审查钉：前置——fresh≥3 时基准带下 factor=2.0', auto.speedFactorOf('u-spdFast', speedCfg) === 2, String(auto.speedFactorOf('u-spdFast', speedCfg)));
+  const tightCfg = { enabled: true, floor: 1, cap: 1.2 };
+  check('审查钉：floor/cap 热改后读值按新带重钳（EMA 2.0 → 钳 1.2）', Math.abs(auto.speedFactorOf('u-spdFast', tightCfg) - 1.2) < 1e-9, String(auto.speedFactorOf('u-spdFast', tightCfg)));
   // SPD-3 粘性慢降级迟滞（G16/F3.2）：recent-8 p50 vs 自身基线 EMA，3× 降 / <2× 回
   // 基线播种：10 个正常 TTFT=200ms 样本（recent-p50=200 → baseline EMA 收敛 200）
   for (let i = 0; i < 10; i++) auto.speedNoteForTest('u-spdStick', 100, 200, speedCfg);
   check('SPD-3 基线期未慢降', auto.ttftSlowDemoted('u-spdStick', speedCfg) === false, String(auto.ttftSlowDemoted('u-spdStick', speedCfg)));
-  // 6 个慢样本 TTFT=700：第 6 个起 recent-8 多数转慢 → rp=700 与「更新前基线」200 比 ≥3×600 → 降粘
-  // （基线=历史 EMA，比较先于更新——阶跃劣化才可触发；基线随后被慢样本 EMA 逐步抬走）
+  // 6 个慢样本 TTFT=700：第 5 个慢样本起 recent-8 下中位已转慢（4快+5慢 sorted[3]=700）→ rp ≥3× 历史基线 200 → 置位；
+  // 第 6 个的「保持」依赖 rp < 2×b_pre 翻回侧不触发——b_pre 已被第 5 样本的 EMA 更新抬到 ~0.3s+0.7f，
+  // 实测需 s/f≥3.5 才稳住（T5 复核口径；本钉 700/15ms 远超余量）
   for (let i = 0; i < 6; i++) auto.speedNoteForTest('u-spdStick', 100, 700, speedCfg);
   check('SPD-3 TTFT p50 ≥3× 历史基线 → 慢降级置位', auto.ttftSlowDemoted('u-spdStick', speedCfg) === true, String(auto.ttftSlowDemoted('u-spdStick', speedCfg)));
   // 8 个 TTFT=100 → recent-8 p50 回落 <2× 基线 EMA → 重粘（迟滞翻回）
@@ -1390,6 +1410,17 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   auto.speedNoteForTest('u-spdFew', 100, 900, speedCfg);
   auto.speedNoteForTest('u-spdFew', 100, 900, speedCfg);
   check('SPD-3 样本 <3 视为未慢降', auto.ttftSlowDemoted('u-spdFew', speedCfg) === false, String(auto.ttftSlowDemoted('u-spdFew', speedCfg)));
+  // 审查钉：冷库观测——无任何样本时 speedBench=null、任意路由 factor=1（观测面不编造数据）
+  auto.clearSpeed();
+  const snapCold = auto.speedSnapshotForAdmin(speedCfg);
+  check('审查钉：冷库 speedBench=null 且任意路由 factor=1', snapCold.bench === null && auto.speedFactorOf('u-none', speedCfg) === 1, JSON.stringify(snapCold));
+  // 审查钉：cap=1 合法退化（3 候选：bench=下中位 100 → 快 2.0→钳 1、中 1.0、慢 0.5 落 floor）
+  const cap1 = { enabled: true, floor: 0.5, cap: 1 };
+  for (let i = 0; i < 3; i++) auto.speedNoteForTest('u-cap1a', 200, 300, cap1);
+  for (let i = 0; i < 3; i++) auto.speedNoteForTest('u-cap1b', 100, 500, cap1);
+  for (let i = 0; i < 3; i++) auto.speedNoteForTest('u-cap1c', 50, 900, cap1);
+  check('审查钉：cap=1 合法退化——快候选钳 1、慢候选落 floor 0.5', auto.speedFactorOf('u-cap1a', cap1) === 1 && auto.speedFactorOf('u-cap1c', cap1) === 0.5, JSON.stringify([auto.speedFactorOf('u-cap1a', cap1), auto.speedFactorOf('u-cap1c', cap1)]));
+  auto.clearSpeed();
   // 关闸（enabled=false）→ factor 恒 1、慢降级恒 false（R4 第四因子可整体旁路）
   const offCfg = { enabled: false, floor: 0.5, cap: 2.0 };
   auto.speedNoteForTest('u-spdA', 40, 900, speedCfg);

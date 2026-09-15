@@ -380,7 +380,9 @@ const p50Of = (xs: number[]): number | null => {
  * （aT0 基准，禁止链级污染值）。非流式仅入观测（F3.3 下界口径，落日志，不进本状态）。
  */
 export function speedNote(routeId: string, tokPerSec: number, ttftMs: number, cfg?: SpeedConfig) {
-  if (!routeId || !(tokPerSec > 0) || !(ttftMs >= 0)) return;
+  // 审查修复：Infinity/NaN 拦截（上游 usage 注入 1e999 → factor=NaN → pickWeighted 静默饿死）；关闸早退（P6-2）
+  if (!routeId || !Number.isFinite(tokPerSec) || tokPerSec <= 0 || !Number.isFinite(ttftMs) || ttftMs < 0) return;
+  if (cfg && !cfg.enabled) return;
   const now = clockNow();
   const list = speedWin.get(routeId) || [];
   list.push({ ts: now, tokPerSec, ttftMs });
@@ -411,7 +413,18 @@ function refreshSpeedEvents(newRouteId: string, cfg: SpeedConfig, now: number) {
     if (me) {
       const raw = Math.min(cfg.cap, Math.max(cfg.floor, me.v / bench)); // 吞吐高优：own/bench（R3 改指标后的倒数形式，TTFT 类低优指标才是 bench/own）
       const prev = speedEma.get(newRouteId);
-      speedEma.set(newRouteId, prev === undefined ? raw : EMA_ALPHA * raw + (1 - EMA_ALPHA) * prev);
+      if (prev === undefined) {
+        speedEma.set(newRouteId, raw);
+      } else {
+        // 审查修复（M2-b 锯齿）：存量 EMA 先按样本间隔衰减到本次采样时点再混合——
+        // 否则稀疏样本候选在读值上出现「衰减位 → 新样本硬拉回历史 EMA」的锯齿，F3.4 无硬跳变被击穿
+        // gap 取「上一采样时刻」而非 lastSampleAt——后者已被本样本覆写为 now（恒 0 退化回普通混合）
+        const own = speedWin.get(newRouteId) || [];
+        const prevTs = own.length >= 2 ? own[own.length - 2].ts : now;
+        const gap = Math.max(0, now - prevTs);
+        const eff = 1 + (prev - 1) * Math.pow(0.5, gap / SPEED_HALF_LIFE_MS);
+        speedEma.set(newRouteId, EMA_ALPHA * raw + (1 - EMA_ALPHA) * eff);
+      }
     }
   }
   // 粘性慢降级（G16/F3.2）：recent-8 p50 vs 自身历史 p50 EMA；3× 降、<2× 回（迟滞）；样本 <3 视为未慢降
@@ -454,11 +467,18 @@ function speedSnapshotRead(cfg: SpeedConfig, now: number) {
     if (ownToks.length >= 1) bench = p50Of(ownToks);
     for (const [routeId, list] of speedWin) {
       const fresh = list.filter((s) => now - s.ts <= SPEED_WINDOW_MS);
-      const ema = speedEma.get(routeId);
+      const freshOk = fresh.length >= SPEED_MIN_SAMPLES;
+      const ema = freshOk ? speedEma.get(routeId) : undefined;
       const last = lastSampleAt.get(routeId) ?? now;
-      // F3.4：factor 读取值 = EMA 存值按 1h 半衰期向 1 衰减（无硬跳变）
-      const factor = ema === undefined ? 1 : 1 + (ema - 1) * Math.pow(0.5, (now - last) / SPEED_HALF_LIFE_MS);
-      rows.set(routeId, { factor, tokP50: p50Of(fresh.map((s) => s.tokPerSec)), ttftP50: p50Of(fresh.map((s) => s.ttftMs)), slow: ttftSlow.get(routeId) || false });
+      // 读侧统一公式（审查 v2.3 修订，四修合一）：
+      // (1) fresh<3 → 1：与 bench/EMA 更新门同口径——存量 EMA 不得被涓流样本无限期钉死（A7 实测恒 1.3）；
+      //     衰减在窗内连续（SPD-4），窗外按冷启动口径归 1（最大跳变 ≤(cap+1)/2−1，受 cap 有界）
+      // (2) dt 下钳 0：墙钟回拨（NTP/休眠恢复）时 pow(0.5, 负) 指数爆炸（实测回拨 6h → 65）
+      // (3) 按当前 [floor,cap] 重钳：设置热改对存量 EMA 即时生效（校验保证 floor≤1≤cap，合法态不改衰减轨迹）
+      const dt = Math.max(0, now - last);
+      const decayed = ema === undefined ? 1 : 1 + (ema - 1) * Math.pow(0.5, dt / SPEED_HALF_LIFE_MS);
+      const factor = ema === undefined ? 1 : Math.min(cfg.cap, Math.max(cfg.floor, decayed));
+      rows.set(routeId, { factor, tokP50: p50Of(fresh.map((s) => s.tokPerSec)), ttftP50: p50Of(fresh.map((s) => s.ttftMs)), slow: (freshOk ? ttftSlow.get(routeId) : false) || false });
     }
     speedSnap = { at: now, floor: cfg.floor, cap: cfg.cap, bench, rows };
   }
