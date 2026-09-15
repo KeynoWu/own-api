@@ -128,11 +128,11 @@ jobs:
           printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          # softprops 的 glob 里 `**` 不匹配根层文件——v0.1.9 曾因此零匹配红掉；
+          # 产物全部平铺在 artifacts/ 根（merge-multiple + 别名步骤均 cd 进去），平铺 glob 即可
           files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.exe
-            artifacts/own-api-macos-*.dmg
-            artifacts/own-api-windows-*.exe
+            artifacts/*.dmg
+            artifacts/*.exe
             artifacts/sha256sums.txt
           body_path: release-body.md
           draft: false
