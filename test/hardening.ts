@@ -1340,7 +1340,7 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   const png1x1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='; // 1×1
   const imgBody = (url: string) => ({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url } }] }] });
   check('R7 1×1 PNG data URL → ceil(1/750)=1 图 token', estimateInputTokens(imgBody(png1x1)) === Math.ceil(2 / 4) + 1, String(estimateInputTokens(imgBody(png1x1))));
-  check('R7 http URL 图 → 常数 1000（不下载）', estimateInputTokens(imgBody('https://x/a.png')) === Math.ceil(2 / 4) + 1000, String(estimateInputTokens(imgBody('https://x/a.png'))));
+  check('R7 http URL 图 → 上界常数 1600（§10 裁决，不下载）', estimateInputTokens(imgBody('https://x/a.png')) === Math.ceil(2 / 4) + 1600, String(estimateInputTokens(imgBody('https://x/a.png'))));
   const anth = { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png1x1.slice('data:image/png;base64,'.length) } }] }] };
   check('R7 anthropic base64 图同口径', estimateInputTokens(anth) === 1, String(estimateInputTokens(anth)));
   vis.setVisionClockForTest(() => Date.now());

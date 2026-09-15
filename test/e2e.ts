@@ -591,13 +591,13 @@ const rVis4 = await autoReq('auto_vis4', { messages: twoImgs }); // 2 个不同�
 check('VIS-4 手动标注锁定：学习不覆盖（仍 true）', rVis4.status === 200 && (await getRoute(mNoimg4.id))?.supportsVision === true, JSON.stringify((await getRoute(mNoimg4.id))?.supportsVision));
 const rVis4r = await api(`/api/routes/${mNoimg4.id}/vision/reset`, { method: 'POST', headers: ADMIN });
 check('VIS-4 重置口：回 unknown + 解锁', rVis4r.status === 200 && rVis4r.body.supportsVision === 'unknown' && rVis4r.body.visionLocked === false, JSON.stringify(rVis4r.body));
-// VIS-5：inputEst 图片 token——data URL 100×100 精算 ceil(10000/750)=14；http URL 常数 1000
+// VIS-5：inputEst 图片 token——data URL 100×100 精算 ceil(10000/750)=14；http URL 上界常数 1600（§10 裁决，审查 D1-2 落实）
 const png100 = (() => { const b = Buffer.alloc(33); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0); b.writeUInt32BE(13, 8); b.write('IHDR', 12, 'ascii'); b.writeUInt32BE(100, 16); b.writeUInt32BE(100, 20); b[24] = 8; b[25] = 2; return 'data:image/png;base64,' + b.toString('base64'); })();
 const ctReq = (url: string) => api('/v1/messages/count_tokens', { method: 'POST', headers: AH, body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url } }] }] }) });
 const ct1 = await ctReq(png100);
 const ct2 = await ctReq('https://example.com/a.png');
 check('VIS-5 data URL 100×100 精算（ceil(10000/750)=14）', ct1.body?.input_tokens === Math.ceil(2 / 4) + 14, JSON.stringify(ct1.body));
-check('VIS-5 http URL 常数 1000/图（不下载）', ct2.body?.input_tokens === Math.ceil(2 / 4) + 1000, JSON.stringify(ct2.body));
+check('VIS-5 http URL 上界常数 1600/图（不下载，§10 裁决）', ct2.body?.input_tokens === Math.ceil(2 / 4) + 1600, JSON.stringify(ct2.body));
 // VIS-6：带图请求 unknown 候选 bias=0.25 后置（pickSnapshot 的 ew 值确定性断言，零 flake）
 const mVisU = (await mkModel({ publicName: 'auto-m-visu', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body; // unknown
 const chVisG = await mkCh('Auto VisG', 'openai', ['k-ok-visg']);

@@ -1273,7 +1273,7 @@ export function estimateInputTokens(body: any): number {
         else if ((p as any).type === 'tool_use' && (p as any).input != null) chars += String(JSON.stringify((p as any).input)).length; // 工具调用参数也是 prompt 大头
         else if ((p as any).type === 'image' || (p as any).type === 'image_url') {
           // R7（P1.5）：data URL 解析 w×h 精算 ≈(w×h)/750；http URL 不为计费下载，常数 1000/图
-          imgTokens += imageDataTokens(p) ?? 1000;
+          imgTokens += imageDataTokens(p) ?? 1600; // §10 G 系列裁决：http 不下载取上界口径（审查 D1-2 落实；旧 1000 与本函数头注释自相矛盾且反向低估预占）
         }
       }
     }
