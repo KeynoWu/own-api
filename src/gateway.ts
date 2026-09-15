@@ -196,7 +196,7 @@ function isPromptTooLong(msg: string): boolean {
   return /(context length|context window|maximum context|too many tokens|prompt is too long|input is too long|exceeds.{0,40}(context|window|length)|超.{0,8}(窗口|上下文|长度))/i.test(msg);
 }
 
-function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wire: WireFormat, wantsStream: boolean, inputEst: number): CandEval[] {
+function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wire: WireFormat, wantsStream: boolean, inputEst: number, visionEnabled: boolean): CandEval[] {
   const cacheMarkers = wire === 'anthropic' && hasAnthropicCacheMarkers(chatBody);
   const reqMax = Number(chatBody?.max_tokens) || Number(chatBody?.max_completion_tokens) || 0;
   return auto.candidates.map((cand) => {
@@ -217,8 +217,9 @@ function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wi
     if (route.contextWindow && route.contextWindow > 0 && inputEst > route.contextWindow) return soft(`估算 prompt ${inputEst} tokens 超出其 contextWindow ${route.contextWindow}`);
     if ((chatBody?.tools?.length ?? 0) > 0 && route.supportsTools === false) return soft('请求带 tools 而候选不支持');
     // AR-6 视觉软排除（① 硬过滤扩展）：带图 + 显式 false → 排除（与 tools/流式同语义：绕行不改写粘性）；
-    // unknown（含 undefined）→ 放行，交给学习闭环兜底，加权处 bias=0.25
-    if (chatHasImages(chatBody) && route.supportsVision === false) return soft('请求带图片而候选不支持视觉');
+    // unknown（含 undefined）→ 放行，交给学习闭环兜底，加权处 bias=0.25；
+    // autoVision.enabled=false 时整套视觉路由决策（软排除/降权/学习闭环）一起失效（P2.1 完整闸，R9 回滚口径）
+    if (chatHasImages(chatBody) && visionEnabled && route.supportsVision === false) return soft('请求带图片而候选不支持视觉');
     if (reqMax > 0 && route.maxOutputTokens && reqMax > route.maxOutputTokens) return soft(`请求 max_tokens ${reqMax} 超出其上限 ${route.maxOutputTokens}`);
     if (wantsStream && route.supportsStreaming === false) return soft('候选不支持流式');
     if (cacheMarkers && protocol !== 'anthropic') return soft('候选协议无法承载 thinking/cache_control 语义');
@@ -884,8 +885,9 @@ async function runAuto(ctx: AutoRunCtx) {
   if (op === 'embeddings') return fail4(400, 'auto 路由不支持 /v1/embeddings');
   if (!autoRoute.enabled) return fail4(404, `auto 路由 "${autoName}" 已停用`);
 
+  const visionOn = settings.autoVision?.enabled !== false; // R9 完整闸（P2.1）：关掉后软排除/降权/学习闭环一起失效
   const inputEst = estimateInputTokens(chatBody);
-  const evals = evaluateCandidates(autoRoute, vkey, chatBody, wire, wantsStream, inputEst);
+  const evals = evaluateCandidates(autoRoute, vkey, chatBody, wire, wantsStream, inputEst, visionOn);
   // ② 饱和过滤（AR-4）：饱和候选保留在 evals（transient=true/reason=saturated——粘性绕行分支读它判定"不删绑定"），
   // 仅移出存活集。探测例外（SAT-3 后半）：剩余 <5s 且链预算装得下最坏一跳 → 放回（成败照常，成功即清零）
   const satCfg = satConfigOf(settings.autoSaturation);
@@ -1037,7 +1039,7 @@ async function runAuto(ctx: AutoRunCtx) {
   // 带图请求 unknown 候选 bias=0.25 后置——非排除，尽量不付"第一次失败"的学费（VIS-6）；
   // 速度因子软降权（AR-5）：慢候选流量自然漂移，不剔除
   const hasImgs = chatHasImages(chatBody);
-  const visionBiasOf = (e: SurvivingEval) => (hasImgs && e.route.supportsVision !== true ? VISION_UNKNOWN_BIAS : 1);
+  const visionBiasOf = (e: SurvivingEval) => (hasImgs && visionOn && e.route.supportsVision !== true ? VISION_UNKNOWN_BIAS : 1);
   const ewOf = (e: SurvivingEval) => e.cand.weight * e.health * visionBiasOf(e) * speedFactorOf(e.cand.routeId, speedCfg);
   // 首跳：加权随机（分流语义——摊开流量，避免单候选过载）
   const chooseFirst = (): SurvivingEval | undefined => {

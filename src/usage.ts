@@ -189,6 +189,13 @@ export interface StatsSummary {
   successRate: number;
   p50Latency: number;
   p95Latency: number;
+  /** G21 验收三指标（§6，auto 域 = chainAttempts 非空的请求；分母为 0 时为 null） */
+  autoAcceptance: {
+    autoRequests: number;
+    crossCandidateFailRate: number | null; // 指标1：chainAttempts.length>1 的成功请求 / 成功请求
+    chainExhaustedRate: number | null;     // 指标2：全链失败（终态 5xx）占 auto 请求数
+    p95TtftStreamMs: number | null;        // 指标3：成功流式请求 TTFT p95
+  };
 }
 
 /** 按本地时区切天。UTC 切天会让东八区的"今天"从早上 8 点开始 */
@@ -198,10 +205,10 @@ function localDay(ts: number) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-export function buildStats(rangeHours = 24): StatsSummary {
-  const to = Date.now();
-  const from = rangeHours > 0 ? to - rangeHours * 3600_000 : 0;
-  const logs = store.db.logs.filter((l) => l.ts >= from);
+export function buildStats(rangeHours = 24, bounds?: { from?: number; to?: number }): StatsSummary {
+  const to = bounds?.to ?? Date.now();
+  const from = bounds?.from ?? (rangeHours > 0 ? to - rangeHours * 3600_000 : 0); // G21③：显式 from/to 覆盖尾窗，支持以部署时刻为界的前后周对比
+  const logs = store.db.logs.filter((l) => l.ts >= from && l.ts <= to);
 
   const mk = (pick: (l: RequestLog) => string) => {
     const map = new Map<string, Bucket>();
@@ -236,6 +243,22 @@ export function buildStats(rangeHours = 24): StatsSummary {
     successRate: totals.requests ? Math.round(((totals.requests - totals.errors) / totals.requests) * 1000) / 10 : 100,
     p50Latency: pct(0.5),
     p95Latency: pct(0.95),
+    autoAcceptance: buildAcceptance(logs),
+  };
+}
+
+/** G21 验收三指标（§6）：auto 域限定 chainAttempts 非空（403/404-停用这类未尝试请求不进分母，不是路由能力问题） */
+function buildAcceptance(logs: RequestLog[]): StatsSummary['autoAcceptance'] {
+  const autoLogs = logs.filter((l) => (l.chainAttempts?.length || 0) > 0);
+  const autoOk = autoLogs.filter((l) => l.ok);
+  const ratio = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 10000) / 10000 : null);
+  const ttfts = autoOk.filter((l) => l.stream && typeof l.ttftMs === 'number').map((l) => l.ttftMs as number).sort((a, b) => a - b);
+  return {
+    autoRequests: autoLogs.length,
+    crossCandidateFailRate: ratio(autoOk.filter((l) => (l.chainAttempts?.length || 0) > 1).length, autoOk.length),
+    // 全链耗尽 = auto 域内最终失败（非 ok）；499 客户端取消不计（与速度排行口径一致）；429 透传终态同样是耗尽（链内已试尽所有 key/候选）
+    chainExhaustedRate: ratio(autoLogs.filter((l) => !l.ok && l.status !== 499).length, autoLogs.length),
+    p95TtftStreamMs: ttfts.length ? ttfts[Math.min(ttfts.length - 1, Math.floor(ttfts.length * 0.95))] : null,
   };
 }
 
@@ -266,12 +289,12 @@ export interface SpeedReport {
   unattributed: SpeedRow | null;
 }
 
-export function buildSpeedStats(rawHours: number = 24): SpeedReport {
+export function buildSpeedStats(rawHours: number = 24, bounds?: { from?: number; to?: number }): SpeedReport {
   const q = Number(rawHours); // DR-SI-8：归一钳制（NaN→24，clamp 0..87600），不 400
   const hours = Number.isFinite(q) ? Math.min(Math.max(Math.trunc(q), 0), 87600) : 24;
-  const to = Date.now();
-  const from = hours > 0 ? to - hours * 3600_000 : 0;
-  const logs = store.db.logs.filter((l) => l.ts >= from);
+  const to = bounds?.to ?? Date.now();
+  const from = bounds?.from ?? (hours > 0 ? to - hours * 3600_000 : 0); // G21③：同 buildStats
+  const logs = store.db.logs.filter((l) => l.ts >= from && l.ts <= to);
   // 归一键与 byRoutedTo 逐字同键（DR-SI-3）：两页数字可互相对账；auto 链败归 auto 名而非末位候选
   const keyOf = (l: RequestLog) => l.routedTo || (l.chainAttempts?.length ? l.requestedModel : l.publicName) || '-';
   const pctl = (arr: number[], p: number) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : undefined);

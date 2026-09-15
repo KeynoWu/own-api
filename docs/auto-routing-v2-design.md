@@ -231,9 +231,12 @@ e2e 295→300、hardening 184→191。
    （饱和但健康候选以 e.ok=true 不进 excluded 层）——结构化补齐缓交至观测面下一轮。
 6. **链内 speedFactor 逐跳现读**：health 在链内冻结（首跳口径），速度因子随每次 eval 现读 5s 缓存——
    单请求内可能因子漂移，接受（读缓存 5s 内一致）。
-7. **§6 验收基建缓交**：三指标（跨候选失败率/全链失败率/p95 TTFT）与 G21②③（口径改
-   chainAttempts.length>1、buildStats from/to 参数）未建，「降幅 ≥30% 否则回滚」判据暂依赖
-   /auto-health 观测面人工判读；autoVision.enabled 完整闸（软排除/bias 受闸）与新设置管理台入口同批缓交。
+7. **§6 验收基建与回滚闸（P2.1 已补齐，2026-09）**：autoVision.enabled 完整闸（软排除/visionBias
+   随学习闭环一起受闸，R9 语义完整）；G21 三指标落地为 `stats.autoAcceptance`（跨候选失败率按
+   chainAttempts.length>1、全链耗尽按「非 ok 非 499」——429 透传终态同样是耗尽；auto 域限定
+   chainAttempts 非空，direct 流量与未尝试请求不进分母）；buildStats/buildSpeedStats 支持 from/to
+   显式窗口；管理台设置页新增 auto 路由三组开关、概览页新增「auto 验收对比」卡（含 G21①
+   logRetention<200000 提醒与周样本 <100 作废提示）。三组新设置校验与指标口径均有 e2e 钉。
 
 测试钉索引：SAT-1~8 / VIS-1~8 / SEC-2 / G18 / SPD-1~5 / STK-2 / F5.2 / R7 / R8 / N11 / C11 / G1~G18 /
 审查钉（涓流钉死/墙钟回拨/热改重钳/冷库 null/cap=1/factor 端到端分化/G15 边界/非流式/direct 负向）。

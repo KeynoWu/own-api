@@ -460,6 +460,56 @@ check('F2.1 对照：D 格短接不烧全链（mGpt 未被尝试）', ((await ge
 // —— 饱和态（P1 §2）：SAT-1/2/3/4/5/6/7 ——
 const origSettingsP1 = (await api('/api/settings', { headers: ADMIN })).body;
 const patchSt = async (b: any) => api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify(b) });
+// P2.1 设置校验钉（审查 T5：三组新键此前零钉）——钳制/显式拒绝/回读
+const rSt1 = await patchSt({ autoSpeedFactor: { enabled: true, floor: 0.8, cap: 1.6 } });
+check('P2.1 设置钉：floor/cap 合法值生效并回读', rSt1.status === 200 && rSt1.body?.autoSpeedFactor?.floor === 0.8 && rSt1.body?.autoSpeedFactor?.cap === 1.6, JSON.stringify(rSt1.body?.autoSpeedFactor));
+const rSt2 = await patchSt({ autoSpeedFactor: { enabled: true, floor: 0.02, cap: 99 } });
+check('P2.1 设置钉：越界 floor/cap 被钳进 [0.1,1]/[1,10]', rSt2.body?.autoSpeedFactor?.floor === 0.1 && rSt2.body?.autoSpeedFactor?.cap === 10, JSON.stringify(rSt2.body?.autoSpeedFactor));
+const rSt3 = await patchSt({ autoSpeedFactor: { enabled: true, floor: 1.5, cap: 1.2 } });
+// floor 先钳进 [0.1,1] 再比较——钳制后 floor≤cap 恒成立，显式拒绝是防御性死支（S4 复核口径）；钉「永不倒挂」而非「会拒绝」
+check('P2.1 设置钉：floor>cap 输入钳制后恒不倒挂（floor≤cap 不变式）', rSt3.status === 200 && rSt3.body?.autoSpeedFactor?.floor <= rSt3.body?.autoSpeedFactor?.cap, JSON.stringify(rSt3.body?.autoSpeedFactor));
+const rSt4 = await patchSt({ autoSaturation: { enabled: false, baseSec: 3, maxSec: 100000 } });
+check('P2.1 设置钉：autoSaturation 关闭生效、baseSec/maxSec 钳进界', rSt4.body?.autoSaturation?.enabled === false && rSt4.body?.autoSaturation?.baseSec === 5 && rSt4.body?.autoSaturation?.maxSec === 86400, JSON.stringify(rSt4.body?.autoSaturation));
+const rSt5 = await patchSt({ autoVision: { enabled: true, heuristics: true, evil: 'x' }, unknownKey: 1 });
+check('P2.1 设置钉：未知顶层键进 _rejected、白名单外子键被剥离（输出白名单重建，无污染面）', (rSt5.body?._rejected || []).some((x: any) => String(x).includes('unknownKey')) && rSt5.body?.autoVision?.evil === undefined, JSON.stringify(rSt5.body?._rejected));
+await patchSt({ autoSaturation: { enabled: true, baseSec: 60, maxSec: 1800 }, autoSpeedFactor: { enabled: true, floor: 0.5, cap: 2.0 } }); // 归位（SAT/SPD 钉依赖默认值）
+// P2.1 验收指标口径钉（G21/§6）：auto 域限定 chainAttempts 非空；from/to 显式窗口
+// 场景 A：双候选首候选 429×2 key → 续链成功（chainAttempts=3）→ 窗口恰 1 条日志
+{
+  const t0 = Date.now();
+  const chAcc = await mkCh('Auto Acc', 'openai', ['k-429-acc1', 'k-429-acc2']);
+  const mAccA = (await mkModel({ publicName: 'acc-a', channelId: chAcc.id, upstreamModel: 'mock-gpt-5' })).body;
+  const mAccB = (await mkModel({ publicName: 'acc-b', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
+  await mkAuto({ publicName: 'auto_acc', candidates: [{ routeId: mAccA.id, weight: 10000 }, { routeId: mAccB.id, weight: 1 }], stickyTtlMs: 0 });
+  const rAcc = await autoReq('auto_acc', { stream: true });
+  const t1 = Date.now();
+  // 同进程同钟：log.ts（请求起点）必落 [t0,t1]——窗口取请求区间本身，前序流量（整段 e2e 才 ~2s 墙钟）不进窗
+  const st = (await api('/api/stats?from=' + t0 + '&to=' + (t1 + 1), { headers: ADMIN })).body;
+  const ac = st.autoAcceptance || {};
+  check('P2.1 指标钉：续链成功 → 跨候选失败率=1（1/1）、全链失败率=0、auto 域恰 1 请求', rAcc.status === 200 && ac.autoRequests === 1 && ac.crossCandidateFailRate === 1 && ac.chainExhaustedRate === 0, JSON.stringify(ac));
+  check('P2.1 指标钉：成功流式 TTFT p95 落窗', typeof ac.p95TtftStreamMs === 'number' && ac.p95TtftStreamMs > 0, JSON.stringify(ac));
+  // 场景 B：全链失败（单候选双 429 key 耗尽）→ 全链失败率=1、跨候选率=null（无成功样本）
+  const t2 = Date.now();
+  const chAcc2 = await mkCh('Auto Acc2', 'openai', ['k-429-acc3', 'k-429-acc4']);
+  const mAccC = (await mkModel({ publicName: 'acc-c', channelId: chAcc2.id, upstreamModel: 'mock-gpt-5' })).body;
+  await mkAuto({ publicName: 'auto_acc2', candidates: [{ routeId: mAccC.id, weight: 1 }], stickyTtlMs: 0 });
+  const rFail = await autoReq('auto_acc2');
+  const t3 = Date.now();
+  const st2 = (await api('/api/stats?from=' + t2 + '&to=' + (t3 + 1), { headers: ADMIN })).body;
+  const ac2 = st2.autoAcceptance || {};
+  // 终态 = 末次上游错误透传（全 429 耗尽 → 429，非 5xx）；耗尽口径按「非 ok 非 499」计（与 buildAcceptance 一致）
+  check('P2.1 指标钉：全链耗尽 → 失败率=1、无成功样本时跨候选率=null（不编造 0）', rFail.status === 429 && ac2.autoRequests === 1 && ac2.chainExhaustedRate === 1 && ac2.crossCandidateFailRate === null, JSON.stringify(ac2));
+  // 场景 C：direct 请求不进 auto 域（chainAttempts 空 → autoRequests=0、指标全 null）
+  const t4 = Date.now();
+  await api('/v1/chat/completions', { method: 'POST', headers: AH, body: JSON.stringify({ model: 'auto-m-gpt', messages: [{ role: 'user', content: 'hi' }] }) });
+  const t5 = Date.now();
+  const st3 = (await api('/api/stats?from=' + t4 + '&to=' + (t5 + 1), { headers: ADMIN })).body;
+  const ac3 = st3.autoAcceptance || {};
+  check('P2.1 指标钉：direct 流量不进验收域（autoRequests=0、三指标 null）', ac3.autoRequests === 0 && ac3.crossCandidateFailRate === null && ac3.chainExhaustedRate === null && ac3.p95TtftStreamMs === null, JSON.stringify(ac3));
+  await api('/api/routes/' + mAccA.id, { method: 'DELETE', headers: ADMIN });
+  await api('/api/routes/' + mAccB.id, { method: 'DELETE', headers: ADMIN });
+  await api('/api/routes/' + mAccC.id, { method: 'DELETE', headers: ADMIN });
+}
 await patchSt({ cooldownBaseMs: 1000 }); // key 冷却 1s：配合假时钟让「key 已恢复 + 饱和将尽」可测
 await resetAutoRT();
 // SAT-1：双 k-429 key 渠道单链内两 key 均 429 → 触发 (a) 进入饱和；后续请求不再选它
@@ -608,6 +658,16 @@ const ewText = ((await getLogs('auto_vis6'))[0]?.chainAttempts?.[0]?.pickSnapsho
 await autoReq('auto_vis6', { messages: twoImgs });
 const ewImg = ((await getLogs('auto_vis6'))[0]?.chainAttempts?.[0]?.pickSnapshot || []).find((x: any) => x.routeId === mVisU.id)?.ew;
 check('VIS-6 带图 unknown bias=0.25（ew 10000→2500）', ewText === 10000 && ewImg === 2500, `text=${ewText} img=${ewImg}`);
+// P2.1 完整闸（R9 回滚语义，缓交①）：autoVision.enabled=false → 软排除与 0.25 降权一起失效
+await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ autoVision: { enabled: false, heuristics: true } }) });
+await autoReq('auto_vis6', { messages: twoImgs });
+const ewGateOff = ((await getLogs('auto_vis6'))[0]?.chainAttempts?.[0]?.pickSnapshot || []).find((x: any) => x.routeId === mVisU.id)?.ew;
+check('P2.1 视觉闸：enabled=false → 带图 unknown 候选 bias 恒 1（ew 回 10000）', ewGateOff === 10000, `ew=${ewGateOff}`);
+const rVisGate = await autoReq('auto_vis1', { messages: imgMsg }); // 粘性绑定在 supportsVision=false 候选上
+check('P2.1 视觉闸：enabled=false → false 候选不再被软排除（粘性直接命中）', rVisGate.status === 200 && (await getLogs('auto_vis1'))[0]?.routedTo === 'auto-m-visoff', JSON.stringify({ routedTo: (await getLogs('auto_vis1'))[0]?.routedTo }));
+await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ autoVision: { enabled: true, heuristics: true } }) });
+const rVisBack = await autoReq('auto_vis1', { messages: imgMsg });
+check('P2.1 视觉闸：恢复 enabled → 软排除即刻回来（设置热读，改动即刻生效）', rVisBack.status === 200 && (await getLogs('auto_vis1'))[0]?.routedTo === 'auto-m-gpt', JSON.stringify({ routedTo: (await getLogs('auto_vis1'))[0]?.routedTo }));
 // VIS-7：带图 400 判定顺序——超窗（C10）先于视觉，不双重判定
 const mDual = (await mkModel({ publicName: 'auto-m-dual400', channelId: chAuto.id, upstreamModel: 'mock-dual400' })).body;
 const aVis7 = await mkAuto({ publicName: 'auto_vis7', candidates: [{ routeId: mDual.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });

@@ -546,6 +546,55 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
               el('td', { class: 'muted' }, (w.ttftP50 != null ? `TTFT p50 ${Math.round(w.ttftP50)}ms · ` : '') + (w.tokP50 != null ? `吞吐 p50 ${Math.round(w.tokP50)} tok/s` : '观测样本不足')))))));
       }
     }
+    // ---------- auto 验收对比（G21，P2.1 缓交②）：以部署时刻为界的前后窗三指标对比 ----------
+    const acc = el('div', { class: 'card', style: 'margin-top:12px' });
+    acc.append(el('h3', { style: 'margin:0 0 6px' }, 'auto 验收对比'));
+    acc.append(el('div', { class: 'muted', style: 'font-size:12px' },
+      '以「分界时刻」（如 v2.3 部署完成的时间点）为界，对比前后各 7 天的三项验收指标。门槛：跨候选失败率与全链失败率相对降幅 ≥30% 且绝对差 ≥1 个百分点，p95 首字延迟不劣化。'));
+    const accAt = el('input', { type: 'datetime-local', style: 'width:auto' });
+    const accBtn = el('button', { class: 'btn sm', style: 'margin-left:8px' }, '对比');
+    const accOut = el('div', { style: 'font-size:12.5px;margin-top:10px' });
+    const accErr = el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' });
+    accBtn.addEventListener('click', async () => {
+      if (!accAt.value) { accOut.innerHTML = ''; accErr.textContent = '先选择分界时刻'; return; }
+      const mid = new Date(accAt.value).getTime();
+      if (!Number.isFinite(mid)) { accErr.textContent = '分界时刻无效'; return; }
+      accBtn.disabled = true; accBtn.textContent = '计算中…'; accErr.textContent = '';
+      try {
+        const WEEK = 7 * 86400e3, now = Date.now();
+        const base = await api('/api/stats?from=' + Math.max(0, mid - WEEK) + '&to=' + mid);
+        const curr = await api('/api/stats?from=' + mid + '&to=' + Math.max(mid + 1000, now));
+        const A = base.autoAcceptance || {}, B = curr.autoAcceptance || {};
+        const pctFmt = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+        const msFmt = (v) => v == null ? '—' : Math.round(v) + 'ms';
+        const drop = (a, b) => (a != null && b != null && a > 0) ? (a - b) / a : null; // 相对降幅
+        const pp = (a, b) => (a != null && b != null) ? (a - b) * 100 : null;          // 绝对差（百分点）
+        const okRate = (a, b) => { const d = drop(a, b), w = pp(a, b); return (d != null && w != null && d >= 0.3 && w >= 1); };
+        const rowLine = (name, a, b, ok) => el('tr', {},
+          el('td', {}, name),
+          el('td', { class: 'mono' }, a), el('td', { class: 'mono' }, b),
+          el('td', {}, ok === null ? el('span', { class: 'muted' }, '样本不足') : el('span', { class: 'pill' + (ok ? '' : ' warn') }, ok ? '达标' : '未达标')));
+        const tbl = el('table', { style: 'width:100%;margin-top:8px;font-size:12.5px' },
+          el('thead', {}, el('tr', {}, el('td', { class: 'muted' }, '指标'), el('td', { class: 'muted' }, '基线周（分界前 7 天）'), el('td', { class: 'muted' }, '当前周（分界后至今）'), el('td', { class: 'muted' }, 'G21 门槛'))),
+          el('tbody', {},
+            rowLine('跨候选失败率（成功请求中换过候选的占比）', pctFmt(A.crossCandidateFailRate), pctFmt(B.crossCandidateFailRate), (A.autoRequests || 0) >= 100 && (B.autoRequests || 0) >= 100 ? okRate(A.crossCandidateFailRate, B.crossCandidateFailRate) : null),
+            rowLine('全链失败率（候选耗尽终态 5xx 占比）', pctFmt(A.chainExhaustedRate), pctFmt(B.chainExhaustedRate), (A.autoRequests || 0) >= 100 && (B.autoRequests || 0) >= 100 ? okRate(A.chainExhaustedRate, B.chainExhaustedRate) : null),
+            rowLine('p95 首字延迟（成功流式，越低越好）', msFmt(A.p95TtftStreamMs), msFmt(B.p95TtftStreamMs), (A.autoRequests || 0) >= 100 && (B.autoRequests || 0) >= 100 && A.p95TtftStreamMs != null && B.p95TtftStreamMs != null ? (B.p95TtftStreamMs <= A.p95TtftStreamMs) : null)));
+        accOut.innerHTML = '';
+        accOut.append(el('div', { class: 'muted', style: 'font-size:11px;margin-bottom:4px' },
+          'auto 域请求数：基线 ' + (A.autoRequests || 0) + ' · 当前 ' + (B.autoRequests || 0)));
+        accOut.append(tbl);
+        if ((A.autoRequests || 0) < 100 || (B.autoRequests || 0) < 100) accErr.textContent = 'G21：周样本 <100 本周作废顺延（当前基线 ' + (A.autoRequests || 0) + ' / 当前 ' + (B.autoRequests || 0) + '）——门槛判定仅作参考';
+      } catch (e) { accErr.textContent = '对比失败：' + e.message; }
+      accBtn.disabled = false; accBtn.textContent = '对比';
+    });
+    acc.append(el('div', { class: 'row', style: 'gap:8px;align-items:center;margin-top:8px' }, accAt, accBtn));
+    acc.append(accOut, accErr);
+    api('/api/settings').then((st) => {
+      if ((st.logRetention || 0) < 200000) acc.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:11.5px' },
+        'G21①：当前日志保留 ' + (st.logRetention || 0) + ' 条——验收基线周前请在「设置」把它提到 ≥200000，否则后半周样本会被静默裁掉，对比失真。'));
+    }).catch(() => {});
+    box.append(acc);
     if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
     return box;
   };
@@ -1142,6 +1191,10 @@ views.settings = async () => {
       autoMaxChainSeconds: Number(autoChain.value),
       debugHeaders: !!dbg.checked,
       fallbackChannelId: fb.value,
+      // P2.1：auto 路由 v2 三组开关（服务端校验钳制：floor∈[0.1,1]、cap∈[1,10]、baseSec∈[5,600]、maxSec∈[30,86400]、floor≤cap）
+      autoSaturation: { enabled: !!satEn.checked, baseSec: Number(satBase.value), maxSec: Number(satMax.value) },
+      autoVision: { enabled: !!visEn.checked, heuristics: !!visHeur.checked },
+      autoSpeedFactor: { enabled: !!spdEn.checked, floor: Number(spdFloor.value), cap: Number(spdCap.value) },
     };
     if (tok.value.trim()) patch.adminToken = tok.value.trim();
     try {
@@ -1154,6 +1207,25 @@ views.settings = async () => {
       else toast('已保存');
     } catch (e) { toast(e.message, true); }
   };
+  // ---------- auto 路由 v2（饱和/视觉/速度三组开关，P2.1 缓交③：回滚预案要有界面入口） ----------
+  box.append(el('h2', { style: 'margin-top:22px' }, 'auto 路由'));
+  const sw = (labelText, checked, hint) => {
+    const cb = el('input', { type: 'checkbox', ...(checked ? { checked: '' } : {}) });
+    box.append(el('label', { style: 'display:flex;gap:8px;align-items:center' }, cb, labelText));
+    if (hint) box.append(el('div', { class: 'muted', style: 'font-size:11px;margin:3px 0 6px' }, hint));
+    return cb;
+  };
+  const sv = (s2) => s2 || {};
+  const sat = sv(s.autoSaturation), vis = sv(s.autoVision), spd = sv(s.autoSpeedFactor);
+  const satEn = sw('饱和避让（渠道连续 429/超时 → 整段避让）', sat.enabled !== false, '同一渠道跨 key 连续触发时整段绕开，指数退避（baseSec 起、maxSec 封顶，24h 绝对帽）；剩余不足 5s 时仍给一次探测机会。关闭即回到逐 key 重试。');
+  const satBase = f('　饱和退避基数（秒）', 'autoSatBaseSec', sat.baseSec ?? 60, '首档冷却时长；每次重触发翻倍（5~600）');
+  const satMax = f('　饱和退避上限（秒）', 'autoSatMaxSec', sat.maxSec ?? 1800, '退避封顶（30~86400）；候选饱和期也可在路由页手动清除');
+  const visEn = sw('视觉适配（带图请求的候选过滤与降权）', vis.enabled !== false, '关闭后整套视觉路由决策一起失效：不再软排除不支持图片的候选、不再对未知候选降权 0.25、学习闭环停写（R9 回滚开关）。');
+  const visHeur = sw('　视觉家族启发式识别', vis.heuristics !== false, '导入模型时按已知多模态家族名自动预填 supportsVision 初值');
+  const spdEn = sw('速度因子（按流式实测吞吐软降权）', spd.enabled !== false, '快候选加权、慢候选降权（不剔除）；EMA 平滑 + 1h 半衰期，样本 <3 视为冷启动恒 1。关闭后全部候选 factor 恒 1。');
+  const spdFloor = f('　速度因子下限 floor', 'autoSpdFloor', spd.floor ?? 0.5, '慢候选最低权重系数（0.1~1，默认 0.5）');
+  const spdCap = f('　速度因子上限 cap', 'autoSpdCap', spd.cap ?? 2.0, '快候选最高权重系数（1~10，默认 2.0）；floor 不得大于 cap');
+  box.append(el('div', { class: 'muted', style: 'font-size:11px;margin:6px 0 0' }, '以上改动保存后即刻生效（设置热读），无需重启；也可用于逐项回滚。'));
   box.append(el('div', { class: 'row', style: 'margin-top:18px' },
     el('button', { class: 'btn primary', onclick: save }, '保存设置'),
   ));

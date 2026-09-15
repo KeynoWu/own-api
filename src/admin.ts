@@ -553,9 +553,15 @@ export function createAdmin(): Hono {
     return c.json({ ok: true });
   });
 
-  app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24))));
+  // G21③：from/to 显式窗口（ms）覆盖尾窗——管理台「auto 验收对比」卡以此取部署时刻前后各一周
+  const winOf = (c: any) => {
+    const from = Number(c.req.query('from'));
+    const to = Number(c.req.query('to'));
+    return Number.isFinite(from) && Number.isFinite(to) && to > from ? { from, to } : undefined;
+  };
+  app.get('/stats', (c) => c.json(buildStats(Number(c.req.query('hours') || 24), winOf(c))));
   // 速度排行（speed-insights v1.1）：hours 归一钳制在 buildSpeedStats 内（DR-SI-8）
-  app.get('/stats/speed', (c) => { const hv = c.req.query('hours'); return c.json(buildSpeedStats(hv === undefined || hv === '' ? 24 : Number(hv))); });
+  app.get('/stats/speed', (c) => { const hv = c.req.query('hours'); return c.json(buildSpeedStats(hv === undefined || hv === '' ? 24 : Number(hv), winOf(c))); });
   // ---------------- 检查更新（update-check v1）：纯手动触发，绝不启动自动联网——守住「不联网上报」承诺 ----------------
   app.get('/version', (c) => c.json({ version: APP_VERSION }));
   const GH_LATEST = 'https://api.github.com/repos/KeynoWu/own-api/releases/latest';
