@@ -352,17 +352,45 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
     for (const se of series) {
       const pts = buckets.map((b, i) => X(i).toFixed(1) + ',' + se.y(se.get(b)).toFixed(1)).join(' ');
       s.push('<polyline points="' + pts + '" fill="none" stroke="' + se.color + '" stroke-width="1.6"/>');
-      buckets.forEach((b, i) => {
-        const d = new Date(b.t);
-        const lb = (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
-        s.push('<circle cx="' + X(i).toFixed(1) + '" cy="' + se.y(se.get(b)).toFixed(1) + '" r="2.2" fill="' + se.color + '"><title>' + lb + ' · ' + se.name + ' ' + se.fmt(se.get(b)) + '</title></circle>');
-      });
+      buckets.forEach((b, i) => s.push('<circle cx="' + X(i).toFixed(1) + '" cy="' + se.y(se.get(b)).toFixed(1) + '" r="2.2" fill="' + se.color + '"/>'));
     }
     s.push('</svg>');
     const legend = el('div', { class: 'row', style: 'justify-content:center;gap:14px;margin-top:2px' },
       ...series.map((se) => el('span', { class: 'row', style: 'gap:5px;font-size:12px;color:' + se.color }, el('i', { style: 'width:8px;height:8px;border-radius:50%;background:' + se.color + ';display:inline-block' }), se.name)));
-    const wrap = el('div');
+    const wrap = el('div', { style: 'position:relative' });
     wrap.innerHTML = s.join('');
+    // —— 悬停：十字准线 + 系列高亮点 + 浮层数据卡（原生 title 已移除，避免双 tooltip）——
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = wrap.querySelector('svg');
+    const mkNs = (t, at) => { const n = document.createElementNS(NS, t); for (const k in at) n.setAttribute(k, at[k]); return n; };
+    const guide = mkNs('line', { y1: PT, y2: H - PB, stroke: '#4a5160', 'stroke-width': 1, 'stroke-dasharray': '3 3' });
+    const dots = series.map((se) => mkNs('circle', { r: 4.2, fill: se.color, stroke: '#0d0f13', 'stroke-width': 1.5 }));
+    const hit = mkNs('rect', { x: PL, y: PT, width: iw, height: ih, fill: 'transparent' });
+    for (const n of [guide, ...dots, hit]) { n.style.opacity = '0'; n.style.transition = 'opacity .15s'; svg.append(n); }
+    const tip = el('div', { style: 'position:absolute;pointer-events:none;background:var(--panel-2,#161922);border:1px solid var(--line,#262b35);border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.8;opacity:0;transition:opacity .15s;z-index:5;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.35)' });
+    wrap.append(tip);
+    hit.addEventListener('mouseleave', () => { for (const n of [guide, ...dots, tip]) n.style.opacity = '0'; });
+    hit.addEventListener('mousemove', (e) => {
+      const r = svg.getBoundingClientRect();
+      const vx = ((e.clientX - r.left) * W) / r.width;
+      const i = Math.max(0, Math.min(buckets.length - 1, Math.round(((vx - PL) / iw) * n)));
+      const b = buckets[i];
+      guide.setAttribute('x1', X(i)); guide.setAttribute('x2', X(i));
+      dots.forEach((c, si) => { c.setAttribute('cx', X(i)); c.setAttribute('cy', series[si].y(series[si].get(b))); });
+      const d = new Date(b.t);
+      const tl = (d.getMonth() + 1) + '/' + d.getDate() + (hourly ? ' ' + String(d.getHours()).padStart(2, '0') + ':00' : '');
+      const rows = [['请求数', num(b.requests) + (b.errors ? '（失败 ' + b.errors + '）' : '')]].concat(series.map((se) => [se.name, se.fmt(se.get(b))]));
+      tip.innerHTML = '<div style="color:var(--dimmer,#8b93a3);font-size:11px;margin-bottom:2px">' + tl + '</div>' +
+        rows.map(([k, v], ri) => '<div' + (ri === 0 ? ' style="font-weight:600"' : '') + '>' +
+          (ri === 0 ? '' : '<i style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + series[ri - 1].color + ';margin-right:6px"></i>') +
+          k + '<span style="float:right;margin-left:14px;font-family:ui-monospace,SFMono-Regular,monospace">' + v + '</span></div>').join('');
+      for (const n of [guide, ...dots, tip]) n.style.opacity = '1';
+      const px = (X(i) * r.width) / W, py = e.clientY - r.top;
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let lx = px + 14; if (lx + tw > r.width - 4) lx = px - tw - 14;
+      tip.style.left = Math.max(2, lx) + 'px';
+      tip.style.top = Math.max(2, Math.min(py - th / 2, r.height - th - 2)) + 'px';
+    });
     const out = el('div', {}, wrap, legend);
     return out;
   };
