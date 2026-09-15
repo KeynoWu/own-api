@@ -3,6 +3,7 @@
 [![官网](https://img.shields.io/badge/%F0%9F%8C%90_%E5%AE%98%E7%BD%91-own--api_%E8%90%BD%E5%9C%B0%E9%A1%B5-38BDF8)](https://keynowu.github.io/own-api/)
 [![下载](https://img.shields.io/github/v/release/KeynoWu/own-api?label=%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E5%8C%85&color=22c55e)](https://github.com/KeynoWu/own-api/releases)
 [![ci](https://github.com/KeynoWu/own-api/actions/workflows/ci.yml/badge.svg)](https://github.com/KeynoWu/own-api/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 本地大模型管理器 + 统一代理网关（号池）。
 
@@ -282,3 +283,9 @@ test/e2e.ts       端到端自测（理想上游）
 test/hardening.ts 加固回归（脏上游，固化审查发现）
 scripts/seed-demo.ts  演示数据
 ```
+
+## 协议
+
+[MIT](LICENSE)。随便用、随便改、随便集成，保留版权声明即可；本仓库的源码、管理台与 `docs/` 设计文档同协议。
+
+一如既往：上游 key、路由配置与用量数据全部留在你本机（数据目录 `~/.own-api`），本软件不联网上报、不含任何遥测。

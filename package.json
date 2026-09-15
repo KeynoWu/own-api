@@ -2,6 +2,7 @@
   "name": "own-api",
   "version": "0.1.14",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "本地大模型管理器 + 统一代理网关（号池）",
   "scripts": {
