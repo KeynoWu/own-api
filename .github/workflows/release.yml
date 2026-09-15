@@ -98,6 +98,16 @@ jobs:
       - name: 触发防呆（workflow_dispatch 无 tag，发布会造出不存在的版本引用）
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: echo "::error::release 只允许 v* tag 推送触发；dispatch 仅可用于验证 build" && exit 1
+      # checkout 必须先于 download-artifact：checkout 的 git clean 会清掉未跟踪的 artifacts/
+      # （v0.1.11 第三次事故同根因——softprops 排在 checkout 后，glob 永远零匹配）
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: 发布说明＝CHANGELOG 对应版本节（v0.1.6 曾只挂出裸对比链接）
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v tag="## v${VER}（" 'index($0,tag)==1{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release-body.md
+          [ -s release-body.md ] || { echo "::warning::CHANGELOG 找不到 v${VER} 节，release 说明退化为对比链接"; }
+          printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: artifacts, merge-multiple: 'true' }
       # v0.1.10 事故修复：upload-artifact v4 按匹配目录保留 dmg//nsis/ 子层，merge 后产物在
@@ -131,14 +141,6 @@ jobs:
             esac
           done
           ls -la
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: 发布说明＝CHANGELOG 对应版本节（v0.1.6 曾只挂出裸对比链接）
-        shell: bash
-        run: |
-          VER="${GITHUB_REF_NAME#v}"
-          awk -v tag="## v${VER}（" 'index($0,tag)==1{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release-body.md
-          [ -s release-body.md ] || { echo "::warning::CHANGELOG 找不到 v${VER} 节，release 说明退化为对比链接"; }
-          printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           # 平铺 glob（`**` 不匹配根层文件）；前提由「产物平铺归一」步骤保证——v0.1.9/v0.1.10 两次
