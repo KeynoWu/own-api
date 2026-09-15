@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>own-api · 多个大模型，一个管理台管住</title>
-<meta name="description" content="own-api：跑在你本机的大模型管理台 + 统一网关。公司发的每个模型集中接入、可视化管理：改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型。macOS / Windows 桌面版，数据全在本地。">
+<meta name="description" content="own-api：跑在你本机的大模型管理台 + 统一网关。公司发的每个模型集中接入、可视化管理：改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型；本机装了的 agent（ZCode / oh-my-pi / Claude Code / dsh）一键写入统一入口。macOS / Windows 桌面版，数据全在本地。">
 <meta property="og:type" content="website">
 <meta property="og:title" content="own-api · 多个大模型，一个管理台">
-<meta property="og:description" content="集中管理公司发的多个大模型：统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂。本机运行，数据不出门。">
+<meta property="og:description" content="集中管理公司发的多个大模型：统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂；本机 agent 一键接入。本机运行，数据不出门。">
 <meta property="og:url" content="https://keynowu.github.io/own-api/">
 <meta name="theme-color" content="#0B1120">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230F1A2E'/%3E%3Cpath d='M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z' fill='%23EAF1FB'/%3E%3Cpath d='M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z' fill='%23EAF1FB'/%3E%3Ccircle cx='32' cy='32' r='6.5' fill='%2338BDF8'/%3E%3C/svg%3E">
@@ -175,6 +175,12 @@ h2{font-size:clamp(24px,3.2vw,34px);line-height:1.3;margin-bottom:14px}
 .qs-step b{flex:none;width:30px;height:30px;border-radius:8px;background:var(--accent-dim);border:1px solid rgba(56,189,248,.3);color:var(--accent-strong);font:700 14px/28px var(--mono);text-align:center}
 .qs-step h4{font-size:15px;margin-bottom:4px}
 .qs-step p{color:var(--muted);font-size:13.5px;line-height:1.65}
+/* agents 一键接入节：4 卡网格 + 2×2 步骤网格（复用 .feat / .qs-step 语言） */
+.feats.four{grid-template-columns:repeat(4,1fr)}
+@media (max-width:980px){.feats.four{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.feats.four{grid-template-columns:1fr}}
+.qs-steps.two{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)}
+@media (max-width:780px){.qs-steps.two{grid-template-columns:1fr}}
 .code-card{background:#0A0F1D;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden}
 .tabs{display:flex;align-items:center;border-bottom:1px solid var(--border-soft);background:var(--surface);padding:0 6px;gap:2px;overflow-x:auto}
 .tab{background:none;border:none;color:var(--muted);font:500 13.5px/1 var(--sans);padding:14px 14px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
@@ -242,6 +248,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
       <a href="#features">能力</a>
       <a href="#how">原理</a>
       <a href="#quickstart">快速开始</a>
+      <a href="#agents">一键接入</a>
       <a href="#faq">FAQ</a>
     </nav>
     <a class="btn btn-primary btn-sm nav-cta" href="#download">下载</a>
@@ -270,7 +277,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
           GitHub
         </a>
       </div>
-      <p class="hero-note">490+ 项自动化测试 · 单文件存储 · 无需数据库 · 免费分发</p>
+      <p class="hero-note">660+ 项自动化测试 · 单文件存储 · 无需数据库 · 免费分发</p>
     </div>
 
     <div class="reveal">
@@ -433,7 +440,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
       <div class="qs-steps">
         <div class="qs-step reveal"><b>1</b><div><h4>安装桌面版</h4><p>macOS 拖进应用程序，Windows 双击安装。托盘出现图标即服务已启动。</p></div></div>
         <div class="qs-step reveal"><b>2</b><div><h4>加渠道、导模型</h4><p>粘上游 baseURL 和 key（一行一个），点「测试连通」，上游模型一键导入路由表。</p></div></div>
-        <div class="qs-step reveal"><b>3</b><div><h4>复制接入片段</h4><p>管理台「接入方式」页，按 agent 复制现成环境变量，替换即生效。</p></div></div>
+        <div class="qs-step reveal"><b>3</b><div><h4>复制接入片段</h4><p>管理台「接入方式」页，按 agent 复制现成环境变量，替换即生效。本机装了 ZCode / oh-my-pi / Claude Code / dsh？<a href="#agents">连复制都不用，直接一键写入</a>。</p></div></div>
       </div>
       <div class="code-card reveal">
         <div class="tabs" role="tablist" aria-label="接入示例">
@@ -461,6 +468,49 @@ claude
 <span class="c">// 429 / 5xx / 超时自动换候选续链，客户端无感</span></code></pre>
       </div>
     </div>
+  </div>
+</section>
+
+<!-- ================= AGENT ONE-CLICK ================= -->
+<section id="agents" aria-labelledby="ag-h">
+  <div class="wrap">
+    <p class="sec-tag reveal">One-click setup</p>
+    <h2 id="ag-h" class="reveal">本机装了的 agent，一键写进去</h2>
+    <p class="sec-sub reveal">上一节那两行环境变量也可以不用手动改：管理台会认出本机装了哪些受支持的 agent，把统一入口和这把 key 直接写进它们各自的配置文件。一家一个向导，配几台点几次——每台都能独立撤销，互不影响。</p>
+
+    <div class="feats four">
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="M12 12 4 7.5M12 12l8-4.5M12 12v9"/></svg></span>
+        <h3>ZCode</h3>
+        <p>写 <span class="mono">~/.zcode/v2/config.json</span>：新增 own-api 条目与 key；原有 provider、字段顺序、无尾换行这些细节原样保留。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 14 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".45"/></svg></span>
+        <h3>oh-my-pi</h3>
+        <p>写 <span class="mono">~/.omp/agent/models.yml</span> 与 <span class="mono">config.yml</span>：模型清单整块接管，<span class="mono">modelRoles</span> 逐键合并——默认只接管 <span class="mono">default</span> 槽，其余角色一个不动。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg></span>
+        <h3>Claude Code</h3>
+        <p>写 <span class="mono">~/.claude/settings.json</span>：<span class="mono">env</span> 逐键合并（入口、令牌、模型名），插件、状态栏这些既有内容一字不动。</p>
+      </article>
+      <article class="feat reveal">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/></svg></span>
+        <h3>dsh</h3>
+        <p>写 <span class="mono">~/.dsh/settings.yaml</span>；明文 key 只落它自己凭据库的一格，<span class="mono">records</span> 等其它内容不碰。两份文件它都在监听，<b>写完不用重启</b>。</p>
+      </article>
+    </div>
+
+    <div class="qs-grid" style="margin-top:var(--sp-6);grid-template-columns:1fr">
+      <div class="qs-steps two">
+        <div class="qs-step reveal"><b>1</b><div><h4>自动识别</h4><p>「对外 Key」页点「接入 Agent」：本机装了哪家自动亮起；模型清单按这把 key 的权限投影，与 <span class="mono">/v1/models</span> 同一个来源。</p></div></div>
+        <div class="qs-step reveal"><b>2</b><div><h4>预览 diff</h4><p>写进哪份文件、动哪几个键，逐行预览；密钥一律掩码显示。确认前盘上一字不落，不满意随时关掉。</p></div></div>
+        <div class="qs-step reveal"><b>3</b><div><h4>确认写入</h4><p>先备份 <span class="mono">.own-api-bak</span>（权限恒收紧 0600）→ 原子写入 → 写后回读校验。只动自己的块：注释、别人的 provider、其它命名空间原样保留。</p></div></div>
+        <div class="qs-step reveal"><b>4</b><div><h4>接入清单里管</h4><p>「接入方式」页集中管理：漂移检测、连通探针、一键同步刷回（网关换端口、模型清单变旧、被改回去了）、一键撤销还原。</p></div></div>
+      </div>
+    </div>
+
+    <p class="dl-note reveal" style="margin-top:var(--sp-2)">同一把 key 可以喂给本机所有 agent，也可以不同 key 接不同 agent；写入接口只有本机能调（回环硬闸），浏览器与局域网都够不着。Codex 等暂未支持的客户端，用上一节的接入片段手动配置即可。</p>
   </div>
 </section>
 
@@ -516,6 +566,10 @@ claude
       <details class="reveal">
         <summary>支持哪些上游协议？Codex 新版能用吗？</summary>
         <p class="a">OpenAI 兼容（<code>/v1/chat/completions</code>）与 Anthropic 原生（<code>/v1/messages</code>）双向入口、双向互转，另兼容 legacy completions 与 embeddings。注意暂不支持 OpenAI Responses API（<code>/v1/responses</code>），这类客户端请切到 chat completions 模式。</p>
+      </details>
+      <details class="reveal">
+        <summary>一键接入 agent，会动我已有的配置吗？</summary>
+        <p class="a">只动自己的块：merge-only 写入，你的注释、其他 provider、其它命名空间原样保留；解析失败、目标是符号链接、同 id 条目指向别家——一律拒写不猜。写前自动备份为 <code>.own-api-bak</code>（权限恒收紧 0600），写后回读校验；「接入方式」页可一键撤销，逐键还原写前原值，你自己后来改过的值不会被删。撤销时条目已不指向本网关会<b>不删只登记</b>，防止误清你手建的配置。写入接口只有本机直连能调，浏览器、局域网、公网都够不着。</p>
       </details>
       <details class="reveal">
         <summary>auto 路由会不会把请求打到我不想用的模型？</summary>
