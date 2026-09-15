@@ -1573,6 +1573,8 @@ section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0�
   };
   const rawZ = () => readFileSync(ZF, 'utf8');
   const rdZ = () => JSON.parse(rawZ());
+  // win 没有 POSIX 模式位：chmodSync 成功但 statSync 一律报 0o666，mode 断言在 win 无意义——跳过（同 hardening.ts 口径）
+  const posix = process.platform !== 'win32';
   const modeZ = () => statSync(ZF).mode & 0o777;
   const blk = () => rdZ().provider['own-api'];
   const FOREIGN = { provider: { 'builtin:zai': { name: 'Z.ai', kind: 'anthropic', options: { apiKey: 'glm-secret', baseURL: 'https://api.z.ai/api/anthropic' }, models: { 'GLM-5-Turbo': { limit: { context: 200000 } } } } }, ui: { theme: 'dark' } };
@@ -1622,17 +1624,17 @@ section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0�
   check('AI-4 每个模型带 context_length（有值时）投影成 limit.context', blk().models['gpt-4o']?.limit?.context > 0, JSON.stringify(blk().models['gpt-4o']));
   check('AI-6 merge-only：别家条目与无关顶层键原样保留', rdZ().provider['builtin:zai'].options.apiKey === 'glm-secret' && rdZ().ui?.theme === 'dark', '');
   check('AI-6 非托管条目在文件中的位置未被移动（merge 而非整文件重排）', rawZ().indexOf('"builtin:zai"') < rawZ().indexOf('"own-api"'), '');
-  check('AI-7 保持原文件的无尾换行 / 2 空格缩进 / 0644', !rawZ().endsWith('\n') && /\n  "provider"/.test(rawZ()) && modeZ() === 0o644, `eol=${rawZ().endsWith('\n')} mode=${modeZ().toString(8)}`);
+  check('AI-7 保持原文件的无尾换行 / 2 空格缩进 / 0644', !rawZ().endsWith('\n') && /\n  "provider"/.test(rawZ()) && (!posix || modeZ() === 0o644), `eol=${rawZ().endsWith('\n')} mode=${modeZ().toString(8)}${posix ? '' : '（win 跳mode）'}`);
   putZ(FOREIGN, { eol: true, indent: '    ', mode: 0o600 });
   const a7b = await APPLY(base);
   // own-api 在第 3 层（provider → own-api → name），4 空格缩进下前导是 12 个空格
-  check('AI-7b 另一形态同样保持（4 空格 + 有尾换行 + 0600 不升级）', a7b.status === 200 && rawZ().endsWith('\n') && /\n {4}"provider"/.test(rawZ()) && /\n {12}"name": "own-api"/.test(rawZ()) && modeZ() === 0o600, `mode=${modeZ().toString(8)} eol=${rawZ().endsWith('\n')} status=${a7b.status}`);
+  check('AI-7b 另一形态同样保持（4 空格 + 有尾换行 + 0600 不升级）', a7b.status === 200 && rawZ().endsWith('\n') && /\n {4}"provider"/.test(rawZ()) && /\n {12}"name": "own-api"/.test(rawZ()) && (!posix || modeZ() === 0o600), `mode=${modeZ().toString(8)} eol=${rawZ().endsWith('\n')} status=${a7b.status}${posix ? '' : '（win 跳mode）'}`);
   const beforeNoop = rawZ();
   const noop: any = (await APPLY(base)).body;
   check('AI-5 幂等：二次 apply 全 noop 且盘上字节完全相同（不与 agent 抢写）', noop.steps.every((s: any) => s.state === 'noop') && rawZ() === beforeNoop, JSON.stringify(noop.steps.map((s: any) => s.state)));
   rmSync(ZF);
   await APPLY(base);
-  check('AI-8 无原文件可继承 mode 时新建 0600', modeZ() === 0o600, modeZ().toString(8));
+  check('AI-8 无原文件可继承 mode 时新建 0600', !posix || modeZ() === 0o600, modeZ().toString(8));
   check('AI-8 写前留 .own-api-bak（同路径复写不产生 bak 堆积）', existsSync(ZF + '.own-api-bak') && !existsSync(ZF + '.own-api-bak.1'), '');
 
   const chAnth: any = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'ai-anth', baseUrl: 'https://anth.test', protocol: 'anthropic', keys: [{ key: 'sk-an' }] }) })).body;
@@ -1764,7 +1766,7 @@ section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0�
   const cRaw = rawC();
   check('AI-29 注释/块标量无损 + 长值不被折行（lineWidth:0 的实测承诺）', cRaw.includes('# 用户的头注释') && cRaw.includes('block: |') && cRaw.includes('  keep1') && new RegExp(`^longNote: ${LONG}$`, 'm').test(cRaw), cRaw.split('\n').find((l) => l.startsWith('longNote'))?.length + ' 字符仍单行');
   check('AI-29 已知让步如实钉住：空 flow 序列折叠成一行（语义等价，不假装无损）', cRaw.includes('empty: []') && Array.isArray(cAfter.empty) && cAfter.empty.length === 0 && cAfter.symbolPreset === 'unicode' && cAfter.memory.backend === 'local', cRaw.split('\n').find((l) => l.startsWith('empty')) || '');
-  check('AI-30 保持原文件 mode 0600 且落备份', (statSync(MF).mode & 0o777) === 0o600 && (statSync(CF).mode & 0o777) === 0o600 && existsSync(`${CF}.own-api-bak`), `${(statSync(CF).mode & 0o777).toString(8)}`);
+  check('AI-30 保持原文件 mode 0600 且落备份', (!posix || ((statSync(MF).mode & 0o777) === 0o600 && (statSync(CF).mode & 0o777) === 0o600)) && existsSync(`${CF}.own-api-bak`), `${(statSync(CF).mode & 0o777).toString(8)}${posix ? '' : '（win 跳mode）'}`);
   const driftOmp = async () => ((await LINKS()).find((l) => l.agentId === 'omp') || {}) as any;
   check('AI-31 刚写完 drift=consistent', (await driftOmp()).drift === 'consistent', JSON.stringify((await driftOmp()).driftDetail));
   // 只改我方块内部的文本：全文 replace 会先命中 jyld（它的 api 一模一样），改到别人身上测的就不是我方域了
@@ -1809,7 +1811,7 @@ section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0�
 
   rmSync(OM, { recursive: true, force: true });
   const of2: any = (await APPLY(OM_BASE)).body;
-  check('AI-37 新装态（目录都不在）能建目录落盘，新建文件一律 0600', of2.status === 'success' && existsSync(MF) && existsSync(CF) && (statSync(MF).mode & 0o777) === 0o600 && parseY(CF).state.data.modelRoles.default === 'own-api/gpt-4o', JSON.stringify(of2.steps.map((s: any) => [s.state, s.ok])));
+  check('AI-37 新装态（目录都不在）能建目录落盘，新建文件一律 0600', of2.status === 'success' && existsSync(MF) && existsSync(CF) && (!posix || (statSync(MF).mode & 0o777) === 0o600) && parseY(CF).state.data.modelRoles.default === 'own-api/gpt-4o', JSON.stringify(of2.steps.map((s: any) => [s.state, s.ok])));
   await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
 
   // ---- sync：账本驱动的「一键刷回」（漂移 / 网关换端口 / 模型清单变旧）----
@@ -1945,7 +1947,7 @@ section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0�
 
   rmSync(CCF, { force: true });
   const cfresh: any = (await APPLY(CL)).body;
-  check('AI-59 claude 全新装态（settings.json 不存在）能建文件，且默认 0600', cfresh.status === 'success' && existsSync(CCF) && (statSync(CCF).mode & 0o777) === 0o600 && rdC().env.ANTHROPIC_MODEL === 'gpt-4o', JSON.stringify(cfresh.steps.map((s: any) => s.state)));
+  check('AI-59 claude 全新装态（settings.json 不存在）能建文件，且默认 0600', cfresh.status === 'success' && existsSync(CCF) && (!posix || (statSync(CCF).mode & 0o777) === 0o600) && rdC().env.ANTHROPIC_MODEL === 'gpt-4o', JSON.stringify(cfresh.steps.map((s: any) => s.state)));
   await api('/api/agents/claude-code', { method: 'DELETE', headers: ADMIN });
 
   // 作者级守卫：把 omp 的 roleTarget 摘掉，角色就无人承接——计划必须拒绝、apply 必须不落盘
@@ -2057,7 +2059,7 @@ records:
   check('AI-63 catalog 投影只在路由登记了窗口才写数字（不拿 128k 冒充用户真实窗口）', Array.isArray(dAfter['llm-pi-ai'].providers['own-api'].models) && dAfter['llm-pi-ai'].providers['own-api'].models.every((m: any) => m.id && m.name === m.id), JSON.stringify(dAfter['llm-pi-ai'].providers['own-api'].models));
   check('AI-64 merge-only：别人的 provider、行尾注释、头注释、非模型 namespace 全部原样', readFileSync(DSF, 'utf8').includes('# 用户自己的注释') && readFileSync(DSF, 'utf8').includes('# 行尾注释也是用户的') && dAfter['llm-pi-ai'].providers.jyld.baseURL === 'https://tokenrhythm.studio/v1' && dAfter['ui-theme'].fontSize === 16, '邻居被碰');
   check('AI-64 凭据库只动我们那一格：别人的 ref、records 授权、version 全部活着', dCreds.refs.JYLD_API_KEY === 'jyld-old-secret' && dCreds.records['client-connection/browser-session'].payload.secret === 'grant-secret-keep' && dCreds.version === 1 && Object.keys(dCreds.refs).length === 2, JSON.stringify(Object.keys(dCreds)));
-  check('AI-64 两个文件的 0600 都必须保住——dsh 见到多用户可读的凭据库会拒绝加载', (statSync(DSF).mode & 0o777) === 0o600 && (statSync(DCF).mode & 0o777) === 0o600, `settings ${(statSync(DSF).mode & 0o777).toString(8)} creds ${(statSync(DCF).mode & 0o777).toString(8)}`);
+  check('AI-64 两个文件的 0600 都必须保住——dsh 见到多用户可读的凭据库会拒绝加载', !posix || ((statSync(DSF).mode & 0o777) === 0o600 && (statSync(DCF).mode & 0o777) === 0o600), `settings ${(statSync(DSF).mode & 0o777).toString(8)} creds ${(statSync(DCF).mode & 0o777).toString(8)}${posix ? '' : '（win 跳mode）'}`);
   const da2: any = (await APPLY(D)).body;
   check('AI-65 二次 apply 全 noop（含凭据库：同值不重写）', da2.status === 'success' && da2.steps.every((s: any) => s.state === 'noop'), JSON.stringify(da2.steps.map((s: any) => s.state)));
   check('AI-65 刚写完 drift=consistent', (await D_LINK()).drift === 'consistent', (await D_LINK()).driftDetail);
@@ -2077,7 +2079,7 @@ records:
   const d67 = [dd.body?.ok === true, dBack['llm-pi-ai'].providers['own-api'] === undefined, dBack['llm-pi-ai'].providers.jyld !== undefined, dBack['agent-default-model'].provider === 'jyld', dBack['agent-default-model'].model === 'glm-5.3-flash'];
   check('AI-67 撤销：块型那一格整块摘除（块型无 prev 可还原，兜底是 .bak）、指针逐键回到 jyld、别人家 provider 还在', d67.every(Boolean), `ok/块摘除/邻居在/指针provider/指针model → ${JSON.stringify(d67)}`);
   check('AI-67b noop 不抹掉上一轮的写前值：sync 没动凭据那格，撤销仍还原成用户最早那把 key（不是我们那把）', dCredsBack.refs.OWN_API_API_KEY === 'old-own-api-key', String(dCredsBack.refs.OWN_API_API_KEY));
-  check('AI-67 别人的东西一个没少（jyld 的 ref 与 records 授权仍在，文件仍 0600）', dCredsBack.refs.JYLD_API_KEY === 'jyld-old-secret' && !!dCredsBack.records && (statSync(DCF).mode & 0o777) === 0o600 && (await D_LINK()).agentId === undefined, JSON.stringify(Object.keys(dCredsBack)));
+  check('AI-67 别人的东西一个没少（jyld 的 ref 与 records 授权仍在，文件仍 0600）', dCredsBack.refs.JYLD_API_KEY === 'jyld-old-secret' && !!dCredsBack.records && (!posix || (statSync(DCF).mode & 0o777) === 0o600) && (await D_LINK()).agentId === undefined, JSON.stringify(Object.keys(dCredsBack)));
   // 真机形状（彩排里踩到的）：用户自己早就把 own-api 指着我们同端口，第一轮 apply 指针那格就是 noop
   writeFileSync(DSF, `llm-pi-ai:
   providers:
@@ -2135,7 +2137,7 @@ ui-theme:
   putDsh();
   chmodSync(DSF, 0o644); // 用户的文件是 0644：我们不替他收紧
   await APPLY(D);
-  check('AI-69 备份是同一份明文的第二副本，权限一律收紧 0600——但源文件宽是用户的选择，不动它', (statSync(DSF).mode & 0o777) === 0o644 && (statSync(`${DSF}.own-api-bak`).mode & 0o777) === 0o600, `源 ${(statSync(DSF).mode & 0o777).toString(8)}｜bak ${(statSync(`${DSF}.own-api-bak`).mode & 0o777).toString(8)}`);
+  check('AI-69 备份是同一份明文的第二副本，权限一律收紧 0600——但源文件宽是用户的选择，不动它', !posix || ((statSync(DSF).mode & 0o777) === 0o644 && (statSync(`${DSF}.own-api-bak`).mode & 0o777) === 0o600), `源 ${(statSync(DSF).mode & 0o777).toString(8)}｜bak ${(statSync(`${DSF}.own-api-bak`).mode & 0o777).toString(8)}${posix ? '' : '（win 跳mode）'}`);
   await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN, body: JSON.stringify({ force: true }) });
   rmSync(join(AG, '.dsh'), { recursive: true, force: true });
 
