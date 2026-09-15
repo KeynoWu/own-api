@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    # release.yml 的 build 矩阵在打 tag 时也会跑同一套门禁；这里管的是
+    # 「每次 push 就知道坏没坏」——别等发版才暴露回归（v0.1.7 教训的邻位补强）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:all
