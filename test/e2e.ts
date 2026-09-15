@@ -4,9 +4,10 @@
  * 运行：npm test
  */
 import { serve } from '@hono/node-server';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { request } from 'node:http';
+import { dirname, join } from 'node:path';
 
 const DATA = mkdtempSync(join(tmpdir(), 'llm-mgr-test-'));
 process.env.LLM_DATA_DIR = DATA;
@@ -1554,6 +1555,614 @@ section('15. 修复战役回归断言（审查报告契约固化）');
   const { APP_VERSION } = await import('../src/version.gen.ts');
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
   check('version.gen.ts 与 package.json 版本一致', APP_VERSION === pkg.version, `${APP_VERSION} != ${pkg.version}`);
+}
+// ================================================================
+section('17. agent 一键接入（docs/agent-import-design.md §11 钉子 AI-0…AI-23）');
+{
+  const AG = mkdtempSync(join(tmpdir(), 'ai-home-'));
+  const savedHome = process.env.OWN_API_AGENT_HOME;
+  process.env.OWN_API_AGENT_HOME = AG; // 测试唯一注入点：真实 ~ 零污染
+  const ai = await import('../src/agent-import.ts');
+  const { setSelfBaseUrl } = await import('../src/admin.ts');
+  setSelfBaseUrl(BASE); // 探针恒打本进程监听地址（生产由 index.ts 注入）
+  const ZF = join(AG, '.zcode', 'v2', 'config.json');
+  const putZ = (obj: any, opt: { eol?: boolean; indent?: string; mode?: number } = {}) => {
+    mkdirSync(dirname(ZF), { recursive: true });
+    writeFileSync(ZF, JSON.stringify(obj, null, opt.indent ?? '  ') + (opt.eol ? '\n' : ''));
+    chmodSync(ZF, opt.mode ?? 0o644);
+  };
+  const rawZ = () => readFileSync(ZF, 'utf8');
+  const rdZ = () => JSON.parse(rawZ());
+  const modeZ = () => statSync(ZF).mode & 0o777;
+  const blk = () => rdZ().provider['own-api'];
+  const FOREIGN = { provider: { 'builtin:zai': { name: 'Z.ai', kind: 'anthropic', options: { apiKey: 'glm-secret', baseURL: 'https://api.z.ai/api/anthropic' }, models: { 'GLM-5-Turbo': { limit: { context: 200000 } } } } }, ui: { theme: 'dark' } };
+  const VK: any = (await api('/api/vkeys?reveal=1', { headers: ADMIN })).body[0];
+  const PLAN = (b: any) => api('/api/agents/plan', { method: 'POST', headers: ADMIN, body: JSON.stringify(b) });
+  const APPLY = (b: any) => api('/api/agents/apply', { method: 'POST', headers: ADMIN, body: JSON.stringify({ ...b, confirm: true }) });
+  const LINKS = async () => (await api('/api/agents', { headers: ADMIN })).body.links as any[];
+  const base = { agentId: 'zcode', vkeyId: VK.id, model: 'gpt-4o' };
+  const realZ = join(homedir(), '.zcode', 'v2', 'config.json');
+  const realMtime = existsSync(realZ) ? statSync(realZ).mtimeMs : -1;
+  const realOmp = join(homedir(), '.omp', 'agent');
+  const realOmpMt = ['models.yml', 'config.yml'].map((f) => { const p = join(realOmp, f); return existsSync(p) ? statSync(p).mtimeMs : -1; });
+  // claude 那条是**未实机验证**换来的底线承诺：测试全程只准碰 OWN_API_AGENT_HOME 里的沙盒
+  const realClaude = join(homedir(), '.claude', 'settings.json');
+  const realClaudeMt = existsSync(realClaude) ? statSync(realClaude).mtimeMs : -1;
+  // dsh 这两份是**我们正跑在里面的进程**的配置：写坏了就是自毁，凭据库尤其（多用户可读会被 dsh 拒绝加载）
+  const realDsh = ['.dsh/settings.yaml', '.dsh/.credentials.yaml'].map((f) => { const p = join(homedir(), f); return existsSync(p) ? statSync(p).mtimeMs : -1; });
+
+  check('AI-0 路径恒源自注入根（无任何绝对路径入参可绕）', ai.agentHome() === AG && ai.ADAPTERS.every((a) => a.targets.every((t) => ai.targetFile(t, AG).startsWith(AG))), ai.agentHome());
+
+  const z0 = ((await api('/api/agents', { headers: ADMIN })).body as any).adapters.find((a: any) => a.id === 'zcode');
+  const binExpected = existsSync('/Applications/ZCode.app') || (process.env.PATH || '').split(':').some((d) => existsSync(join(d, 'zcode')));
+  check('AI-1 空沙箱 configPresent=false（残留配置≠已安装，两级分开判）', z0.configPresent === false && z0.targets[0].managedPresent === false, JSON.stringify(z0.targets));
+  check('AI-1 binaryFound 独立判定（PATH + 既定安装位置，全盘扫描不参与）', z0.binaryFound === binExpected, `got=${z0.binaryFound} expect=${binExpected}`);
+
+  const evil = ['../../../../etc/passwd', '/etc/passwd', 'opencode', '', 'ZCODE', 'zcode/../../etc'];
+  const evilRes = await Promise.all(evil.map((agentId) => PLAN({ agentId, vkeyId: VK.id, model: 'gpt-4o' })));
+  check('AI-2 路径穿越/未适配 agentId 一律 400（协议层不可表示）', evilRes.every((r) => r.status === 400), evilRes.map((r) => r.status).join(','));
+  check('AI-2 且被拒的请求零落盘', !existsSync(ZF) && !existsSync(join(AG, 'passwd')), '');
+
+  putZ(FOREIGN);
+  const b3 = rawZ();
+  const p3: any = (await PLAN(base)).body;
+  check('AI-3 plan 判 create 且零写入零备份', p3.steps?.[0]?.state === 'create' && rawZ() === b3 && !existsSync(ZF + '.own-api-bak'), JSON.stringify(p3.steps?.map((s: any) => s.state)));
+  check('AI-3 plan 全程不回显明文 key（diff 已掩码）', !JSON.stringify(p3).includes(VK.key) && JSON.stringify(p3).includes('***'), '');
+  check('AI-13 缺 confirm → 428 且零写入', (await api('/api/agents/apply', { method: 'POST', headers: ADMIN, body: JSON.stringify(base) })).status === 428 && rawZ() === b3);
+  const xff = await api('/api/agents/apply', { method: 'POST', headers: { ...ADMIN, 'x-forwarded-for': '8.8.8.8' }, body: JSON.stringify({ ...base, confirm: true }) });
+  check('AI-14 写面只认 socket 对端：XFF 谎报不放宽（本机直连仍放行）', xff.status === 403 && rawZ() === b3, `${xff.status}`);
+  const vkAcl: any = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'ai-acl', allowedModels: ['gpt-4o'] }) })).body;
+  check('AI-15 越权模型 400；同 key 的授权模型可规划', (await PLAN({ agentId: 'zcode', vkeyId: vkAcl.id, model: 'claude-sonnet' })).status === 400 && (await PLAN({ agentId: 'zcode', vkeyId: vkAcl.id, model: 'gpt-4o' })).status === 200);
+  check('AI-15 闸后仍零写入', rawZ() === b3 && !existsSync(ZF + '.own-api-bak'), '');
+
+  const a5: any = (await APPLY(base)).body;
+  const mk: any = (await api('/v1/models', { headers: { authorization: `Bearer ${VK.key}` } })).body;
+  check('AI-12 apply 回执与 plan 都不含明文 key；key 只出现在目标文件', !JSON.stringify(a5).includes(VK.key) && blk().options.apiKey === VK.key, '');
+  check('AI-4 写进 agent 的 catalog === 这把 key 的 GET /v1/models（G1 同源）', JSON.stringify(Object.keys(blk().models).sort()) === JSON.stringify(mk.data.map((m: any) => m.id).sort()), `${Object.keys(blk().models)} vs ${mk.data.map((m: any) => m.id)}`);
+  check('AI-4 每个模型带 context_length（有值时）投影成 limit.context', blk().models['gpt-4o']?.limit?.context > 0, JSON.stringify(blk().models['gpt-4o']));
+  check('AI-6 merge-only：别家条目与无关顶层键原样保留', rdZ().provider['builtin:zai'].options.apiKey === 'glm-secret' && rdZ().ui?.theme === 'dark', '');
+  check('AI-6 非托管条目在文件中的位置未被移动（merge 而非整文件重排）', rawZ().indexOf('"builtin:zai"') < rawZ().indexOf('"own-api"'), '');
+  check('AI-7 保持原文件的无尾换行 / 2 空格缩进 / 0644', !rawZ().endsWith('\n') && /\n  "provider"/.test(rawZ()) && modeZ() === 0o644, `eol=${rawZ().endsWith('\n')} mode=${modeZ().toString(8)}`);
+  putZ(FOREIGN, { eol: true, indent: '    ', mode: 0o600 });
+  const a7b = await APPLY(base);
+  // own-api 在第 3 层（provider → own-api → name），4 空格缩进下前导是 12 个空格
+  check('AI-7b 另一形态同样保持（4 空格 + 有尾换行 + 0600 不升级）', a7b.status === 200 && rawZ().endsWith('\n') && /\n {4}"provider"/.test(rawZ()) && /\n {12}"name": "own-api"/.test(rawZ()) && modeZ() === 0o600, `mode=${modeZ().toString(8)} eol=${rawZ().endsWith('\n')} status=${a7b.status}`);
+  const beforeNoop = rawZ();
+  const noop: any = (await APPLY(base)).body;
+  check('AI-5 幂等：二次 apply 全 noop 且盘上字节完全相同（不与 agent 抢写）', noop.steps.every((s: any) => s.state === 'noop') && rawZ() === beforeNoop, JSON.stringify(noop.steps.map((s: any) => s.state)));
+  rmSync(ZF);
+  await APPLY(base);
+  check('AI-8 无原文件可继承 mode 时新建 0600', modeZ() === 0o600, modeZ().toString(8));
+  check('AI-8 写前留 .own-api-bak（同路径复写不产生 bak 堆积）', existsSync(ZF + '.own-api-bak') && !existsSync(ZF + '.own-api-bak.1'), '');
+
+  const chAnth: any = (await api('/api/channels', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'ai-anth', baseUrl: 'https://anth.test', protocol: 'anthropic', keys: [{ key: 'sk-an' }] }) })).body;
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'ai-claude', channelId: chAnth.id, upstreamModel: 'claude-x' }) });
+  await APPLY({ ...base, model: 'ai-claude' });
+  check('AI-16 anthropic 主模型 → kind=anthropic 且 baseURL 不带 /v1（实测拼法）', blk().kind === 'anthropic' && blk().options.baseURL === BASE, `${blk().kind} ${blk().options.baseURL}`);
+  await APPLY(base);
+  check('AI-16 openai 主模型 → kind=openai-compatible 且 baseURL 含 /v1（拼错即 404）', blk().kind === 'openai-compatible' && blk().options.baseURL === `${BASE}/v1`, `${blk().kind} ${blk().options.baseURL}`);
+
+  const driftOf = async () => (await LINKS()).find((l) => l.agentId === 'zcode')?.drift;
+  check('AI-17 刚写完 drift=consistent', (await driftOf()) === 'consistent', String(await driftOf()));
+  const norm = rdZ();
+  for (const m of Object.keys(norm.provider['own-api'].models)) {
+    norm.provider['own-api'].models[m].modalities = { input: ['text', 'image', 'video'] };
+    norm.provider['own-api'].models[m].reasoning = { enabled: true };
+  }
+  norm.provider['own-api'].lastUsedAt = Date.now();
+  putZ(norm);
+  check('AI-18 对方在我们块里补字段（zcode 实测行为）不算漂移', (await driftOf()) === 'consistent', String(await driftOf()));
+  const cut = rdZ();
+  delete cut.provider['own-api'].models[Object.keys(cut.provider['own-api'].models)[0]];
+  putZ(cut);
+  check('AI-18 我方 catalog 被增删键 → modified（G1 被破坏要让人看见）', (await driftOf()) === 'modified', String(await driftOf()));
+  const lim = rdZ();
+  const anyKey = Object.keys(lim.provider['own-api'].models)[0];
+  lim.provider['own-api'].models[anyKey].limit = { context: 1 };
+  putZ(lim);
+  check('AI-18 我方声明的 limit 被改 → modified', (await driftOf()) === 'modified', '');
+  await APPLY(base);
+  check('AI-18 重新 apply 后回到 consistent（同步即修复）', (await driftOf()) === 'consistent', String(await driftOf()));
+  const gone = rdZ();
+  delete gone.provider['own-api'];
+  putZ(gone);
+  check('AI-17 托管块被整体删除 → missing（与"被改"分开报）', (await driftOf()) === 'missing', String(await driftOf()));
+  const corrupt = '{ "provider": oops';
+  writeFileSync(ZF, corrupt);
+  const lCorrupt = (await LINKS()).find((l: any) => l.agentId === 'zcode');
+  check('AI-19 文件损坏 → drift=unavailable 而非 500', lCorrupt?.drift === 'unavailable', JSON.stringify(lCorrupt?.drift));
+  check('AI-10 损坏文件 apply 被拒（409）且原文一字节未动', (await APPLY(base)).status === 409 && rawZ() === corrupt, '');
+  const planCorrupt: any = (await PLAN(base)).body;
+  check('AI-10 拒写路径的 errors 说清了原因（不是含糊的"失败"）', String(planCorrupt.errors?.[0] || '').includes('拒绝'), JSON.stringify(planCorrupt.errors));
+
+  const probe1: any = (await api('/api/agents/zcode/probe', { method: 'POST', headers: ADMIN, body: JSON.stringify({ level: 'L1' }) })).body;
+  check('AI-20 探针 L1 verdict=ok 且 note 不含明文 key', probe1.verdict === 'ok' && !JSON.stringify(probe1).includes(VK.key), JSON.stringify(probe1).slice(0, 120));
+  check('AI-20 探针 L2 未 confirm → 428（真上游花费要显式授权）', (await api('/api/agents/zcode/probe', { method: 'POST', headers: ADMIN, body: JSON.stringify({ level: 'L2' }) })).status === 428);
+  const probe2: any = (await api('/api/agents/zcode/probe', { method: 'POST', headers: ADMIN, body: JSON.stringify({ level: 'L2', confirm: true }) })).body;
+  check('AI-20 探针 L2（mock 上游）走通全流程', probe2.verdict === 'ok' && probe2.status === 200, JSON.stringify(probe2).slice(0, 140));
+  check('AI-20 探针结果记账进 link.lastProbe', (await LINKS()).find((l: any) => l.agentId === 'zcode')?.lastProbe?.ok === true, '');
+
+  const rBad = join(AG, 'elsewhere.json');
+  rmSync(ZF);
+  mkdirSync(dirname(ZF), { recursive: true });
+  writeFileSync(rBad, '{"provider":{"own-api":{"options":{"baseURL":"https://evil.test"}}}}');
+  symlinkSync(rBad, ZF);
+  check('AI-11 目标是符号链接 → 拒绝跟随（plan errors 非空）', String((await PLAN(base)).body.errors?.[0] || '').includes('符号链接'), JSON.stringify((await PLAN(base)).body.errors));
+  check('AI-11 apply 被拒且链接目标文件未被改写', (await APPLY(base)).status === 409 && rawZ2() === '{"provider":{"own-api":{"options":{"baseURL":"https://evil.test"}}}}', '');
+  function rawZ2() { return readFileSync(rBad, 'utf8'); }
+  rmSync(ZF);
+  rmSync(rBad);
+
+  putZ(FOREIGN);
+  await APPLY(base);
+  const rv: any = (await api('/api/agents/zcode', { method: 'DELETE', headers: ADMIN })).body;
+  check('AI-21 撤销只删我们那块：own-api 消失、别家与无关键健在', rv.ok === true && rv.results[0].action === 'removed' && !('own-api' in rdZ().provider) && rdZ().provider['builtin:zai'].options.apiKey === 'glm-secret' && rdZ().ui.theme === 'dark', JSON.stringify(rv.results));
+  check('AI-21 撤销后账本清空', (await LINKS()).length === 0, '');
+
+  await APPLY(base);
+  const tam = rdZ();
+  tam.provider['own-api'].options.baseURL = 'https://someone.else/v1';
+  putZ(tam);
+  const rv2: any = (await api('/api/agents/zcode', { method: 'DELETE', headers: ADMIN })).body;
+  check('AI-22 条目已不指向本网关 → 不删（防误删用户自建同名条目）', rv2.ok === false && rv2.results[0].action === 'kept' && 'own-api' in rdZ().provider, JSON.stringify(rv2.results));
+  check('AI-22 残留时账本保留（UI 仍看得见这个孤儿）', (await LINKS()).length === 1, '');
+  const rv3: any = (await api('/api/agents/zcode?force=1', { method: 'DELETE', headers: ADMIN })).body;
+  check('AI-22 ?force=1 才允许只清账本', rv3.ok === true && (await LINKS()).length === 0, '');
+
+  putZ(FOREIGN);
+  const vkT: any = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'ai-throwaway' }) })).body;
+  await APPLY({ agentId: 'zcode', vkeyId: vkT.id, model: 'gpt-4o' });
+  await api(`/api/vkeys/${vkT.id}`, { method: 'DELETE', headers: ADMIN });
+  const dang = (await LINKS()).find((l: any) => l.agentId === 'zcode');
+  check('AI-23 key 被删后 link 悬空可见且不炸（GET 200）', dang?.vkeyDangling === true && dang?.vkeyName == null, JSON.stringify({ d: dang?.vkeyDangling, n: dang?.vkeyName }));
+  const probeD = await api('/api/agents/zcode/probe', { method: 'POST', headers: ADMIN, body: JSON.stringify({ level: 'L1' }) });
+  check('AI-23 悬空时探针明确 409 并指路（不拿空 key 去打）', probeD.status === 409 && String(probeD.body?.error).includes('已删除'), JSON.stringify(probeD.body).slice(0, 100));
+  await api('/api/agents/zcode', { method: 'DELETE', headers: ADMIN });
+  check('AI-23 悬空账本可撤销清理', (await LINKS()).length === 0, '');
+
+  // 静态结构钉（本轮真实踩到的 bug）：向导里点 L2 时弹了浏览器 confirm() 却**没把 confirm 带给服务端**，
+  // 于是 L2 恒 428 被 UI 显示成「探针未通过」——用户看到的是「链路坏了」，真相是「我没带确认」。
+  // DOM 桩（AI-17）还欠着，先把这条不变量钉在源码上：凡是打 /probe 的 UI 调用点都必须自带 confirm 透传。
+  const uiHtml = readFileSync('web/index.html', 'utf8');
+  const probeSites = uiHtml.split('/probe`').slice(1);
+  check('AI-24 UI 每个探针调用点都透传 confirm（防「弹了框没带确认」复发）', probeSites.length >= 2 && probeSites.every((s) => s.slice(0, 200).includes('confirm: true')), `${probeSites.length} 处调用点`);
+
+  // ---- omp（YAML 写入点，PR2 第一支）：形态取自真机 ~/.omp/agent/*.yml，见 §4.4 ----
+  const OM = join(AG, '.omp', 'agent');
+  const MF = join(OM, 'models.yml');
+  const CF = join(OM, 'config.yml');
+  const LONG = 'word '.repeat(40).trim(); // 200 字符带空格长值：yaml 默认 80 列会把它折行，见 DR-AI-F
+  const MODELS_FIX = `providers:\n  jyld: &jyld\n    baseUrl: https://up.example/v1\n    api: openai-completions\n    apiKey: sk-up-secret # 行尾注释不该被我们动\n    models:\n      - id: m1\n        name: m1\n        contextWindow: 1000000\n        maxTokens: 384000\n  other:\n    <<: *jyld\n    baseUrl: https://other.example/v1\n`;
+  const CONFIG_FIX = `# 用户的头注释\nmodelRoles:\n  default: jyld/m1\n  plan: jyld/m1:auto\n  tiny: jyld/m1\nsymbolPreset: unicode\nlongNote: ${LONG}\nmemory:\n  backend: local\nempty:\n  []\nblock: |\n  keep1\n  keep2\n`;
+  const putOmp = () => {
+    mkdirSync(OM, { recursive: true });
+    writeFileSync(MF, MODELS_FIX);
+    writeFileSync(CF, CONFIG_FIX);
+    chmodSync(MF, 0o600);
+    chmodSync(CF, 0o600);
+  };
+  const rawM = () => readFileSync(MF, 'utf8');
+  const rawC = () => readFileSync(CF, 'utf8');
+  const parseY = (f: string) => ai.readYamlFile(f) as any;
+  const OM_BASE = { agentId: 'omp', vkeyId: VK.id, model: 'gpt-4o', roles: ['default'] };
+
+  putOmp();
+  const o0 = ((await api('/api/agents', { headers: ADMIN })).body as any).adapters.find((a: any) => a.id === 'omp');
+  check('AI-25 omp 被检出且角色槽随 detect 一起交给 UI', o0 && o0.configPresent === true && Array.isArray(o0.roleSlots) && o0.roleSlots.some((r: any) => r.slot === 'default'), JSON.stringify(o0?.roleSlots?.map((r: any) => r.slot)));
+  const op: any = (await PLAN(OM_BASE)).body;
+  check('AI-26 plan 列两个写入点（provider 块 + 角色映射）且各自标了 kind', op.steps.length === 2 && op.steps.some((s: any) => s.kind === 'block') && op.steps.some((s: any) => s.kind === 'role'), JSON.stringify(op.steps.map((s: any) => [s.kind, s.state])));
+  check('AI-26 plan 里 key 仍是掩码（明文不落 diff/预览）', !JSON.stringify(op).includes(VK.key) && /\*/.test(String(op.steps[0].after?.apiKey)), String(op.steps[0].after?.apiKey));
+
+  const oa: any = (await APPLY(OM_BASE)).body;
+  const mAfter = parseY(MF).state.data;
+  const cAfter = parseY(CF).state.data;
+  check('AI-27 apply 建 providers.own-api（api/baseUrl/models 形态同真机）', oa.status === 'success' && mAfter.providers['own-api'].api === 'openai-completions' && mAfter.providers['own-api'].baseUrl.endsWith('/v1') && mAfter.providers['own-api'].models[0].id === 'gpt-4o', JSON.stringify(mAfter.providers['own-api']?.models));
+  const JYLD_EXPECT = { baseUrl: 'https://up.example/v1', api: 'openai-completions', apiKey: 'sk-up-secret', models: [{ id: 'm1', name: 'm1', contextWindow: 1000000, maxTokens: 384000 }] };
+  check('AI-27 merge-only：别人的 provider 语义一字未动', JSON.stringify(mAfter.providers.jyld) === JSON.stringify(JYLD_EXPECT) && mAfter.providers.other.baseUrl === 'https://other.example/v1', JSON.stringify(mAfter.providers.jyld));
+  check('AI-27 别人的行尾注释原样还在（Document API 不重排无关节点）', rawM().includes('apiKey: sk-up-secret # 行尾注释不该被我们动'), rawM().split('\n').find((l) => l.includes('sk-up-secret')) || '');
+  check('AI-28 角色逐键合并、不整块替换：未勾选的 plan/tiny 原值（含 :auto 后缀）保持不动', cAfter.modelRoles.default === 'own-api/gpt-4o' && cAfter.modelRoles.plan === 'jyld/m1:auto' && cAfter.modelRoles.tiny === 'jyld/m1', JSON.stringify(cAfter.modelRoles));
+  const cRaw = rawC();
+  check('AI-29 注释/块标量无损 + 长值不被折行（lineWidth:0 的实测承诺）', cRaw.includes('# 用户的头注释') && cRaw.includes('block: |') && cRaw.includes('  keep1') && new RegExp(`^longNote: ${LONG}$`, 'm').test(cRaw), cRaw.split('\n').find((l) => l.startsWith('longNote'))?.length + ' 字符仍单行');
+  check('AI-29 已知让步如实钉住：空 flow 序列折叠成一行（语义等价，不假装无损）', cRaw.includes('empty: []') && Array.isArray(cAfter.empty) && cAfter.empty.length === 0 && cAfter.symbolPreset === 'unicode' && cAfter.memory.backend === 'local', cRaw.split('\n').find((l) => l.startsWith('empty')) || '');
+  check('AI-30 保持原文件 mode 0600 且落备份', (statSync(MF).mode & 0o777) === 0o600 && (statSync(CF).mode & 0o777) === 0o600 && existsSync(`${CF}.own-api-bak`), `${(statSync(CF).mode & 0o777).toString(8)}`);
+  const driftOmp = async () => ((await LINKS()).find((l) => l.agentId === 'omp') || {}) as any;
+  check('AI-31 刚写完 drift=consistent', (await driftOmp()).drift === 'consistent', JSON.stringify((await driftOmp()).driftDetail));
+  // 只改我方块内部的文本：全文 replace 会先命中 jyld（它的 api 一模一样），改到别人身上测的就不是我方域了
+  const tamperOurs = (from: string, to: string) => {
+    const raw = rawM();
+    const i = raw.indexOf('\n  own-api:');
+    writeFileSync(MF, raw.slice(0, i) + raw.slice(i).replace(from, to));
+  };
+  tamperOurs('api: openai-completions', 'api: anthropic-messages');
+  check('AI-31 改我方声明字段 → modified', (await driftOmp()).drift === 'modified', (await driftOmp()).driftDetail);
+  tamperOurs('api: anthropic-messages', 'api: openai-completions');
+  writeFileSync(MF, rawM().replace('https://other.example/v1', 'https://other2.example/v1'));
+  check('AI-31 改别人的 provider → 仍 consistent（域只覆盖我方声明）', (await driftOmp()).drift === 'consistent', (await driftOmp()).driftDetail);
+  writeFileSync(CF, rawC().replace('  default: own-api/gpt-4o\n', ''));
+  check('AI-31 合并型的 missing = 我方那些键全没了（映射还在也算 missing）', (await driftOmp()).drift === 'missing', (await driftOmp()).driftDetail);
+  const oa2: any = (await APPLY(OM_BASE)).body;
+  check('AI-31 重新 apply 即修复 missing（同步入口的底层能力）', oa2.status === 'success' && (await driftOmp()).drift === 'consistent', oa2.status);
+  writeFileSync(CF, rawC().replace('default: own-api/gpt-4o', 'default: jyld/m1:auto'));
+  const del1 = await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
+  check('AI-33 角色被用户改指别处 → 撤销 kept 且账本保留（不清账不留孤儿）', del1.body?.partial === true && del1.body?.results?.some((r: any) => r.action === 'kept') && (await driftOmp()).agentId === 'omp', JSON.stringify(del1.body?.results?.map((r: any) => [r.action, r.file?.split('/').pop()])));
+  writeFileSync(CF, rawC().replace('default: jyld/m1:auto', 'default: own-api/gpt-4o'));
+  const del2 = await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
+  const cBack = parseY(CF).state.data;
+  check('AI-32 撤销语义=还原到「最近一次写入之前」：那次写入时 default 本不存在，故撤销是删掉它而不是凭空造值', del2.body?.ok === true && cBack.modelRoles.default === undefined && cBack.modelRoles.plan === 'jyld/m1:auto' && cBack.modelRoles.tiny === 'jyld/m1', JSON.stringify(cBack.modelRoles));
+  check('AI-32 撤销只删自己的 provider 块', parseY(MF).state.data.providers['own-api'] === undefined && parseY(MF).state.data.providers.jyld.apiKey === 'sk-up-secret', JSON.stringify(Object.keys(parseY(MF).state.data.providers)));
+  // 干净周期单独验 prev 真能还原（上一段中途重写覆盖了 prev 快照，测不到这条路径）
+  putOmp();
+  const oa3: any = (await APPLY(OM_BASE)).body;
+  await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
+  const cBack2 = parseY(CF).state.data;
+  check('AI-32b 干净周期：撤销把 default 逐键还原成写前的 jyld/m1，未勾选的角色一字未动', oa3.status === 'success' && cBack2.modelRoles.default === 'jyld/m1' && cBack2.modelRoles.plan === 'jyld/m1:auto' && cBack2.modelRoles.tiny === 'jyld/m1' && parseY(MF).state.data.providers['own-api'] === undefined, JSON.stringify(cBack2.modelRoles));
+
+  mkdirSync(OM, { recursive: true });
+  writeFileSync(MF, 'base: &b\n  api: openai-completions\nproviders: *b\n');
+  const pa: any = (await PLAN({ agentId: 'omp', vkeyId: VK.id, model: 'gpt-4o' })).body;
+  check('AI-34 托管路径落在 YAML 别名上 → plan 就拒并说清理由（不静默改到锚点公共内容）', pa.errors.some((e: string) => e.includes('别名')) && rawM().includes('providers: *b'), String(pa.errors?.[0] || '').slice(0, 90));
+  writeFileSync(MF, 'providers:\n\tjyld: broken\n');
+  const pb: any = (await PLAN({ agentId: 'omp', vkeyId: VK.id, model: 'gpt-4o' })).body;
+  check('AI-35 坏 YAML 拒写并给出原因（不整文件重写"修好"它）', pb.errors.some((e: string) => e.includes('YAML 解析失败')) && rawM().includes('\tjyld: broken'), String(pb.errors?.[0] || '').slice(0, 80));
+  const pc: any = (await PLAN({ agentId: 'omp', vkeyId: VK.id, model: 'gpt-4o', roles: ['default', '../evil', 'nope'] })).body;
+  check('AI-36 未声明的角色槽名直接丢弃（槽名=目标文件里的路径段，不放开）', JSON.stringify(Object.keys(pc.steps.find((s: any) => s.kind === 'role')?.after || {})) === '["default"]', JSON.stringify(Object.keys(pc.steps.find((s: any) => s.kind === 'role')?.after || {})));
+
+  rmSync(OM, { recursive: true, force: true });
+  const of2: any = (await APPLY(OM_BASE)).body;
+  check('AI-37 新装态（目录都不在）能建目录落盘，新建文件一律 0600', of2.status === 'success' && existsSync(MF) && existsSync(CF) && (statSync(MF).mode & 0o777) === 0o600 && parseY(CF).state.data.modelRoles.default === 'own-api/gpt-4o', JSON.stringify(of2.steps.map((s: any) => [s.state, s.ok])));
+  await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
+
+  // ---- sync：账本驱动的「一键刷回」（漂移 / 网关换端口 / 模型清单变旧）----
+  const SYNC = (id: string, b: any = {}) => api(`/api/agents/${id}/sync`, { method: 'POST', headers: ADMIN, body: JSON.stringify(b) });
+  putOmp();
+  await APPLY(OM_BASE);
+  const mBefore = rawM();
+  const sNo = await SYNC('omp', {});
+  check('AI-39 sync 不带 confirm → 428 且盘上一字未动（新端点不豁免写面纪律）', sNo.status === 428 && rawM() === mBefore, `${sNo.status}`);
+  tamperOurs('api: openai-completions', 'api: anthropic-messages');
+  const sFix: any = await SYNC('omp', { confirm: true });
+  check('AI-40 被改坏后 sync 刷回我方声明值，drift 回到 consistent（同步=账本再说一遍，不再问用户）', sFix.status === 200 && sFix.body?.drift?.state === 'consistent' && rawM().includes('api: openai-completions'), JSON.stringify(sFix.body?.drift));
+  const cBeforeSync = rawC();
+  writeFileSync(CF, rawC().replace('default: own-api/gpt-4o', 'default: jyld/m1'));
+  check('AI-40b 我方角色值被改走 → modified（修复前这条永远看不见：合并型的聚合指纹域曾是空数组，指纹塌成常量）', (await driftOmp()).drift === 'modified', (await driftOmp()).driftDetail);
+  writeFileSync(CF, rawC().replace('default: jyld/m1', 'default: own-api/gpt-4o'));
+  check('AI-40c 改回来就重新一致（漂移判据可逆，不是单向棘轮）', (await driftOmp()).drift === 'consistent', (await driftOmp()).driftDetail);
+  const sSpoof: any = await SYNC('omp', { confirm: true, model: 'auto-m-gpt', roles: ['smol', 'plan'], agentId: 'zcode' });
+  const cS = parseY(CF).state.data.modelRoles;
+  check('AI-41 sync 的上下文只认账本：body 覆盖 model/roles/agentId 全部无效（否则 sync 就是第二条写入通道）', sSpoof.status === 200 && rawC() === cBeforeSync && cS.default === 'own-api/gpt-4o' && cS.smol === undefined && cS.plan === 'jyld/m1:auto', JSON.stringify(cS));
+  const lB: any = (await LINKS()).find((l) => l.agentId === 'omp');
+  await SYNC('omp', { confirm: true });
+  const lA: any = (await LINKS()).find((l) => l.agentId === 'omp');
+  check('AI-45 同步不刷新「接入于」，另记 lastSyncAt（两个时间各管各的语义）', lA.linkedAt === lB.linkedAt && lA.lastSyncAt >= lB.lastSyncAt, `${lB.linkedAt}/${lB.lastSyncAt} → ${lA.linkedAt}/${lA.lastSyncAt}`);
+  const pLedger: any = (await PLAN({ agentId: 'omp' })).body;
+  check('AI-44 plan 缺 vkeyId/model 时回落账本：同步预览复用同一条 plan 通路（前端不再另算一套）', pLedger.steps?.length === 2 && !pLedger.errors?.length && pLedger.steps.every((s: any) => s.state === 'noop'), JSON.stringify({ states: pLedger.steps?.map((s: any) => s.state), ledgerRoles: (await LINKS()).find((l) => l.agentId === 'omp')?.roles, errs: pLedger.errors }));
+  const pObj: any = (await PLAN({ agentId: 'omp', vkeyId: VK.id, model: 'gpt-4o', roles: { smol: 'gpt-4o' } })).body;
+  check('AI-47 roles 的 {槽: 模型} 对象形态同样被认（这条分支曾因 dangling-else 从未执行过）', JSON.stringify(Object.keys(pObj.steps?.find((s: any) => s.kind === 'role')?.after || {})) === '["smol"]', JSON.stringify(Object.keys(pObj.steps?.find((s: any) => s.kind === 'role')?.after || {})));
+  const sXff = await api('/api/agents/omp/sync', { method: 'POST', headers: { ...ADMIN, 'x-forwarded-for': '8.8.8.8' }, body: JSON.stringify({ confirm: true }) });
+  check('AI-46 sync 也吃回环硬闸（XFF 伪装 → 403，不因为是「只是同步」就放行）', sXff.status === 403, String(sXff.status));
+  const vkLim: any = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'ai-sync-lim', allowedModels: ['gpt-4o'] }) })).body;
+  await APPLY({ agentId: 'zcode', vkeyId: vkLim.id, model: 'gpt-4o' });
+  await api(`/api/vkeys/${vkLim.id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ enabled: false }) });
+  const sOff: any = await SYNC('zcode', { confirm: true });
+  check('AI-42 账本里的 key 已停用 → 409 让人去启用，不静默写一把停用的 key', sOff.status === 409 && /停用/.test(String(sOff.body?.error)), String(sOff.body?.error));
+  await api(`/api/vkeys/${vkLim.id}`, { method: 'DELETE', headers: ADMIN });
+  const sGone: any = await SYNC('zcode', { confirm: true });
+  check('AI-42b key 已被删除 → 409 明说「重新接入而不是同步」（不替你猜一把新 key）', sGone.status === 409 && /已被删除/.test(String(sGone.body?.error)), String(sGone.body?.error));
+  await api('/api/agents/zcode', { method: 'DELETE', headers: ADMIN });
+  const savedAcl = VK.allowedModels ?? null;
+  await api(`/api/vkeys/${VK.id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ allowedModels: ['auto-m-gpt'] }) });
+  const sModel: any = await SYNC('omp', { confirm: true });
+  check('AI-43 主模型已不在这把 key 的授权内 → 409 且拒绝替用户挑新模型（悄悄换个模型写进去更糟）', sModel.status === 409 && /不在这把 key/.test(String(sModel.body?.error)) && Array.isArray(sModel.body?.allowed), String(sModel.body?.error));
+  await api(`/api/vkeys/${VK.id}`, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ allowedModels: savedAcl }) });
+  await api('/api/agents/omp', { method: 'DELETE', headers: ADMIN });
+
+  // ---- Claude Code（PR2 第二支；**未实机验证**，形态取自本机残留 ~/.claude/settings.json）----
+  const CCF = join(AG, '.claude', 'settings.json');
+  const putC = (obj: any) => {
+    mkdirSync(dirname(CCF), { recursive: true });
+    writeFileSync(CCF, JSON.stringify(obj, null, 2) + '\n');
+    chmodSync(CCF, 0o644);
+  };
+  const rdC = () => JSON.parse(readFileSync(CCF, 'utf8'));
+  const rawCC = () => readFileSync(CCF, 'utf8');
+  // 邻居刻意留着真机那种东西：插件表、statusLine 的转义 shell、用户自己的 env 键、旧 provider 的 6 个键
+  const CLAUDE_FIX = (): any => ({
+    effort: 'medium',
+    enableAllProjectMcpServers: true,
+    enabledPlugins: { 'pua@pua-skills': true, 'superpowers@superpowers-marketplace': true },
+    env: {
+      ANTHROPIC_AUTH_TOKEN: 'sk-OLDPROVIDER-secret',
+      ANTHROPIC_BASE_URL: 'https://opencode.ai/zen/go',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash[1M]',
+      ANTHROPIC_MODEL: 'deepseek-v4-flash[1M]',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+    },
+    model: 'deepseek-v4-flash[1M]',
+    statusLine: { command: 'bash -c \'exec "/usr/bin/node" "${plugin_dir}dist/index.js"\'', type: 'command' },
+    theme: 'dark',
+  });
+  const CL = { agentId: 'claude-code', vkeyId: VK.id, model: 'gpt-4o', roles: ['default', 'haiku'] };
+  const CL_LINK = async () => ((await LINKS()).find((l) => l.agentId === 'claude-code') || {}) as any;
+
+  putC(CLAUDE_FIX());
+  const cp0 = ((await api('/api/agents', { headers: ADMIN })).body as any).adapters.find((a: any) => a.id === 'claude-code');
+  check('AI-48 claude-code 被检出，requiredSlots 随 detect 交给 UI（haiku 不接管会 404，必须预勾）', cp0 && cp0.configPresent === true && cp0.roleSlots?.length === 4 && JSON.stringify(cp0.requiredSlots) === '["default","haiku"]', JSON.stringify(cp0?.requiredSlots));
+  const cplan: any = (await PLAN(CL)).body;
+  const cenv = cplan.steps?.find((s: any) => s.path.join('.') === 'env');
+  const croot = cplan.steps?.find((s: any) => s.path.length === 0);
+  check('AI-49 plan 列同文件的两个写入点（env 合并 + 顶层 model），各自 kind 正确', cplan.steps?.length === 2 && cenv?.kind === 'role' && croot?.kind === 'role' && croot?.after?.model === 'gpt-4o', JSON.stringify(cplan.steps?.map((s: any) => s.path.join('.') || '(root)')));
+  check('AI-49 anthropic 协议 baseURL 不追加 /v1（真机残留的 BASE_URL 也没有 /v1，多拼一次就是首发 404）', cenv?.after?.ANTHROPIC_BASE_URL === BASE, String(cenv?.after?.ANTHROPIC_BASE_URL));
+  check('AI-49 ANTHROPIC_AUTH_TOKEN 在预览里被掩码（SECRET_KEYS 认得 *_TOKEN 这种形状，明文不得出现在任何回执）', /\*/.test(String(cenv?.after?.ANTHROPIC_AUTH_TOKEN)) && !JSON.stringify(cplan).includes(VK.key), String(cenv?.after?.ANTHROPIC_AUTH_TOKEN));
+  check('AI-49 beforeView 只呈现我方 claim 的键（用户的 HTTPS_PROXY 不该混进 diff 让人以为要动它）', cenv?.before?.HTTPS_PROXY === undefined && cenv?.before?.ANTHROPIC_MODEL === 'deepseek-v4-flash[1M]', JSON.stringify(cenv?.before));
+  const cwNoHaiku: any = (await PLAN({ agentId: 'claude-code', vkeyId: VK.id, model: 'gpt-4o', roles: ['default'] })).body;
+  check('AI-50 没接管 haiku → 提示它会拿没登记的模型名打网关；接管了但等于主模型 → 换一条提示', cwNoHaiku.warnings?.some((w: string) => w.includes('haiku') && w.includes('未登记')) && cplan.warnings?.some((w: string) => w.includes('更便宜')), JSON.stringify([cwNoHaiku.warnings, cplan.warnings]));
+  const cNoDefault: any = (await PLAN({ agentId: 'claude-code', vkeyId: VK.id, model: 'gpt-4o', roles: ['haiku'] })).body;
+  check('AI-50 没接管 default 就不碰顶层 model（那是用户的默认模型，接管了 default 才跟着走）', cNoDefault.steps?.length === 1 && cNoDefault.steps[0].path.join('.') === 'env', JSON.stringify(cNoDefault.steps?.map((s: any) => s.path.join('.') || '(root)')));
+
+  const ca: any = (await APPLY(CL)).body;
+  const ccdAfter = rdC();
+  check('AI-51 apply 写满我方 env 键并改顶层 model', ca.status === 'success' && ccdAfter.env.ANTHROPIC_BASE_URL === BASE && ccdAfter.env.ANTHROPIC_MODEL === 'gpt-4o' && ccdAfter.env.ANTHROPIC_DEFAULT_HAIKU_MODEL === 'gpt-4o' && ccdAfter.model === 'gpt-4o', JSON.stringify(ccdAfter.env));
+  check('AI-51 merge-only：用户的 HTTPS_PROXY、插件表、statusLine 的 shell 命令一字未动', ccdAfter.env.HTTPS_PROXY === 'http://127.0.0.1:7890' && Object.keys(ccdAfter.enabledPlugins).length === 2 && ccdAfter.statusLine.command.includes('${plugin_dir}dist/index.js') && ccdAfter.theme === 'dark' && ccdAfter.effort === 'medium', JSON.stringify(ccdAfter.statusLine).slice(0, 40));
+  check('AI-51 顶层只动了 model：角色名不得变成 settings.json 根上的垃圾键（曾真写出 default/haiku 两根键，就是这么漏的）', JSON.stringify(Object.keys(ccdAfter).sort()) === JSON.stringify(Object.keys(CLAUDE_FIX()).sort()), JSON.stringify(Object.keys(ccdAfter)));
+  const caNoRoleKey = rdC().env;
+  check('AI-51 角色值只落在 env 里（roleKey 映射生效，不是把槽名当键名写）', caNoRoleKey.ANTHROPIC_DEFAULT_HAIKU_MODEL === 'gpt-4o' && caNoRoleKey.haiku === undefined, JSON.stringify(Object.keys(caNoRoleKey)));
+  const ca2: any = (await APPLY(CL)).body;
+  check('AI-52 二次 apply 全 noop 且盘上字节完全相同', ca2.status === 'success' && ca2.steps.every((s: any) => s.state === 'noop') && rdC().env.ANTHROPIC_AUTH_TOKEN === ccdAfter.env.ANTHROPIC_AUTH_TOKEN, JSON.stringify(ca2.steps.map((s: any) => s.state)));
+  check('AI-57 同文件两个写入点各占一个 byFile 键（键法撞车会让一半内容对漂移隐身）', Object.keys((await CL_LINK()).byFile || {}).length === 2, JSON.stringify(Object.keys((await CL_LINK()).byFile || {}).map((k) => k.split('#').pop() || '(root)')));
+  const cc0 = await CL_LINK();
+  check('AI-57 刚写完 drift=consistent', cc0.drift === 'consistent', `${cc0.drift} ${cc0.driftDetail || ''}`);
+  const tamperC = (mut: (o: any) => void) => { const o = rdC(); mut(o); writeFileSync(CCF, JSON.stringify(o, null, 2) + '\n'); };
+  tamperC((o) => { o.env.ANTHROPIC_MODEL = 'someone-else/model'; });
+  check('AI-53 我方键的值被改走 → modified（聚合指纹域修复前这一条是瞎的：合并型曾塌成常量）', (await CL_LINK()).drift === 'modified', (await CL_LINK()).driftDetail);
+  tamperC((o) => { o.env.ANTHROPIC_MODEL = 'gpt-4o'; o.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'user-picked'; o.theme = 'light'; });
+  check('AI-53 用户自己的 env 键与无关字段增改不算漂移（域只覆盖我方声明）', (await CL_LINK()).drift === 'consistent', (await CL_LINK()).driftDetail);
+  tamperC((o) => { delete o.env.ANTHROPIC_MODEL; delete o.env.ANTHROPIC_BASE_URL; delete o.env.ANTHROPIC_AUTH_TOKEN; delete o.env.ANTHROPIC_DEFAULT_HAIKU_MODEL; });
+  check('AI-53 我方键全没了（env 映射还在、装着用户的 OPUS）→ missing', (await CL_LINK()).drift === 'missing', (await CL_LINK()).driftDetail);
+  const ca3: any = (await APPLY(CL)).body;
+  check('AI-53 重新 apply 即修回（漂移是可修状态，不是死档）', ca3.status === 'success' && (await CL_LINK()).drift === 'consistent', ca3.status);
+  check('AI-58 catalogInFile:false → claude 不报「模型清单待同步」（否则拿环境变量名比 catalog 会永真）', (await CL_LINK()).catalogStale !== true, JSON.stringify((await CL_LINK()).catalogStale));
+  tamperC((o) => { o.model = 'user-chosen'; o.env.ANTHROPIC_BASE_URL = 'https://somewhere.else'; });
+  const csync: any = (await SYNC('claude-code', { confirm: true })).body;
+  check('AI-58b 同步按钮对 claude 同样成立：只吃 confirm，同文件两个写入点一起修回，接入时刻不被改写', csync?.status === 'success' && rdC().model === 'gpt-4o' && rdC().env.ANTHROPIC_BASE_URL === BASE && (await CL_LINK()).drift === 'consistent' && (await CL_LINK()).linkedAt > 0, JSON.stringify(csync?.steps?.map((s: any) => s.state)));
+
+  // 先回到干净的「别人写的」形态再接入：撤销还原的是**最近一次写入之前**的状态，prev 必须先有明确定义
+  putC(CLAUDE_FIX());
+  await APPLY(CL);
+  tamperC((o) => { o.env.ANTHROPIC_MODEL = 'user-own-choice'; });
+  const cdel1 = await api('/api/agents/claude-code', { method: 'DELETE', headers: ADMIN });
+  const cPart = rdC();
+  check('AI-55 部分键被用户改走：那一个不碰、其余照原样还原，且回执点得出名（Claude 写裸模型名，没有 own-api/ 前缀可判，靠 ownsKey 比写前值）', cdel1.body?.ok === true && cPart.env.ANTHROPIC_MODEL === 'user-own-choice' && cPart.env.ANTHROPIC_BASE_URL === 'https://opencode.ai/zen/go' && cPart.env.ANTHROPIC_AUTH_TOKEN === 'sk-OLDPROVIDER-secret' && String(cdel1.body?.results?.map((r: any) => r.reason).join()).includes('未动'), JSON.stringify(cPart.env));
+  check('AI-55 残留下来的已经不是我们的东西 → 账本清掉（留着只会让 UI 挂一条名不副实的接入）', (await CL_LINK()).agentId === undefined, JSON.stringify(await CL_LINK()));
+
+  const cbase = CLAUDE_FIX();
+  cbase.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'user-picked'; // 用户自己加的邻居键，长得像我们的但从来不是
+  putC(cbase);
+  await APPLY(CL);
+  const cdel2 = await api('/api/agents/claude-code', { method: 'DELETE', headers: ADMIN });
+  const ccdBack = rdC();
+  check('AI-54 撤销逐键还原写前值：旧 provider 的 URL/token/模型名连同顶层 model 一起回去，无关字段不碰', cdel2.body?.ok === true && ccdBack.env.ANTHROPIC_MODEL === 'deepseek-v4-flash[1M]' && ccdBack.env.ANTHROPIC_BASE_URL === 'https://opencode.ai/zen/go' && ccdBack.env.ANTHROPIC_AUTH_TOKEN === 'sk-OLDPROVIDER-secret' && ccdBack.model === 'deepseek-v4-flash[1M]' && ccdBack.env.HTTPS_PROXY === 'http://127.0.0.1:7890', JSON.stringify(ccdBack.env));
+  check('AI-54 用户自己加的 OPUS 槽必须活着（我们只声明过 default/haiku，撤销不许顺手清理「看着像我们的」键）', ccdBack.env.ANTHROPIC_DEFAULT_OPUS_MODEL === 'user-picked' && Object.keys(ccdBack.enabledPlugins).length === 2, JSON.stringify(Object.keys(ccdBack.env)));
+
+  rmSync(CCF, { force: true });
+  const cfresh: any = (await APPLY(CL)).body;
+  check('AI-59 claude 全新装态（settings.json 不存在）能建文件，且默认 0600', cfresh.status === 'success' && existsSync(CCF) && (statSync(CCF).mode & 0o777) === 0o600 && rdC().env.ANTHROPIC_MODEL === 'gpt-4o', JSON.stringify(cfresh.steps.map((s: any) => s.state)));
+  await api('/api/agents/claude-code', { method: 'DELETE', headers: ADMIN });
+
+  // 作者级守卫：把 omp 的 roleTarget 摘掉，角色就无人承接——计划必须拒绝、apply 必须不落盘
+  const ompA = ai.getAdapter('omp')!;
+  const broken: any = { ...ompA, extra: () => [{ rel: ['.omp', 'agent', 'config.yml'], format: 'yaml', path: ['modelRoles'], merge: true, writtenKeys: [], removable: true }] };
+  const bctx: any = { home: AG, baseUrl: BASE, apiKey: VK.key, model: 'gpt-4o', protocol: 'openai', models: [{ id: 'gpt-4o' }], roles: { default: 'gpt-4o' } };
+  const beforeYml = existsSync(CF) ? readFileSync(CF, 'utf8') : '';
+  const bplan = ai.planLink(broken, bctx);
+  const bapply = ai.applyLink(broken, bctx);
+  check('AI-60 角色无人承接（roleTarget 缺失）→ 计划报错、apply 拒绝，config.yml 一字节没动', bplan.errors.some((e: string) => e.includes('roleTarget')) && bapply.status === 'failed' && (existsSync(CF) ? readFileSync(CF, 'utf8') : '') === beforeYml, JSON.stringify(bplan.errors));
+
+  // ---- dsh（第四支；规格取自**本机正在运行的 v0.1.5-rc.2 实现**，逐字段核实见 §4.4）----
+  const DSF = join(AG, '.dsh', 'settings.yaml');
+  const DCF = join(AG, '.dsh', '.credentials.yaml');
+  // 邻居照真机那样留：头注释、provider 里的行尾注释、别人的 provider、非模型 namespace、指针指向别家
+  // 同名但指向别处的 own-api 条目：§9-4 规定「同 id 不是我们的形态」一律拒覆盖，单列一条钉（AI-62a）
+  const DSH_FOREIGN = `    own-api:
+      displayName: own-api
+      apiKeyEnv: OWN_API_API_KEY
+      api: openai-completions
+      baseURL: http://127.0.0.1:9999/v1
+      models:
+        - id: stale-model
+          name: stale-model
+`;
+  const dshSettings = (extra = '') => `# 用户自己的注释：这一份文件 dsh 也会改，别动我没说的
+llm-pi-ai:
+  providers:
+    jyld:
+      displayName: jyld
+      apiKeyEnv: JYLD_API_KEY
+      api: openai-completions
+      baseURL: https://tokenrhythm.studio/v1
+      models:
+        - id: glm-5.3-flash   # 行尾注释也是用户的
+          name: glm-5.3-flash
+${extra}agent-default-model:
+  provider: jyld
+  model: glm-5.3-flash
+ui-theme:
+  fontSize: 16
+`;
+  const DSH_CREDS_FIX = `version: 1
+refs:
+  JYLD_API_KEY: jyld-old-secret
+  OWN_API_API_KEY: old-own-api-key
+records:
+  client-connection/browser-session:
+    kind: grant
+    payload:
+      version: 1
+      secret: grant-secret-keep
+`;
+  const putDsh = (extra = '') => {
+    mkdirSync(join(AG, '.dsh'), { recursive: true });
+    writeFileSync(DSF, dshSettings(extra));
+    chmodSync(DSF, 0o600);
+    writeFileSync(DCF, DSH_CREDS_FIX);
+    chmodSync(DCF, 0o600);
+  };
+  const rdDsh = () => parseY(DSF).state.data;
+  const rdDc = () => parseY(DCF).state.data;
+  /** 文本锚点改盘：dsh 会自己写这份文件，漂移测试要模拟的就是「它改了两段指针」 */
+  const tamperD = (from: string, to: string) => {
+    const raw = readFileSync(DSF, 'utf8');
+    if (!raw.includes(from)) throw new Error('tamperD 锚点不存在：' + from);
+    writeFileSync(DSF, raw.replace(from, to));
+  };
+  const D = { agentId: 'dsh', vkeyId: VK.id, model: 'gpt-4o', roles: ['default'] };
+  const D_LINK = async () => ((await LINKS()).find((l) => l.agentId === 'dsh') || {}) as any;
+
+  putDsh();
+  rmSync(DCF, { force: true }); // 凭据库不存在的形态
+  const dNoCreds: any = (await PLAN(D)).body;
+  const settingsBefore = readFileSync(DSF, 'utf8');
+  const dNoCredsApply = await APPLY(D);
+  check('AI-61 凭据库不存在 → 拒写并说清为什么（那是 dsh 自己的版本化文档，我们不替它发明格式），settings.yaml 一字节没动', dNoCreds.errors?.some((e: string) => e.includes('.credentials.yaml')) && dNoCredsApply.body?.status === 'failed' && readFileSync(DSF, 'utf8') === settingsBefore, JSON.stringify(dNoCreds.errors));
+  const dshAd: any = ai.ADAPTERS.find((a: any) => a.id === 'dsh');
+  const dHomeBak = process.env.DSH_HOME;
+  const dInjBak = process.env.OWN_API_AGENT_HOME;
+  delete process.env.OWN_API_AGENT_HOME; // 注入根豁免生效与否，只能在进程内直调 preflight 里验
+  process.env.DSH_HOME = '/tmp/yet-another-dsh-home';
+  const dEnvErrs = dshAd.preflight({ home: homedir() });
+  process.env.DSH_HOME = join(homedir(), '.dsh'); // 官方默认位置：等价于没设，不该拦
+  const dEnvOk = dshAd.preflight({ home: homedir() });
+  if (dHomeBak === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = dHomeBak;
+  if (dInjBak !== undefined) process.env.OWN_API_AGENT_HOME = dInjBak;
+  check('AI-61b DSH_HOME 指向别处 → 拒绝（往错位置写 dsh 配置比不写糟得多）；指回默认位置或与 <home>/.dsh 相等就放行', dEnvErrs.some((e: string) => e.includes('DSH_HOME')) && !dEnvOk.some((e: string) => e.includes('DSH_HOME')), JSON.stringify([dEnvErrs, dEnvOk]));
+  putDsh(DSH_FOREIGN);
+  const dForeign: any = (await PLAN(D)).body;
+  const dForeignApply = await APPLY(D);
+  check('AI-62a 同名 own-api 指向别处（换过端口的旧接入也算）→ 拒覆盖，并把现值印出来（§9-4，dsh 继承该规则）', dForeign.errors?.some((e: string) => e.includes('http://127.0.0.1:9999/v1')) && !dForeign.steps?.some((s: any) => s.path.join('.').includes('own-api')) && dForeignApply.body?.status === 'failed' && readFileSync(DSF, 'utf8').includes('http://127.0.0.1:9999/v1'), JSON.stringify(dForeign.errors));
+  putDsh();
+  const dplan: any = (await PLAN(D)).body;
+  const dBlock = dplan.steps?.find((s: any) => s.path.join('.') === 'llm-pi-ai.providers.own-api');
+  const dRefs = dplan.steps?.find((s: any) => s.path.join('.') === 'refs');
+  const dPtr = dplan.steps?.find((s: any) => s.path.join('.') === 'agent-default-model');
+  check('AI-62 三个写入点各就各位：provider 块（块型）+ 凭据 refs（合并）+ 默认模型指针（合并），kind 不混', dplan.steps?.length === 3 && dBlock?.kind === 'block' && dRefs?.kind === 'role' && dPtr?.kind === 'role', JSON.stringify(dplan.steps?.map((s: any) => s.path.join('.') + ':' + s.kind)));
+  check('AI-62 blockKeys 切分生效：provider 块里不得混进凭据引用与默认模型指针（整包吞 built 就会写出来）', JSON.stringify(Object.keys(dBlock?.after || {}).sort()) === JSON.stringify(['api', 'apiKeyEnv', 'baseURL', 'displayName', 'models']), JSON.stringify(Object.keys(dBlock?.after || {})));
+  check('AI-62 baseURL 走 openai 拼法带 /v1；apiKeyEnv 只是引用名，明文 key 恒不进 settings 那一侧', dBlock?.after?.baseURL === BASE + '/v1' && dBlock?.after?.apiKeyEnv === 'OWN_API_API_KEY' && !JSON.stringify(dBlock).includes(VK.key), JSON.stringify(dBlock?.after));
+  check('AI-62 凭据那格在预览里被掩码（OWN_API_API_KEY 以 _KEY 结尾，SECRET_KEYS 认得；明文只许落进 0600 的密码本）', /\*/.test(String(dRefs?.after?.OWN_API_API_KEY)) && !JSON.stringify(dplan).includes(VK.key), String(dRefs?.after?.OWN_API_API_KEY));
+  check('AI-62 指针的 before 是别人家的默认（provider=jyld），改它必须先在预览里看见', dPtr?.before?.provider === 'jyld' && dplan.warnings?.some((w: string) => w.includes('默认模型')), JSON.stringify([dPtr?.before, dplan.warnings?.length]));
+
+  const da: any = (await APPLY(D)).body;
+  const dAfter = rdDsh();
+  const dCreds = rdDc();
+  check('AI-63 apply 写满三处：provider 块、refs 我们那一格、默认模型指针两段', da.status === 'success' && dAfter['llm-pi-ai'].providers['own-api'].baseURL === BASE + '/v1' && dCreds.refs.OWN_API_API_KEY === VK.key && dAfter['agent-default-model'].provider === 'own-api' && dAfter['agent-default-model'].model === 'gpt-4o', JSON.stringify(dAfter['agent-default-model']));
+  check('AI-63 catalog 投影只在路由登记了窗口才写数字（不拿 128k 冒充用户真实窗口）', Array.isArray(dAfter['llm-pi-ai'].providers['own-api'].models) && dAfter['llm-pi-ai'].providers['own-api'].models.every((m: any) => m.id && m.name === m.id), JSON.stringify(dAfter['llm-pi-ai'].providers['own-api'].models));
+  check('AI-64 merge-only：别人的 provider、行尾注释、头注释、非模型 namespace 全部原样', readFileSync(DSF, 'utf8').includes('# 用户自己的注释') && readFileSync(DSF, 'utf8').includes('# 行尾注释也是用户的') && dAfter['llm-pi-ai'].providers.jyld.baseURL === 'https://tokenrhythm.studio/v1' && dAfter['ui-theme'].fontSize === 16, '邻居被碰');
+  check('AI-64 凭据库只动我们那一格：别人的 ref、records 授权、version 全部活着', dCreds.refs.JYLD_API_KEY === 'jyld-old-secret' && dCreds.records['client-connection/browser-session'].payload.secret === 'grant-secret-keep' && dCreds.version === 1 && Object.keys(dCreds.refs).length === 2, JSON.stringify(Object.keys(dCreds)));
+  check('AI-64 两个文件的 0600 都必须保住——dsh 见到多用户可读的凭据库会拒绝加载', (statSync(DSF).mode & 0o777) === 0o600 && (statSync(DCF).mode & 0o777) === 0o600, `settings ${(statSync(DSF).mode & 0o777).toString(8)} creds ${(statSync(DCF).mode & 0o777).toString(8)}`);
+  const da2: any = (await APPLY(D)).body;
+  check('AI-65 二次 apply 全 noop（含凭据库：同值不重写）', da2.status === 'success' && da2.steps.every((s: any) => s.state === 'noop'), JSON.stringify(da2.steps.map((s: any) => s.state)));
+  check('AI-65 刚写完 drift=consistent', (await D_LINK()).drift === 'consistent', (await D_LINK()).driftDetail);
+  tamperD('provider: own-api', 'provider: jyld');
+  tamperD('model: gpt-4o', 'model: glm-5.3-flash');
+  check('AI-66 用户在 dsh 里自己换了默认模型 → modified（这是真信号：dsh 会写这同一格）', (await D_LINK()).drift === 'modified', (await D_LINK()).driftDetail);
+  const dsync: any = (await SYNC('dsh', { confirm: true })).body;
+  check('AI-66b 同步按账本把默认模型刷回 own-api（同一格两个键一起回）', dsync?.status === 'success' && rdDsh()['agent-default-model'].provider === 'own-api' && rdDsh()['agent-default-model'].model === 'gpt-4o' && (await D_LINK()).drift === 'consistent', JSON.stringify(dsync?.steps?.map((s: any) => s.state)));
+  tamperD('displayName: jyld', 'displayName: jyld-renamed');
+  tamperD('fontSize: 16', 'fontSize: 20');
+  check('AI-66c 别人家与无关 namespace 的改动不算漂移', (await D_LINK()).drift === 'consistent', (await D_LINK()).driftDetail);
+  const dNoDefault: any = (await PLAN({ agentId: 'dsh', vkeyId: VK.id, model: 'gpt-4o', roles: [] })).body;
+  check('AI-68 不接管 default 就完全不碰 agent-default-model（那是用户每次新建 agent 的起点）', dNoDefault.steps?.length === 2 && !JSON.stringify(dNoDefault.steps).includes('agent-default-model'), JSON.stringify(dNoDefault.steps?.map((s: any) => s.path.join('.'))));
+  const dd = await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN });
+  const dBack = rdDsh();
+  const dCredsBack = rdDc();
+  const d67 = [dd.body?.ok === true, dBack['llm-pi-ai'].providers['own-api'] === undefined, dBack['llm-pi-ai'].providers.jyld !== undefined, dBack['agent-default-model'].provider === 'jyld', dBack['agent-default-model'].model === 'glm-5.3-flash'];
+  check('AI-67 撤销：块型那一格整块摘除（块型无 prev 可还原，兜底是 .bak）、指针逐键回到 jyld、别人家 provider 还在', d67.every(Boolean), `ok/块摘除/邻居在/指针provider/指针model → ${JSON.stringify(d67)}`);
+  check('AI-67b noop 不抹掉上一轮的写前值：sync 没动凭据那格，撤销仍还原成用户最早那把 key（不是我们那把）', dCredsBack.refs.OWN_API_API_KEY === 'old-own-api-key', String(dCredsBack.refs.OWN_API_API_KEY));
+  check('AI-67 别人的东西一个没少（jyld 的 ref 与 records 授权仍在，文件仍 0600）', dCredsBack.refs.JYLD_API_KEY === 'jyld-old-secret' && !!dCredsBack.records && (statSync(DCF).mode & 0o777) === 0o600 && (await D_LINK()).agentId === undefined, JSON.stringify(Object.keys(dCredsBack)));
+  // 真机形状（彩排里踩到的）：用户自己早就把 own-api 指着我们同端口，第一轮 apply 指针那格就是 noop
+  writeFileSync(DSF, `llm-pi-ai:
+  providers:
+    own-api:
+      displayName: own-api
+      api: openai-completions
+      baseURL: ${BASE}/v1
+      apiKeyEnv: OWN_API_API_KEY
+      defaultInput: [ text, image ]
+      models:
+        - id: gpt-4o
+          name: gpt-4o
+          input: [ text ]
+agent-default-model:
+  provider: own-api
+  model: gpt-4o
+ui-theme:
+  fontSize: 16
+`);
+  const dAlready: any = (await APPLY(D)).body;
+  check('AI-67e 块型整块覆盖前，先点名我们会吞掉哪些不托管字段（真机里那是用户手写的 defaultInput）', (dAlready.plan?.warnings || []).some((w: string) => w.includes('defaultInput') && w.includes('.own-api-bak')), JSON.stringify(dAlready.plan?.warnings));
+  const dPtrStep = (dAlready.plan?.steps || []).find((s: any) => s.path.join('.') === 'agent-default-model');
+  check('AI-67c 用户早就自己指着 own-api/gpt-4o → 指针那格判 noop（不假装做过事，但仍要记它归我们）', dAlready.status === 'success' && dPtrStep?.state === 'noop', JSON.stringify(dPtrStep?.state));
+  await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN });
+  const dPtrBack = parseY(DSF).state.data['agent-default-model'];
+  check('AI-67d noop 过的合并写入点撤销时放回原值，不留下空映射（撤销是还原，不是删形状）', dPtrBack?.provider === 'own-api' && dPtrBack?.model === 'gpt-4o', JSON.stringify(dPtrBack));
+  // 网关换端口（sync 的卖点之一）：请求 Host 就是新地址，旧块写的还是旧端口
+  putDsh();
+  await APPLY(D);
+  // 派生基址取自请求的 Host 头，而 undici（global fetch）会吞掉手工设置的 Host——实测过：换 Host 打过去，
+  // 服务端看到的还是原端口，于是「同步成功」其实是一次 noop。要真模拟换端口，得走认 Host 的 node:http。
+  const portSync = (host: string) =>
+    new Promise<any>((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port: Number(BASE.split(':')[2]), path: '/api/agents/dsh/sync', method: 'POST', headers: { ...ADMIN, Host: host } }, (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, body: JSON.parse(d) });
+          } catch {
+            resolve({ status: res.statusCode, body: d });
+          }
+        });
+      });
+      req.on('error', reject);
+      req.end('{"confirm":true}');
+    });
+  const sPort: any = (await portSync('127.0.0.1:9999')).body;
+  check('AI-70 网关换了端口 → 旧块凭账本里记的基址仍认是我们的，同步把地址刷成新端口（§15-5）', sPort?.status === 'success' && rdDsh()['llm-pi-ai'].providers['own-api'].baseURL === 'http://127.0.0.1:9999/v1' && (await D_LINK()).baseUrl === 'http://127.0.0.1:9999', JSON.stringify([sPort?.status, sPort?.plan?.errors]));
+  tamperD('baseURL: http://127.0.0.1:9999/v1', 'baseURL: https://someone-else.example/v1');
+  const sSteal: any = (await SYNC('dsh', { confirm: true })).body;
+  check('AI-70b 放松只放松到「账本证明的那一份」：盘上现值指向第三家 → 照旧拒覆盖（§9-4 没被放宽成抢别人）', sSteal?.status === 'failed' && readFileSync(DSF, 'utf8').includes('https://someone-else.example/v1'), JSON.stringify(sSteal?.plan?.errors || sSteal?.status));
+  await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN, body: JSON.stringify({ force: true }) });
+
+  putDsh();
+  chmodSync(DSF, 0o644); // 用户的文件是 0644：我们不替他收紧
+  await APPLY(D);
+  check('AI-69 备份是同一份明文的第二副本，权限一律收紧 0600——但源文件宽是用户的选择，不动它', (statSync(DSF).mode & 0o777) === 0o644 && (statSync(`${DSF}.own-api-bak`).mode & 0o777) === 0o600, `源 ${(statSync(DSF).mode & 0o777).toString(8)}｜bak ${(statSync(`${DSF}.own-api-bak`).mode & 0o777).toString(8)}`);
+  await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN, body: JSON.stringify({ force: true }) });
+  rmSync(join(AG, '.dsh'), { recursive: true, force: true });
+
+  // key 明文取不到那条分支放在最后：它要删掉 VK，之后的钉子就没 key 可用了
+  putC(cbase);
+  await APPLY(CL);
+  await api(`/api/vkeys/${VK.id}`, { method: 'DELETE', headers: ADMIN }); // key 没了 → token 无从比对
+  const ck = await api('/api/agents/claude-code', { method: 'DELETE', headers: ADMIN });
+  check('AI-56 key 已删 → AUTH_TOKEN 判为「查不了」而不是「不是我们的」：kept + 账本留着，不赌归属', ck.body?.partial === true && rdC().env.ANTHROPIC_AUTH_TOKEN === VK.key && String(ck.body?.results?.map((r: any) => r.reason).join()).includes('无法确认归属'), JSON.stringify(ck.body?.results));
+  check('AI-56 三态不是一刀切冻结整份文件：同文件里认得出的键该还原照旧还原', rdC().env.ANTHROPIC_MODEL === 'deepseek-v4-flash[1M]' && rdC().model === 'deepseek-v4-flash[1M]', JSON.stringify([rdC().env.ANTHROPIC_MODEL, rdC().model]));
+  await api('/api/agents/claude-code?force=1', { method: 'DELETE', headers: ADMIN });
+  putC(CLAUDE_FIX());
+
+  // 指纹算法稳定性：键法一旦被改，老用户账本里存的指纹全体对不上 → 升级即全员误报「被改」。
+  // golden 由本轮实现算出并焊死（PR1→PR2 之间 zcode 的域与 fingerprintOf 主体未动，故值不变）。
+  const goldenKeys = ai.getAdapter('zcode')!.targets[0].writtenKeys;
+  const goldenBlk = { options: { apiKey: 'sk-x', baseURL: 'http://127.0.0.1:8787/v1' }, models: { a: { limit: { context: 100 } } } };
+  check('AI-38 zcode 指纹 golden（动指纹域必红，逼你连带处理老账本迁移）', ai.fingerprintOf(goldenBlk, goldenKeys) === 'sha256:d473619fd5da43af55ecaa4bffa22819be761d8aa5e0b6e107b965a2ffd4ca38', ai.fingerprintOf(goldenBlk, goldenKeys));
+  check('AI-38 域外字段不进指纹（agent 给块补 modalities 后仍同指纹，§6.5 的立论前提）', ai.fingerprintOf({ ...goldenBlk, models: { a: { limit: { context: 100 }, modalities: ['text'] } } }, goldenKeys) === ai.fingerprintOf(goldenBlk, goldenKeys), '域外增字段');
+
+  const nowOmpMt = ['models.yml', 'config.yml'].map((f) => { const p = join(realOmp, f); return existsSync(p) ? statSync(p).mtimeMs : -1; });
+  const nowClaudeMt = existsSync(realClaude) ? statSync(realClaude).mtimeMs : -1;
+  const nowDsh = ['.dsh/settings.yaml', '.dsh/.credentials.yaml'].map((f) => { const p = join(homedir(), f); return existsSync(p) ? statSync(p).mtimeMs : -1; });
+  check('AI-0b 真实 HOME 的 zcode / omp / claude / **dsh** 配置全程未被本轮测试碰过（dsh 就是跑着测试的这个进程，写坏等于自毁）', (existsSync(realZ) ? statSync(realZ).mtimeMs : -1) === realMtime && JSON.stringify(nowOmpMt) === JSON.stringify(realOmpMt) && nowClaudeMt === realClaudeMt && JSON.stringify(nowDsh) === JSON.stringify(realDsh), `zcode ${realMtime} → ${existsSync(realZ) ? statSync(realZ).mtimeMs : -1}｜omp ${JSON.stringify(realOmpMt)} → ${JSON.stringify(nowOmpMt)}｜claude ${realClaudeMt} → ${nowClaudeMt}｜dsh ${JSON.stringify(realDsh)} → ${JSON.stringify(nowDsh)}`);
+  if (savedHome === undefined) delete process.env.OWN_API_AGENT_HOME;
+  else process.env.OWN_API_AGENT_HOME = savedHome;
+  rmSync(AG, { recursive: true, force: true });
 }
 // ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);

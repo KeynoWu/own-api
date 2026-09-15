@@ -5,7 +5,7 @@ import { createApp } from './app.ts';
 import { store, getDataDir } from './store.ts';
 import { gcRpmWindows } from './usage.ts';
 import { envAny, openBrowser } from './bootstrap.ts';
-import { createHandoffTicket, setShutdownHook } from './admin.ts';
+import { createHandoffTicket, setSelfBaseUrl, setShutdownHook } from './admin.ts';
 
 const PORT = Number(envAny(['OWN_API_PORT', 'PORT']) || 8787);
 const HOST = envAny(['OWN_API_HOST', 'HOST']) || '127.0.0.1';
@@ -21,6 +21,7 @@ function listen(port: number) {
     const vk = store.listVKeys()[0];
     const shownHost = HOST === '0.0.0.0' ? '127.0.0.1' : HOST;
     const base = `http://${shownHost}:${info.port}`;
+    setSelfBaseUrl(base); // agent 接入探针的唯一目标地址（§9-7：探针不接受 URL 入参）
     console.log(`\n  own-api 已启动`);
     console.log(`  ├─ 管理台    ${base}/`);
     console.log(`  ├─ 统一代理  ${base}/v1   (OpenAI 与 Anthropic 双协议)`);

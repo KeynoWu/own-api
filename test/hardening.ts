@@ -830,7 +830,9 @@ section('14. 信息暴露、usage 口径与主键完整性');
   mchild.kill();
   await new Promise<void>((r) => { mchild.on('exit', () => r()); setTimeout(r, 4000); });
   const migDb = JSON.parse(fs3.readFileSync(join(migDir, 'db.json'), 'utf8'));
-  check('迁移落盘回写：routes 取代 models/autoRoutes（v3）', migDb.version === 3 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined, JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
+  // v4 起 agentLinks 属当前版：v2 库一路升满（合表 + 补 agentLinks）。断言跟着当前版走而非钉死 3——
+  // 落盘版本号不诚实才是 bug
+  check('迁移落盘回写：routes 取代 models/autoRoutes（v2 直升当前版 v4）', migDb.version === 4 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined && Array.isArray(migDb.agentLinks), JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, links: Array.isArray(migDb.agentLinks), legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
   rmSync(migDir, { recursive: true, force: true });
 }
 // ---- 审查 P2：脏库迁移矩阵（元素级过滤；坏条目丢弃并告警，好数据一概保全） ----
@@ -889,7 +891,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
   dchild.kill();
   await new Promise<void>((r) => { dchild.on('exit', () => r()); setTimeout(r, 4000); });
   const dDb = JSON.parse(fs4.readFileSync(join(dirtyDir, 'db.json'), 'utf8'));
-  check('P2 脏库迁移同样回写 v3 且只带清洗后的数据', dDb.version === 3 && dDb.routes?.length === 3 && dDb.channels?.length === 1 && dDb.vkeys?.length === 1, JSON.stringify([dDb.version, dDb.routes?.length, dDb.channels?.length, dDb.vkeys?.length]));
+  check('P2 脏库迁移同样回写当前版 v4 且只带清洗后的数据', dDb.version === 4 && dDb.routes?.length === 3 && dDb.channels?.length === 1 && dDb.vkeys?.length === 1, JSON.stringify([dDb.version, dDb.routes?.length, dDb.channels?.length, dDb.vkeys?.length]));
   rmSync(dirtyDir, { recursive: true, force: true });
 }
 
@@ -1001,6 +1003,178 @@ section('14. 信息暴露、usage 口径与主键完整性');
   check('链式钉：保存失败 toast 且弹窗留开可重试', dlg.open === true && toasts.includes('保存失败示例'), JSON.stringify(toasts));
   findBtn('取消').ev.click();
   check('链式钉：取消关闭弹窗', dlg.open === false);
+}
+{
+  // 接入向导**真点击**钉（设计 §11 的 AI-17）。为什么非要真点一次：交付时那条 L2 bug——浏览器弹了确认框、
+  // 却没把 confirm 带给服务端，于是恒 428 被渲染成「探针未通过」——在源码静态钉里长得完全正确，
+  // 只有点一次按钮才看得见真正发出去的 body。静态钉（AI-24）留着当第二层，不替代这一层。
+  const fsx4 = await import('node:fs');
+  const html4 = fsx4.readFileSync('web/index.html', 'utf8');
+  const bal4 = (start: number) => {
+    let d = 0;
+    for (let k = start; k < html4.length; k++) {
+      if (html4[k] === '{') d++;
+      else if (html4[k] === '}' && --d === 0) return k + 1;
+    }
+    throw new Error('unbalanced UI src');
+  };
+  const cutArrow = (decl: string) => {
+    const at = html4.indexOf(decl);
+    if (at < 0) throw new Error('源锚点丢失：' + decl);
+    return html4.slice(at, bal4(html4.indexOf('=>', at)));
+  };
+  const cutFn = (decl: string) => {
+    const at = html4.indexOf(decl);
+    if (at < 0) throw new Error('源锚点丢失：' + decl);
+    return html4.slice(at, bal4(html4.indexOf(')', at) + 1));
+  };
+  const mkNode4 = (tag: string): any => {
+    const n: any = { nodeType: 1, tag, children: [], style: {}, dataset: {}, attrs: {}, ev: {}, textContent: '' };
+    n.append = (...ks: any[]) => { for (const k of ks.flat()) if (k != null) n.children.push(k); };
+    n.prepend = (...ks: any[]) => { n.children.unshift(...ks.flat().filter((x: any) => x != null)); };
+    n.insertBefore = (x: any) => { n.children.unshift(x); };
+    n.setAttribute = (k: string, v: any) => { n.attrs[k] = v; n[k] = v; };
+    n.addEventListener = (t: string, f: any) => { n.ev[t] = f; };
+    Object.defineProperty(n, 'innerHTML', { get: () => '', set: () => { n.children.length = 0; } });
+    return n;
+  };
+  const dlg4: any = mkNode4('dialog');
+  dlg4.id = 'dlg';
+  dlg4.open = false;
+  dlg4.showModal = () => { dlg4.open = true; };
+  dlg4.close = () => { dlg4.open = false; };
+  dlg4.getBoundingClientRect = () => ({ left: 100, top: 100, right: 400, bottom: 300 });
+  // 这三个名字必须就叫 document/$/toast：被搬进来的页面源码认的是这些自由变量，桩就得长成它们的形状
+  const document = { createElement: mkNode4, createTextNode: (t: string) => ({ nodeType: 3, text: t }), querySelectorAll: () => [dlg4] } as any;
+  const $ = (s: string) => (s === '#dlg' ? dlg4 : s === '#toast' ? mkNode4('div') : null);
+  const toasts4: string[] = [];
+  const toast = (m: string) => { toasts4.push(String(m)); };
+  let confirmAnswer = true;
+  const confirm = () => confirmAnswer;
+  const calls: { path: string; body: any }[] = [];
+  const STEP = { file: '/h/.omp/agent/models.yml', state: 'update', ok: true, path: ['providers', 'own-api'], kind: 'block', diff: '+ baseUrl', backup: true };
+  let LEDGER: any[] = [];
+  const reply = (path: string): any => {
+    if (path === '/api/agents') return {
+      adapters: [
+        { id: 'zcode', label: 'ZCode', configPresent: true, binaryFound: true },
+        { id: 'omp', label: 'omp', configPresent: true, binaryFound: true, roleSlots: [{ slot: 'default', label: '默认' }, { slot: 'smol', label: '小模型' }] },
+        { id: 'claude-code', label: 'Claude Code', configPresent: true, binaryFound: true, roleSlots: [{ slot: 'default', label: '主模型' }, { slot: 'haiku', label: '后台任务' }, { slot: 'sonnet', label: 'Sonnet' }, { slot: 'opus', label: 'Opus' }], requiredSlots: ['default', 'haiku'] },
+      ], links: LEDGER,
+    };
+    if (path === '/api/vkeys?reveal=1') return [{ id: 'vk1', name: 'default', key: 'sk-lm-PLAIN' }];
+    if (path === '/v1/models') return { data: [{ id: 'model_auto' }, { id: 'gpt-4o' }] };
+    if (path.endsWith('/plan')) return { steps: [{ ...STEP }], errors: [], warnings: [] };
+    if (path.endsWith('/apply') || path.endsWith('/sync')) return { status: 'success', steps: [{ ...STEP }], plan: { verify: '打开 omp 说一句话' }, link: {}, drift: { state: 'consistent' } };
+    if (path.endsWith('/probe')) return { ok: true, verdict: 'ok', status: 200 };
+    return {};
+  };
+  const fetch = async (path: any, opt: any = {}) => {
+    const body = opt.body ? JSON.parse(String(opt.body)) : null;
+    calls.push({ path: String(path), body });
+    return { status: 200, ok: true, text: async () => JSON.stringify(reply(String(path))), json: async () => reply(String(path)) };
+  };
+  const uiSrc = ['let TOKEN = "t";', cutArrow('const el = ('), cutArrow('const api = async (path'), cutArrow('const agentPost = async (path'),
+    cutFn('function probeVerdict(r)'), cutFn('async function agentWizard(vk, seed)'), '({ agentWizard })'].join('\n');
+  const ui: any = eval(uiSrc);
+  const findBtn4 = (label: string, node?: any): any => {
+    for (const c of (node || dlg4).children || []) {
+      if (c.tag === 'button' && (c.children || []).some((t: any) => t.text === label)) return c;
+      const hit = c && c.children ? findBtn4(label, c) : null;
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const findAll = (tag: string, node: any, out: any[] = []): any[] => {
+    for (const c of node.children || []) { if (c.tag === tag) out.push(c); if (c.children) findAll(tag, c, out); }
+    return out;
+  };
+  const inputOf = (type: string) => findAll('input', dlg4).filter((n) => n.attrs.type === type);
+  const texts4 = (node: any): string => (node.children || []).map((t: any) => t.text || texts4(t)).join('');
+  const lastCall = (suffix: string) => [...calls].reverse().find((c) => c.path.endsWith(suffix));
+  const settle = () => new Promise((r) => setTimeout(r, 5)); // 向导里 onclick 是 () => doX() 不返 promise，靠宏任务刷一次
+  check('UI 钉源锚点唯一（向导/探针回执若被重构挪位，本钉必须响）', html4.split('async function agentWizard(').length === 2 && html4.split('function probeVerdict(').length === 2);
+
+  // ① 选择态
+  await ui.agentWizard({ id: 'vk1', name: 'default' });
+  await settle();
+  check('UI 钉：向导打开即渲染选择态（agent 单选 3 个 + 模型下拉 1 个）', dlg4.open === true && inputOf('radio').length === 3 && findAll('select', dlg4).length === 1, `radio ${inputOf('radio').length}`);
+  check('UI 钉：没选中带 roleSlots 的 agent 时不凭空长出一堆勾选框', inputOf('checkbox').length === 0, String(inputOf('checkbox').length));
+  inputOf('radio')[1].ev.change({ target: { checked: true } });
+  check('UI 钉：选中 omp 后它的 roleSlots 逐个渲染成勾选项', inputOf('checkbox').length === 2 && texts4(dlg4).includes('默认'), texts4(dlg4).slice(0, 60));
+
+  // ② 预览 → 写入
+  await findBtn4('下一步：看变更').ev.click();
+  await settle();
+  const pl = lastCall('/plan');
+  check('UI 钉：看变更发出的 plan 带齐 agentId/vkeyId/model/roles', pl?.body?.agentId === 'omp' && pl?.body?.vkeyId === 'vk1' && pl?.body?.model === 'model_auto' && JSON.stringify(pl?.body?.roles) === '["default"]', JSON.stringify(pl?.body));
+  check('UI 钉：默认只接管 default 一个槽（九个槽全抢是越权，一个不接是功能没发生）', JSON.stringify(pl?.body?.roles) === '["default"]', JSON.stringify(pl?.body?.roles));
+  confirmAnswer = false;
+  const nApply0 = calls.filter((c) => c.path.endsWith('/apply')).length;
+  await findBtn4('确认写入').ev.click();
+  await settle();
+  check('UI 钉：浏览器 confirm 答否时一个写盘请求都不发', calls.filter((c) => c.path.endsWith('/apply')).length === nApply0);
+  confirmAnswer = true;
+  await findBtn4('确认写入').ev.click();
+  await settle();
+  const ap = lastCall('/apply');
+  check('UI 钉：确认写入的 body 里 confirm:true 在场（写盘版同款，静态钉看不见发出去的体）', ap?.body?.confirm === true && ap?.body?.agentId === 'omp' && JSON.stringify(ap?.body?.roles) === '["default"]', JSON.stringify(ap?.body));
+  check('UI 钉：回执由对话框自己讲结论（toast 两秒多就消失，这句得留到关窗）', texts4(dlg4).includes('✓ 已接入 omp') && texts4(dlg4).includes('已备份原文件'), texts4(dlg4).slice(0, 50));
+
+  // ③ 探针：L2 花钱那条才要 confirm（这条就是交付时踩空的那处）
+  confirmAnswer = false;
+  await findBtn4('完整自检 L2').ev.click();
+  await settle();
+  check('UI 钉：L2 在浏览器里被拒时不发请求（花钱保险在人这一侧也生效）', !calls.some((c) => c.path.endsWith('/probe')), JSON.stringify(calls.filter((c) => c.path.endsWith('/probe'))));
+  confirmAnswer = true;
+  await findBtn4('完整自检 L2').ev.click();
+  await settle();
+  const pr = lastCall('/probe');
+  check('UI 钉：L2 请求体带 confirm:true（恒 428 被说成链路故障的那个根因，钉在真请求上）', pr?.body?.level === 'L2' && pr?.body?.confirm === true, JSON.stringify(pr?.body));
+  await findBtn4('自检 L1').ev.click();
+  await settle();
+  check('UI 钉：L1 不要求 confirm（只有花钱那条要，多加是噪音）', lastCall('/probe')?.body?.level === 'L1' && lastCall('/probe')?.body?.confirm === undefined, JSON.stringify(lastCall('/probe')?.body));
+  check('UI 钉：探针结果仍 toast 出人话（modal 顶栏那次修复的遗留保护）', toasts4.some((t) => t.includes('探针通过')), JSON.stringify(toasts4.slice(-2)));
+
+  // ④ 同步模式：从「已接入」进来
+  LEDGER = [{ agentId: 'omp', vkeyId: 'vk1', model: 'gpt-4o', roles: { default: 'gpt-4o' }, drift: 'modified', driftDetail: 'x', linkedAt: 1, lastSyncAt: 1 }];
+  calls.length = 0;
+  await ui.agentWizard({ id: 'vk1' }, LEDGER[0]);
+  await settle();
+  check('UI 钉：同步模式一进来就自己算好 diff（预览→确认这两步一步不省）', dlg4.open === true && !!lastCall('/plan') && texts4(dlg4).includes('按账本原样刷回'), JSON.stringify(calls.map((c) => c.path)));
+  check('UI 钉：同步模式下选择控件全禁用（服务端按账本走，界面不许演「假可改」）', inputOf('radio').every((n) => n.attrs.disabled === '') && inputOf('checkbox').every((n) => n.attrs.disabled === '') && findAll('select', dlg4).every((n) => n.attrs.disabled === ''), JSON.stringify({ r: inputOf('radio').map((n) => n.attrs.disabled), c: inputOf('checkbox').map((n) => n.attrs.disabled) }));
+  check('UI 钉：同步模式沿用账本里的模型与角色槽（不重新默认成 model_auto）', lastCall('/plan')?.body?.model === 'gpt-4o' && JSON.stringify(lastCall('/plan')?.body?.roles) === '["default"]', JSON.stringify(lastCall('/plan')?.body));
+  confirmAnswer = true;
+  await findBtn4('确认写入').ev.click();
+  await settle();
+  const sy = lastCall('/sync');
+  check('UI 钉：同步请求只带 confirm 一个字段，且不走 apply（上下文归服务端账本重建）', !!sy && Object.keys(sy.body).join() === 'confirm' && !calls.some((c) => c.path.endsWith('/apply')), JSON.stringify(sy?.body));
+  check('UI 钉：同步成功的回执说「已同步」不是「已接入」（两件事别混成一件事）', texts4(dlg4).includes('✓ 已同步 omp'), texts4(dlg4).slice(0, 40));
+
+  // ⑤ 遮罩关闭：向导允许、坐标必须真在面板外（上一版「点到自己就关掉」的坑）
+  const bdAt = html4.indexOf("$('#dlg').addEventListener('click'");
+  check('UI 钉：遮罩处理器源锚点在', bdAt > 0);
+  eval(html4.slice(bdAt, html4.indexOf('\n});', bdAt) + 4));
+  check('UI 钉：接入向导显式许可点遮罩关闭（表单类不设该标记）', dlg4.dataset.dismiss === '1', JSON.stringify(dlg4.dataset));
+  dlg4.open = true;
+  dlg4.ev.click({ target: dlg4, clientX: 200, clientY: 200 });
+  check('UI 钉：点面板自身空白不关窗（rect 内一律不算遮罩）', dlg4.open === true);
+  dlg4.ev.click({ target: mkNode4('div'), clientX: 5, clientY: 5 });
+  check('UI 钉：事件目标不是 dialog 时不动（冒泡上来的内部点击不许误相关窗）', dlg4.open === true);
+  dlg4.ev.click({ target: dlg4, clientX: 5, clientY: 5 });
+  check('UI 钉：点遮罩真外面才关', dlg4.open === false);
+
+  // ⑦ claude-code：哪些槽「不接管就出故障」只有适配器知道，UI 不自己猜
+  await ui.agentWizard({ id: 'vk1', name: 'default' });
+  await settle();
+  inputOf('radio')[2].ev.change({ target: { checked: true } });
+  const cbs = inputOf('checkbox');
+  // 勾选框按 roleSlots 声明序渲染（default,haiku,sonnet,opus），故位置即身份
+  check('UI 钉：claude 四个槽全渲染，预勾的恰是 requiredSlots 点名的前两个（default+haiku）', cbs.length === 4 && cbs.filter((c: any) => c.attrs.checked !== undefined).length === 2 && cbs[0].attrs.checked !== undefined && cbs[1].attrs.checked !== undefined && cbs[2].attrs.checked === undefined, cbs.map((c: any) => (c.attrs.checked !== undefined ? '✓' : '·')).join(''));
+  await findBtn4('下一步：看变更').ev.click();
+  await settle();
+  const cplanCall = lastCall('/plan');
+  check('UI 钉：plan 把 default+haiku 两个槽都带上（漏 haiku = Claude 拿没登记的模型名打网关，现象却是网关 404）', cplanCall?.body?.agentId === 'claude-code' && JSON.stringify(cplanCall?.body?.roles) === '["default","haiku"]', JSON.stringify(cplanCall?.body));
 }
 {
   // P6：前端聚合纯逻辑钉——从 SPA 源里抽出 addAgg/newAgg 求值，锁 KPI 算术（改前端必须过这关）

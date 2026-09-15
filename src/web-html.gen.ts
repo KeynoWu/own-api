@@ -139,7 +139,21 @@ const api = async (path, opt = {}) => {
 };
 const toast = (msg, bad) => {
   const n = el('div', { class: bad ? 'err' : '' }, String(msg));
-  $('#toast').append(n);
+  // showModal() 的对话框画在 **top layer**，普通 fixed + 再高的 z-index 都压不过它：
+  // 有 modal 开着时把 toast 挂进 dialog 内部（跟着进 top layer），否则提示等于发给了看不见的地方
+  const modal = [...document.querySelectorAll('dialog[open]')].pop();
+  let host = $('#toast');
+  if (modal) {
+    if (!modal.__toast || !modal.__toast.isConnected) {
+      modal.__toast = el('div', { style: 'position:fixed;right:18px;bottom:18px;display:flex;gap:8px;flex-direction:column;max-width:56vw' });
+      modal.append(modal.__toast);
+      // 表单类对话框提交后立刻 close，而 closed 的 dialog 是 display:none——没显示的剩余时间
+      // 要把提示搬回 #toast，否则「已创建并复制完整 key」这类一句话刚出现就随窗消失
+      modal.addEventListener('close', () => { for (const c of [...modal.__toast.children]) $('#toast').append(c); }, { once: true });
+    }
+    host = modal.__toast;
+  }
+  host.append(n);
   setTimeout(() => n.remove(), bad ? 6000 : 2600);
 };
 // F4：http 非安全上下文无 navigator.clipboard（同步炸毁创建流）；掩码串被静默复制=用户拿假 key 配 agent
@@ -248,6 +262,7 @@ function form(title, fields, onSubmit) {
     catch (e) { toast(e.message, true); saveBtn.disabled = false; submitting = false; }
   };
   if (dlg.open) dlg.close(); // 叠开先退旧场再入幕
+  delete dlg.dataset.dismiss; // 表单不许点遮罩就走：清掉上一个对话框（如接入向导）留下的许可
   dlg.__form = myForm;
   dlg.addEventListener('close', () => { if (dlg.__form === myForm) formClosed = true; });
   dlg.innerHTML = '';
@@ -1045,6 +1060,7 @@ views.vkeys = async () => {
       el('td', { class: 'muted' }, ago(k.lastUsedAt)),
       el('td', {}, k.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
       el('td', {}, el('div', { class: 'row' },
+        el('button', { class: 'btn sm', onclick: () => agentWizard(k).catch((e) => toast(e.message, true)) }, '接入 Agent'),
         el('button', { class: 'btn sm', onclick: () => api(\`/api/vkeys/\${k.id}\`, { method: 'PATCH', body: JSON.stringify({ enabled: !k.enabled }) }).then(() => go('vkeys')) }, k.enabled ? '停用' : '启用'),
         el('button', { class: 'btn sm danger', onclick: () => confirm(\`删除 \${k.name}？使用该 key 的 agent 会立即失效。\`) && api(\`/api/vkeys/\${k.id}\`, { method: 'DELETE' }).then(() => go('vkeys')) }, '删除'),
       ))));
@@ -1053,6 +1069,176 @@ views.vkeys = async () => {
   box.append(el('div', { class: 'muted', style: 'margin-top:10px;font-size:12px' }, \`可路由模型：\${models.map((m) => m.publicName).join(' / ') || '（还没有）'}\`));
   return box;
 };
+
+// ---------------- agent 一键接入（docs/agent-import-design.md §10） ----------------
+const DRIFT = { consistent: ['ok', '一致'], modified: ['warn', '我方字段被改过'], missing: ['err-text', '配置已丢失'], unavailable: ['', '读不到'] };
+const driftPill = (d, detail) => el('span', { class: 'pill ' + ((DRIFT[d] || ['', ''])[0]), title: detail || '' }, (DRIFT[d] || [])[1] || d || '-');
+/** 写面调用需拿到 409/403/428 的**完整回执**（api() 会把它压成一句 error），故此处直接走 fetch */
+const agentPost = async (path, body) => {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-token': TOKEN }, body: JSON.stringify(body || {}) });
+  const txt = await res.text();
+  let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { error: txt }; }
+  return { status: res.status, body: j };
+};
+/**
+ * 探针回执 → 人话。三种「不是链路故障」的情形必须与真故障分开说，否则用户会去改本来没问题的配置：
+ * 428=没带确认（花费保险触发）；429=额度闸门；409=账本里的 key 已删除。
+ */
+function probeVerdict(r) {
+  const v = r.body?.verdict;
+  if (v === 'ok') toast('探针通过：网关侧链路正常');
+  else if (v === 'rate_limited') toast('被限流（429）：配置没问题，稍后再试');
+  else if (r.status === 428) toast('未执行：L2 需要显式确认（这是花费保险，不是链路故障）');
+  else if (r.status === 409) toast(r.body?.error || '这把 key 已被删除，探针无法进行', true);
+  else toast(\`探针未通过：HTTP \${r.body?.status ?? r.status}\${r.body?.note ? ' · ' + String(r.body.note).slice(0, 120) : r.body?.error ? ' · ' + r.body.error : ''}\`, true);
+  if (r.body?.agentCheck) setTimeout(() => toast(r.body.agentCheck), 1200);
+}
+
+/**
+ * 接入向导：选 agent/模型 → 看 diff → 确认写入 → 探针。
+ * 模型下拉直接取 \`GET /v1/models\`（带这把 key），与服务端 plan 同源（G1）：
+ * 下拉里能看见的，就是这把 key 真能调的，不会出现「选得到、agent 里 404」。
+ */
+/**
+ * 点遮罩关闭对话框。**只认显式设了 data-dismiss 的对话框**：填了一半的表单被误点一下遮罩就清空，
+ * 比「多点一次取消」伤得多，所以表单类不设该标记。ESC 是 <dialog> 原生能力，与此互不干扰。
+ * 判定必须排掉面板自身内边距——点对话框空白处也会把 dialog 当事件目标，不加这层会「点到自己就关掉」。
+ */
+$('#dlg').addEventListener('click', (e) => {
+  const d = e.target;
+  if (!d || d.id !== 'dlg' || d.dataset.dismiss !== '1') return;
+  const r = d.getBoundingClientRect();
+  if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return;
+  d.close();
+});
+
+async function agentWizard(vk, seed) {
+  const dlg = $('#dlg');
+  if (dlg.open) dlg.close();
+  const d = await api('/api/agents');
+  const full = (await api('/api/vkeys?reveal=1')).find((x) => x.id === (seed?.vkeyId || vk.id));
+  // 同步模式先闸一下：账本里的 key 已经没了的话，别开一个填不下去的向导（服务端也会 409，这里说人话）
+  if (seed && !full) { toast('账本里的 key 已被删除，无法同步——请撤销这条记录后重新接入', true); return; }
+  const keyPlain = full?.key || '';
+  const models = await fetch('/v1/models', { headers: { authorization: 'Bearer ' + keyPlain } })
+    .then((r) => r.json()).then((j) => (j.data || []).map((m) => m.id)).catch(() => []);
+  const linked = Object.fromEntries(d.links.map((l) => [l.agentId, l]));
+  // 同步模式：从「已接入」进来，一切都按账本来。写入走 /sync 且体里只带 confirm——
+  // 上下文由服务端从账本重建，前端在这里改选择也不会真的生效，所以那些控件直接禁用（不演假可改）
+  const syncMode = !!seed;
+  let agent = (syncMode ? seed.agentId : null) || (d.adapters.find((a) => a.configPresent) || d.adapters[0] || {}).id;
+  let model = syncMode && seed.model ? seed.model : models.includes('model_auto') ? 'model_auto' : models[0] || '';
+  // 角色槽：已有账本沿用它接管过的槽；新接入按适配器点名的 requiredSlots 预勾
+  // （omp 只有 default；Claude 还得带上 haiku，否则它拿没登记的模型名打网关）。
+  // 其余槽一律不动——把用户所有槽一次性抢走不是「替换 cc-switch 产物」，是越权
+  const defaultRoles = (id) => {
+    const l = linked[id];
+    if (l && l.roles && Object.keys(l.roles).length) return Object.keys(l.roles);
+    const a = d.adapters.find((x) => x.id === id) || {};
+    const slots = (a.roleSlots || []).map((s) => s.slot);
+    if (a.requiredSlots?.length) return a.requiredSlots.filter((s) => slots.includes(s));
+    return slots.includes('default') ? ['default'] : [];
+  };
+  let roles = defaultRoles(agent);
+  let plan = null;
+  let receipt = null;
+  const body = el('div');
+  const foot = el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end;gap:8px' });
+  const STATE = { create: '写入', update: '更新', noop: '已是最新' };
+  const paint = () => {
+    body.innerHTML = '';
+    foot.innerHTML = '';
+    if (receipt) {
+      const bad = receipt.status !== 'success';
+      const s0 = (receipt.steps || [])[0] || {};
+      const name = (d.adapters.find((a) => a.id === agent) || {}).label || agent;
+      // 状态变更动作的结论由对话框自己讲，不靠 toast：toast 两秒多就消失，这句会一直留到你关窗
+      body.append(el('div', { style: 'font-size:15px;font-weight:600;color:var(' + (bad ? '--err' : '--ok') + ')' },
+        bad ? '✕ 未能写入 ' + name : s0.state === 'noop' ? '✓ ' + name + ' 已是最新，没有改动' : \`✓ \${syncMode ? '已同步' : '已接入'} \` + name));
+      body.append(el('div', { class: 'row', style: 'gap:8px;margin-top:6px' },
+        el('span', { class: 'mono', style: 'font-size:12px' }, String(s0.file || '').split('/').slice(-3).join('/')),
+        s0.backup ? el('span', { class: 'muted', style: 'font-size:11px', title: '写入前一刻的完整文件快照，想整体还原就复制它回原路径。重复接入会覆盖同一个备份；撤销不依赖它' }, '已备份原文件') : null));
+      for (const s of receipt.steps || [])
+        if (!s.ok) body.append(el('div', { class: 'err-text', style: 'font-size:12px;margin-top:8px' }, s.reason || '写入失败'));
+      // 浏览器的 confirm() 只是问给人看的，服务端的 confirm 字段才是闸——两者必须一起走，
+      // 否则 L2 恒 428 被显示成「链路失败」（本轮实际踩到的 bug，钉 AI-24 守着这条）
+      const probe = async (level) => {
+        if (level === 'L2' && !confirm('L2 会向真实上游发一次推理请求，会产生花费（极小）。继续？')) return;
+        probeVerdict(await agentPost(\`/api/agents/\${agent}/probe\`, { level, ...(level === 'L2' ? { confirm: true } : {}) }));
+      };
+      body.append(el('div', { class: 'row', style: 'margin-top:16px;gap:8px' },
+        el('button', { class: 'btn sm', title: '用这把 key 请求一次 GET /v1/models：URL 通不通、key 对不对、能看到哪些模型。不打真实上游，不花钱', onclick: () => probe('L1') }, '自检 L1'),
+        el('button', { class: 'btn sm', title: '真发一次 max_tokens=1 的推理请求，连真实上游一起验；会产生一次极小花费', onclick: () => probe('L2') }, '完整自检 L2'),
+        el('span', { class: 'muted', style: 'font-size:11px;flex:1' }, '自检只证明网关侧')));
+      if (receipt.plan?.verify) body.append(el('div', { class: 'muted', style: 'margin-top:8px;font-size:11px' }, receipt.plan.verify));
+      if (bad) foot.append(el('button', { class: 'btn', onclick: () => { receipt = null; plan = null; paint(); } }, '改一改再试'));
+      foot.append(el('button', { class: 'btn primary', onclick: () => dlg.close() }, '完成'));
+      return;
+    }
+    // 选择态
+    if (syncMode) body.append(el('div', { class: 'muted', style: 'font-size:11px;margin-bottom:8px' }, '同步是按账本原样刷回：不换 key、不换模型、不动角色槽勾选。要改这些请取消后重新接入。'));
+    body.append(el('div', { class: 'k' }, syncMode ? '同步哪个 agent' : '写入哪个 agent'));
+    for (const a of d.adapters) {
+      const st = !a.configPresent ? '没装' : !a.binaryFound ? '只剩旧配置' : '可写';
+      body.append(el('label', { class: 'row', style: 'margin:5px 0;gap:8px' },
+        el('input', { type: 'radio', name: 'ag', ...(agent === a.id ? { checked: '' } : {}), ...(syncMode ? { disabled: '' } : {}), onchange: () => { agent = a.id; roles = defaultRoles(a.id); plan = null; paint(); } }),
+        el('span', {}, a.label),
+        el('span', { class: 'pill ' + (a.configPresent && a.binaryFound ? 'ok' : 'warn') }, st),
+        linked[a.id] ? el('span', { class: 'muted', style: 'font-size:11px' }, '已接入 ' + linked[a.id].model + (linked[a.id].roles ? '（' + Object.keys(linked[a.id].roles).join('、') + '）' : '')) : null));
+    }
+    body.append(el('div', { class: 'k', style: 'margin-top:14px' }, '主模型'),
+      el('select', { style: 'width:100%;margin-top:4px', ...(syncMode ? { disabled: '' } : {}), onchange: (e) => { model = e.target.value; plan = null; } },
+        ...(models.length ? models : ['']).map((m) => el('option', { value: m, ...(m === model ? { selected: '' } : {}) }, m || '（这把 key 没有可路由模型）'))));
+    const slots = ((d.adapters.find((a) => a.id === agent) || {}).roleSlots) || [];
+    if (slots.length) {
+      body.append(el('div', { class: 'k', style: 'margin-top:14px' }, '接管哪些角色槽'),
+        el('div', { class: 'muted', style: 'font-size:11px;margin:2px 0 6px' }, '勾中的指向 own-api；没勾的一个字不动，撤销时逐键还原你原来的值。'));
+      for (const s of slots)
+        body.append(el('label', { class: 'row', style: 'gap:7px;margin:2px 0' },
+          el('input', {
+            type: 'checkbox', ...(roles.includes(s.slot) ? { checked: '' } : {}), ...(syncMode ? { disabled: '' } : {}),
+            onchange: (e) => { roles = e.target.checked ? [...roles, s.slot] : roles.filter((x) => x !== s.slot); plan = null; },
+          }),
+          el('span', { class: 'mono', style: 'font-size:11px' }, s.slot),
+          el('span', { class: 'muted', style: 'font-size:11px' }, s.label)));
+    }
+    foot.append(el('button', { class: 'btn', onclick: () => dlg.close() }, '取消'));
+    if (!plan) {
+      foot.append(el('button', { class: 'btn primary', onclick: () => doPlan() }, '下一步：看变更'));
+      return;
+    }
+    // 预览态：diff 只含托管块，密钥已由服务端掩码
+    for (const w of plan.warnings || []) body.append(el('div', { class: 'pill warn', style: 'margin:4px 0;display:inline-block' }, '⚠ ' + w));
+    for (const e of plan.errors || []) body.append(el('div', { class: 'err-text', style: 'font-size:12px;margin:4px 0' }, '✕ ' + e));
+    // 多写入点适配器（omp 是 provider 块 + 角色映射两处）每个都要自报家门，不能只说第一个
+    for (const s of plan.steps) {
+      body.append(el('div', { class: 'k', style: 'margin-top:12px' },
+        (STATE[s.state] || '变更') + ' · ' + String(s.file || '').split('/').slice(-2).join('/') + ' · ' + (s.kind === 'role' ? '角色槽 ' : '') + (s.path || []).join('.')));
+      body.append(el('pre', { class: 'code', style: 'max-height:180px;overflow:auto;font-size:11px;margin-top:6px' }, s.diff));
+    }
+    foot.append(el('button', { class: 'btn primary', ...(plan.errors?.length ? { disabled: '', title: '先解决上面的问题' } : {}), onclick: () => doApply() }, '确认写入'));
+  };
+  const doPlan = async () => { plan = (await agentPost('/api/agents/plan', { agentId: agent, vkeyId: full?.id || vk.id, model, roles })).body; paint(); };
+  const doApply = async () => {
+    if (!confirm(syncMode ? \`把 \${agent} 的 own-api 配置刷回账本声明的样子？（会先备份原文件）\` : \`把 own-api 写入 \${agent} 的本机配置？（会先备份原文件）\`)) return;
+    // 同步只带 confirm：上下文由服务端从账本重建（见 /agents/:id/sync），前端的选择在这里不参与决策
+    const r = syncMode
+      ? await agentPost(\`/api/agents/\${seed.agentId}/sync\`, { confirm: true })
+      : await agentPost('/api/agents/apply', { agentId: agent, vkeyId: full?.id || vk.id, model, roles, confirm: true });
+    if (r.status !== 200 && !r.body?.steps) { toast(r.body.error || \`HTTP \${r.status}\`, true); return; }
+    receipt = r.body;
+    toast(receipt.status === 'success' ? (syncMode ? '已同步' : '已写入') : '未全部写入，见详情', receipt.status !== 'success');
+    paint();
+  };
+  dlg.innerHTML = '';
+  // 本向导三步都没有「输入到一半丢了心疼」的东西，允许点遮罩走人；表单类对话框不设这个标记
+  dlg.dataset.dismiss = '1';
+  dlg.append(el('h3', {}, \`\${syncMode ? '同步' : '接入'} Agent · \${full?.name || vk.name || ''}\`), body, foot);
+  dlg.showModal();
+  paint();
+  // 同步模式进来就该看见 diff（预览→确认这一步不能省），账本已定好一切，直接算一次
+  if (syncMode && !plan) await doPlan();
+}
 
 // ---------------- 接入方式 ----------------
 views.connect = async () => {
@@ -1071,6 +1257,49 @@ views.connect = async () => {
       '。注意：不支持 OpenAI Responses API（', el('span', { class: 'mono' }, '/v1/responses'),
       '）；需要该 API 的客户端（如新版 Codex CLI 默认端点）请改用 chat completions 或经 litellm 之类代理转换。'),
   ));
+  // 已接入的 agent：账本 + 漂移实况。撤销/探针都是写面，非本机直连时后端会 403
+  const ag = await api('/api/agents').catch(() => null);
+  const agCard = el('div', { class: 'card' }, el('div', { class: 'k' }, '已接入的 Agent'));
+  if (!ag) agCard.append(el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' }, '读取失败（本功能仅限本机直连）。'));
+  else if (!ag.links.length)
+    agCard.append(el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
+      '还没有。到「对外 Key」页点某一行的 ', el('span', { class: 'mono' }, '接入 Agent'), '，把统一 URL 与 key 直接写进本机 agent 的配置——写之前会先给你看 diff，原文件自动备份。'));
+  else {
+    for (const l of ag.links) {
+      const label = (ag.adapters.find((a) => a.id === l.agentId) || {}).label || l.agentId;
+      const line = el('div', { class: 'row', style: 'margin:8px 0;flex-wrap:wrap;gap:8px' },
+        el('span', {}, label),
+        el('span', { class: 'mono', style: 'font-size:12px' }, l.model),
+        l.roles ? el('span', { class: 'muted', style: 'font-size:11px', title: '这些角色槽指向 own-api；撤销时逐键还原你原来的值' }, '→ ' + Object.keys(l.roles).join('、')) : null,
+        el('span', { class: 'muted', style: 'font-size:12px' }, 'Key ' + (l.vkeyName || (l.vkeyDangling ? '（已删除，agent 里那份已失效）' : l.vkeyId))),
+        driftPill(l.drift, l.driftDetail),
+        l.catalogStale ? el('span', { class: 'pill warn', title: '模型清单与这把 key 当前可见的集合已不一致' }, '模型清单待同步') : null,
+        el('span', { class: 'muted', style: 'font-size:11px' }, '接入于 ' + ago(l.linkedAt) + (l.lastSyncAt > l.linkedAt ? ' · 同步于 ' + ago(l.lastSyncAt) : '') + (l.lastProbe ? ' · 探针 ' + (l.lastProbe.ok ? '通过' : '失败') + ' ' + ago(l.lastProbe.at) : '')));
+      // 同步 = 账本原样再刷一遍，走同一个向导（预览 diff → 确认两步不省）；漂移时高亮，一致时也在（点了只会看见「已是最新」）
+      const stale = l.drift !== 'consistent' || l.catalogStale;
+      line.append(el('button', {
+        class: 'btn sm' + (stale ? ' primary' : ''),
+        title: stale ? '按账本把 own-api 再刷回去（先给你看 diff，原文件照旧备份）' : '当前是一致的，点进来只会看见「已是最新」',
+        onclick: () => agentWizard({ id: l.vkeyId }, l),
+      }, '同步'));
+      const probe = async (level) => {
+        if (level === 'L2' && !confirm('L2 会向真实上游发一次推理请求，会产生花费（极小）。继续？')) return;
+        probeVerdict(await agentPost(\`/api/agents/\${l.agentId}/probe\`, { level, ...(level === 'L2' ? { confirm: true } : {}) }));
+      };
+      line.append(el('button', { class: 'btn sm', onclick: () => probe('L1') }, '探针 L1'));
+      line.append(el('button', { class: 'btn sm', onclick: () => probe('L2') }, '探针 L2'));
+      line.append(el('button', { class: 'btn sm danger', onclick: async () => {
+        if (!confirm(\`从 \${label} 撤销 own-api？只删我们自己写的那一块，其它配置一个不碰。\`)) return;
+        const res = await fetch(\`/api/agents/\${l.agentId}\`, { method: 'DELETE', headers: { 'x-admin-token': TOKEN } }).then((r) => r.json());
+        toast(res.ok ? '已撤销' : res.note || '部分未删除，账本已保留', !res.ok);
+        go('connect');
+      } }, '撤销'));
+      agCard.append(line);
+    }
+    agCard.append(el('div', { class: 'muted', style: 'margin-top:8px;font-size:11px' },
+      '漂移只比对我方写入的字段——agent 自己补的字段（如推理档位）不算改动。写入与撤销仅限本机直连（127.0.0.1）。'));
+  }
+  box.append(agCard);
   const blocks = [
     ['curl（OpenAI 协议）', s.curl],
     ['OpenAI SDK', s.openaiSdk],

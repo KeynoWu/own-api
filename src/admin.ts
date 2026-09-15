@@ -8,6 +8,8 @@ import { availableKeyCount } from './pool.ts';
 import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
+import { visibleModelsForVKey } from './gateway.ts';
+import { ADAPTERS, agentHome, applyLink, catalogIdsOf, detectAgents, driftOf, filterRoles, getAdapter, planLink, primaryBlock, revokeLink } from './agent-import.ts';
 import { APP_VERSION } from './version.gen.ts';
 import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSpeed, clearSpeedForRoute, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, speedSnapshotForAdmin, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
 import { clearVisionLearning } from './vision.ts';
@@ -43,6 +45,15 @@ let shutdownHookFn: (() => void) | null = null;
 export function setShutdownHook(fn: () => void) {
   shutdownHookFn = fn;
 }
+/**
+ * index.ts 注入本进程监听基址（同 shutdownHook 的注入方向，admin 不反向依赖 index）。
+ * 探针恒打这个地址——**URL 永不来自请求**，本端点因此不构成 SSRF 面（§9-7）。
+ */
+let selfBaseUrl = '';
+export function setSelfBaseUrl(u: string) {
+  selfBaseUrl = (u || '').replace(/\/+$/, '');
+}
+const selfBase = () => selfBaseUrl;
 export function createHandoffTicket(): string {
   const now = Date.now();
   for (const [t, exp] of handoffTickets) if (exp <= now) handoffTickets.delete(t);
@@ -644,6 +655,225 @@ export function createAdmin(): Hono {
     const { settings, applied, rejected } = store.applySettings(b);
     if (!applied.length && rejected.length) return c.json({ error: '所有设置项都未通过校验', rejected }, 400);
     return c.json({ ...publicSettings(settings), _applied: applied, _rejected: rejected });
+  });
+
+  // ---------- agent 一键接入（docs/agent-import-design.md） ----------
+  // 本模块是全项目唯一被允许写「数据目录之外文件」的地方，因此下面每道闸都是硬要求而非风格：
+  //   ① 零路径入参：只认 agentId/vkeyId/model，agentId 必须命中适配器表——路径穿越在协议层不可表示
+  //   ② 写面回环硬闸（isLocalish 以 socket 对端为准，伪造 Host/XFF 无效）
+  //   ③ 明文 key 与写盘同闸：拿不到明文就不该能落盘（否则会出现「写进去的是掩码串」）
+  /** 写面闸门：非回环一律 403（§9-2）。plan 也用它——plan 会读本机文件并回报结构事实 */
+  const agentWriteGate = (c: any) => (isLocalish(c) ? null : c.json({ error: 'loopback only：写入本机 agent 配置仅限本机直连' }, 403));
+
+  /** 写进对方文件里的网关基址：请求体里没有 URL 字段可传，只能由本机监听地址派生（探针同源同理） */
+  const reqBase = (c: any) =>
+    `${new URL(c.req.url).protocol}//${c.req.header('host') || `127.0.0.1:${process.env.OWN_API_PORT || process.env.PORT || 8787}`}`.replace(/\/+$/, '');
+  /** 主模型的有效对外协议：单模型看路由（缺省继承渠道）；auto 走 openai（候选可混合，网关负责互转） */
+  const protocolOf = (model: string): 'openai' | 'anthropic' => {
+    const single = store.findModelByName(model);
+    return single ? single.protocol || store.getChannel(single.channelId)?.protocol || 'openai' : 'openai';
+  };
+
+  /** 从请求体组装适配器上下文。任何一步不过关就返回错误响应，绝不带部分上下文往下走 */
+  const agentCtx = async (c: any) => {
+    const body = await c.req.json().catch(() => null as any);
+    if (!body || typeof body !== 'object') return { err: c.json({ error: 'body 需为对象：{ agentId, vkeyId, model }' }, 400) };
+    const adapter = getAdapter(body.agentId);
+    if (!adapter) return { err: c.json({ error: '未知的 agentId（本功能只支持已适配清单内的 agent，不接受路径入参）', allowed: ADAPTERS.map((a) => a.id) }, 400) };
+    // vkeyId / model / roles 缺省时回落到账本：让「已接入」页的同步预览复用**同一条** plan 通路，
+    // 而不是前端照着账本再算一遍——两套算法迟早漂移
+    const saved = store.getAgentLink(body.agentId);
+    const vkeyId = typeof body.vkeyId === 'string' ? body.vkeyId : saved?.vkeyId || '';
+    const vk = store.listVKeys().find((k) => k.id === vkeyId);
+    if (!vk) return { err: c.json({ error: 'vkeyId 不存在（账本里的 key 可能已被删除）' }, 400) };
+    if (!vk.enabled) return { err: c.json({ error: '这把 key 已停用，先启用再接入' }, 400) };
+    const model = typeof body.model === 'string' ? body.model.trim() : saved?.model || '';
+    const models = visibleModelsForVKey(vk); // G1：与 GET /v1/models 同源（gateway#visibleModelsForVKey）
+    if (!model) return { err: c.json({ error: '请选择一个模型', allowed: models.map((m) => m.id) }, 400) };
+    if (!models.some((m) => m.id === model)) {
+      return { err: c.json({ error: `模型 ${model} 不在这把 key 的可用范围内（已停用或未授权）`, allowed: models.map((m) => m.id) }, 400) };
+    }
+    if (!vk.key) return { err: c.json({ error: '内部错误：key 为空' }, 500) };
+    const protocol = protocolOf(model);
+    // 角色槽：UI 传槽名数组（都指向所选主模型），也接受 {槽: 模型} 形态；缺省沿用账本里的槽集。
+    // 未在适配器 roleSlots 里声明过的槽名在这里就被丢掉——槽名会变成目标文件里的路径段，不能放开。
+    // 三个分支必须各自带花括号：曾经写成 `if (A) for(..) if(B) X; else if (C) ...`，
+    // 那条 else if 语法上挂在里层 if 上，等于对象形态与账本回落两条路从来没跑过（AI-44 才暴露）
+    const wantRoles: Record<string, string> = {};
+    if (Array.isArray(body.roles)) {
+      for (const s of body.roles) if (typeof s === 'string') wantRoles[s] = model;
+    } else if (body.roles && typeof body.roles === 'object') {
+      for (const [k, v] of Object.entries(body.roles)) if (typeof v === 'string' && v) wantRoles[k] = v;
+    } else if (saved?.roles) {
+      for (const [k, v] of Object.entries(saved.roles)) if (typeof v === 'string' && v) wantRoles[k] = v;
+    }
+    return {
+      adapter,
+      body,
+      // oursBases：预览与提交必须同一把尺（DR-CB），所以两处都带账本基址——否则「预览说冲突、点同步却成功」
+      ctx: { home: agentHome(), baseUrl: reqBase(c), apiKey: vk.key, vkeyId: vk.id, model, protocol, models, roles: filterRoles(adapter, wantRoles), prevLink: saved, oursBases: saved ? [saved.baseUrl] : undefined },
+    };
+  };
+
+  app.get('/agents', (c) => {
+    const home = agentHome();
+    const links = store.listAgentLinks().map((l) => {
+      const adapter = getAdapter(l.agentId);
+      const vk = store.listVKeys().find((k) => k.id === l.vkeyId);
+      const d = adapter ? driftOf(adapter, l, home) : { state: 'unavailable' as const, detail: '本机已无此适配器的定义' };
+      // catalog 是否落后：拿当前同源可见集合与账本写入时的模型名比对（P1 的同步入口就挂这个标志）
+      let catalogStale: boolean | undefined;
+      // catalogInFile===false 的适配器（Claude Code 只写单个模型名）没有清单可比：
+      // 不排掉的话 catalogIdsOf 会把 env 的变量名当模型名，「模型清单待同步」永真
+      if (adapter && vk && adapter.catalogInFile !== false) {
+        const now = new Set(visibleModelsForVKey(vk).map((m) => m.id));
+        const ids = catalogIdsOf(primaryBlock(adapter, l, home)); // JSON 侧 map / YAML 侧数组都能读出来
+        if (ids.length) catalogStale = ids.some((k) => !now.has(k)) || [...now].some((k) => !ids.includes(k));
+      }
+      return { ...l, vkeyName: vk?.name, vkeyDangling: !vk, drift: d.state, driftDetail: d.detail, catalogStale };
+    });
+    return c.json({ adapters: detectAgents(home), links });
+  });
+
+  app.post('/agents/plan', async (c) => {
+    const gate = agentWriteGate(c);
+    if (gate) return gate;
+    const { adapter, ctx, err } = await agentCtx(c);
+    if (err) return err;
+    const plan = planLink(adapter!, ctx!);
+    return c.json(plan); // 零写入零外呼（§6.2）
+  });
+
+  app.post('/agents/apply', async (c) => {
+    const gate = agentWriteGate(c);
+    if (gate) return gate;
+    const { adapter, ctx, body, err } = await agentCtx(c);
+    if (err) return err;
+    // 显式确认走 body（与 config-bundle 的 dryRun 同规）；两段式的第二幕由 UI 带上。
+    // 提交路径服务端**重算计划**，前端传来的任何东西都不参与决策（DR-CB 的预览/提交同源约束）
+    if (body?.confirm !== true) return c.json({ error: '写入本机 agent 配置需显式确认：请带 confirm: true 重放' }, 428);
+    const res = applyLink(adapter!, ctx!);
+    if (res.link) store.upsertAgentLink(res.link); // 同步落盘：回执发出时账本必须已在盘上（§6.3-4）
+    const status = res.status === 'success' ? 200 : 409;
+    return c.json({ status: res.status, steps: res.steps, plan: res.plan, link: res.link }, status);  });
+
+  /** 同步：把账本里那句话再说一遍。漂移/模型清单变旧/网关换了端口，都是一键能修的事。
+   *  ctx 全部由账本重建（连 model/roles 都不接受请求体覆盖），体里只允许 confirm——
+   *  否则「同步」就成了第二条写入通道，零路径入参纪律要从这里漏回去 */
+  app.post('/agents/:id/sync', async (c) => {
+    const gate = agentWriteGate(c);
+    if (gate) return gate;
+    const link = store.getAgentLink(c.req.param('id'));
+    if (!link) return c.json({ error: 'not found' }, 404);
+    const body = await c.req.json().catch(() => null as any);
+    if (body?.confirm !== true) return c.json({ error: '同步会改写本机 agent 配置，需显式确认：请带 confirm: true 重放' }, 428);
+    const adapter = getAdapter(link.agentId);
+    if (!adapter) return c.json({ error: '本版本已无该 agent 的适配器定义，请手工清理配置文件后撤销账本' }, 409);
+    const vk = store.listVKeys().find((k) => k.id === link.vkeyId);
+    // 账本里的 key 没了/停了：这不是「同步一下」能修的，得重新选 key 重走接入，故 409 而非静默跳过
+    if (!vk) return c.json({ error: `账本里的 key（${link.vkeyId}）已被删除，请重新接入而不是同步` }, 409);
+    if (!vk.enabled) return c.json({ error: '这把 key 已停用，先启用再同步' }, 409);
+    const models = visibleModelsForVKey(vk);
+    if (!models.some((m) => m.id === link.model)) {
+      return c.json({ error: `主模型 ${link.model} 已不在这把 key 的可用范围内（被删除或不再授权）。同步不替你挑新模型——请重新接入并选一个`, allowed: models.map((m) => m.id) }, 409);
+    }
+    const ctx = { home: agentHome(), baseUrl: reqBase(c), apiKey: vk.key, vkeyId: vk.id, model: link.model, protocol: protocolOf(link.model), models, roles: link.roles, prevLink: link, oursBases: [link.baseUrl] };
+    const res = applyLink(adapter, ctx);
+    let saved = res.link;
+    if (res.link) {
+      // 接入时间是「这人是什么时候接上的」，同步不该把它刷成现在；同步时间单独记（UI 上分别显示）
+      saved = { ...res.link, linkedAt: link.linkedAt, lastSyncAt: Date.now() };
+      store.upsertAgentLink(saved);
+    }
+    return c.json({
+      status: res.status,
+      steps: res.steps,
+      plan: res.plan,
+      link: saved,
+      drift: saved ? driftOf(adapter, saved, agentHome()) : undefined,
+    }, res.status === 'success' ? 200 : 409);
+  });
+
+  app.delete('/agents/:id', async (c) => {
+    const gate = agentWriteGate(c);
+    if (gate) return gate;
+    const link = store.getAgentLink(c.req.param('id'));
+    if (!link) return c.json({ error: 'not found' }, 404);
+    const adapter = getAdapter(link.agentId);
+    // 归属判据要能算出「我们当初写的是什么」：裸值型 agent（Claude Code 写裸模型名与 key）只能拿现 key 比。
+    // key 已被删除 → 传 undefined，那些键一律 kept（宁可留待人工，也不误删可能是别人写的值）
+    const vk = store.listVKeys().find((k) => k.id === link.vkeyId);
+    const results = adapter ? revokeLink(adapter, link, agentHome(), { apiKey: vk?.key }).results : [];
+    // 只删掉了自己写的东西才算撤销完成。**残留时绝不清账本**（?force=1 除外）：
+    // 孤儿配置仍躺在对方 agent 里，账本一删 UI 就再也看不见它，用户以为已清理干净
+    const stuck = results.filter((r) => r.action === 'kept' || r.action === 'failed' || r.action === 'refused');
+    const keepLedger = stuck.length > 0 && c.req.query('force') !== '1';
+    if (!keepLedger && c.req.query('keepLink') !== '1') store.removeAgentLink(link.agentId);
+    return c.json({
+      ok: !keepLedger,
+      partial: keepLedger,
+      note: keepLedger ? `有 ${stuck.length} 处未能删除（该条目已不指向本网关，或写入被拒），账本已保留以便你继续处理；确认无需保留可带 ?force=1` : undefined,
+      results,
+    });
+  });
+
+  /**
+   * 接入后探针。URL 恒取本进程自己的监听地址（§9-7：**不接受任何 URL 入参**，本端点不构成 SSRF 面）。
+   * L1 = GET /v1/models（不打上游、不产生花费，但占一次 RPM 且受每日额度闸约束）；
+   * L2 = 真发一次 max_tokens=1 的推理请求——全流程唯一产生真实上游花费的动作，必须显式 confirm。
+   */
+  app.post('/agents/:id/probe', async (c) => {
+    const gate = agentWriteGate(c);
+    if (gate) return gate;
+    const link = store.getAgentLink(c.req.param('id'));
+    if (!link) return c.json({ error: 'not found' }, 404);
+    const adapter = getAdapter(link.agentId);
+    if (!adapter) return c.json({ error: '适配器不存在' }, 404);
+    const body = await c.req.json().catch(() => ({} as any));
+    const level = body?.level === 'L2' ? 'L2' : 'L1';
+    if (level === 'L2' && body?.confirm !== true) return c.json({ error: 'L2 会向真实上游发一次推理请求并产生花费，需 confirm: true' }, 428);
+    const vk = store.listVKeys().find((k) => k.id === link.vkeyId);
+    if (!vk) return c.json({ error: '这把 key 已删除，探针无法进行（agent 里的配置也已失效，请重新接入或撤销）', dangling: true }, 409);
+    const base = selfBase();
+    if (!base) return c.json({ error: '内部错误：监听地址未注册' }, 500);
+    const run = async (url: string, init: RequestInit) => {
+      try {
+        const r = await fetch(url, { ...init, signal: AbortSignal.timeout(level === 'L2' ? 60_000 : 10_000) });
+        const txt = await r.text();
+        return { status: r.status, note: txt.slice(0, 400) };
+      } catch (e) {
+        return { status: 0, note: (e as Error).message };
+      }
+    };
+    let out: { status: number; note: string };
+    if (level === 'L1') {
+      out = await run(`${base}/v1/models`, { headers: { authorization: `Bearer ${vk.key}` } });
+    } else {
+      const anthropic = adapter.probe === 'anthropic';
+      out = anthropic
+        ? await run(`${base}/v1/messages`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${vk.key}`, 'x-api-key': vk.key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+            body: JSON.stringify({ model: link.model, max_tokens: 1, messages: [{ role: 'user', content: 'own-api agent probe' }] }),
+          })
+        : await run(`${base}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${vk.key}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ model: link.model, max_tokens: 1, messages: [{ role: 'user', content: 'own-api agent probe' }] }),
+          });
+    }
+    // 429 不算失败：额度闸门满属正常，配置本身没问题（§15-2 裁决：不给探针加开关，改判语义）
+    const ok = out.status === 200;
+    const verdict = ok ? 'ok' : out.status === 429 ? 'rate_limited' : 'failed';
+    link.lastProbe = { ok, status: out.status, at: Date.now() };
+    store.upsertAgentLink(link);
+    return c.json({
+      level,
+      verdict,
+      status: out.status,
+      note: scrubSecret(out.note, vk.key), // 上游/自身回声里带 key 时先掩码再回显（与连通测试同口径）
+      agentCheck: adapter.verify, // 网关侧绿 ≠ agent 侧已就绪，两段话分开说（DR-AI-G）
+    });
   });
 
   // ---------- 客户端接入示例 ----------

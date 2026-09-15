@@ -1312,12 +1312,32 @@ export function listModels(c: Context) {
     return fail(c, 'openai', 429, rl.reason || 'rate limited', rl.retryAfterSec ? { 'retry-after': String(rl.retryAfterSec) } : undefined);
   }
 
+  return c.json({ object: 'list', data: visibleModelsForVKey(vkey) });
+}
+
+/** 某把 key 视角下可见的模型条目（GET /v1/models 的元素形态） */
+export interface VisibleModel {
+  id: string;
+  object: 'model';
+  created: number;
+  owned_by: string;
+  context_length?: number;
+  max_output_tokens?: number;
+}
+
+/**
+ * **G1 的唯一真源**（docs/agent-import-design.md §2.2）：`GET /v1/models` 的 data 与
+ * 「一键接入」写给 agent 的模型清单都出自这一次调用——两处共用同一条过滤链
+ * （enabled ∧ allowedForKey ∧ auto 有效候选），于是「agent 选择器里的集合 ≡ 这把 key 能调的集合」
+ * 由构造保证，不靠两处各自实现再祈祷它们一致。
+ */
+export function visibleModelsForVKey(vkey: VirtualKey): VisibleModel[] {
   const models = store
     .listModels()
     .filter((m) => m.enabled && allowedForKey(vkey, m.publicName))
     .map((m) => ({
       id: m.publicName,
-      object: 'model',
+      object: 'model' as const,
       created: Math.floor(m.createdAt / 1000),
       owned_by: `own-api:${store.getChannel(m.channelId)?.name || 'unknown'}`,
       context_length: m.contextWindow,
@@ -1335,12 +1355,12 @@ export function listModels(c: Context) {
       const outs = cands.map((m) => m.maxOutputTokens);
       return {
         id: a.publicName,
-        object: 'model',
+        object: 'model' as const,
         created: Math.floor(a.createdAt / 1000),
         owned_by: 'own-api:auto',
         ...(ctxs.length ? { context_length: Math.min(...ctxs) } : {}),
         ...(outs.length && outs.every((v) => !!v) ? { max_output_tokens: Math.min(...(outs as number[])) } : {}),
       };
     });
-  return c.json({ object: 'list', data: [...models, ...autos] });
+  return [...models, ...autos];
 }

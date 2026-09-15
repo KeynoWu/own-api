@@ -188,6 +188,39 @@ export interface AutoRoute {
 /** 单表路由判别联合（routes 数组的元素类型） */
 export type RouteEntry = ModelRoute | AutoRoute;
 
+/**
+ * Agent 一键接入的本机登记条目（docs/agent-import-design.md §2.3）。
+ * **本机绑定态**：路径/homedir/装了什么 agent 都是本机事实，因此恒不进 config-bundle（§7 非目标）。
+ * 不含任何密钥明文——只记 vkeyId，密钥用时现取（DR-AI-D）。
+ */
+export interface AgentLink {
+  /** 适配器 id（一 agent 一条；同 agent 重复 apply = 更新） */
+  agentId: string;
+  vkeyId: string;
+  /** 主模型对外名（可以是 auto 路由名） */
+  model: string;
+  /** 适配器角色槽 → 对外模型名（如 Claude Code 的 haiku）；无角色槽的适配器省略 */
+  roles?: Record<string, string>;
+  /** 写进对方文件的命名空间，撤销与漂移检测的锚点 */
+  providerId: string;
+  /** 接入时写入的网关基址（端口变了即漂移） */
+  baseUrl: string;
+  /** **我方声明字段子集**的规范化指纹（§6.5：目标 agent 会规范化我们的块，整块 hash 必误报） */
+  fingerprint: string;
+  /** 同上口径、逐写入点各存一份：漂移定位用（否则只能说「整体不符」说不出是哪个文件） */
+  byFile?: Record<string, string>;
+  /**
+   * 合并型写入点（如 omp 的 modelRoles.*）的**写前值**：`文件#托管路径` → {键: 原值}。
+   * 撤销时逐键还原；当时没有值的键（我们新建的）才删。缺了它就退化成「一律删除」，会把用户原来的角色弄丢。
+   */
+  prev?: Record<string, Record<string, unknown>>;
+  /** 写过的文件绝对路径（漂移/撤销的读取清单） */
+  targets: string[];
+  linkedAt: number;
+  lastSyncAt: number;
+  lastProbe?: { ok: boolean; status: number; at: number };
+}
+
 export interface Settings {
   adminToken: string;
   /** 拿到响应头的超时 */
@@ -225,6 +258,7 @@ export interface Quota {
 }
 
 export interface DBShape {
+  /** 3=v3 单表 routes；4=v4 增 agentLinks（agent 接入登记） */
   version: number;
   /** 按天配额累计（vkeyId -> Quota），与日志裁剪解耦 */
   quotas: Record<string, Quota>;
@@ -233,5 +267,7 @@ export interface DBShape {
   routes: RouteEntry[];
   vkeys: VirtualKey[];
   logs: RequestLog[];
+  /** agent 一键接入登记（v4）；旧库缺字段时 store 兜底空数组 */
+  agentLinks: AgentLink[];
   settings: Settings;
 }

@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, VirtualKey } from './types.ts';
+import type { AgentLink, AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, VirtualKey } from './types.ts';
 import { heuristicVision, isVisionSupport } from './vision.ts';
 import { envAny, resolveDataDir } from './bootstrap.ts';
 
@@ -161,7 +161,7 @@ function freshVKey(): VirtualKey {
 }
 
 function emptyDb(): DBShape {
-  return { version: 3, quotas: {}, channels: [], routes: [], vkeys: [], logs: [], settings: defaultSettings() };
+  return { version: 4, quotas: {}, channels: [], routes: [], vkeys: [], logs: [], agentLinks: [], settings: defaultSettings() };
 }
 
 /** 归一化成字符串数组：支持数组，或每行一个的字符串；去重去空 */
@@ -288,6 +288,17 @@ class Store {
       const vkRaw = arr<VirtualKey>(parsed.vkeys) ?? base.vkeys;
       const vkeys = vkRaw.filter(vkOK);
       if (vkeys.length !== vkRaw.length) console.warn(`[store] vkeys 丢弃 ${vkRaw.length - vkeys.length} 条非法条目`);
+      // v4 agentLinks（agent 接入登记）：同规做元素级过滤——缺 agentId/vkeyId 的条目会让
+      // GET /api/agents 与撤销路径带病运行（targets 非数组更是在 join 处直接抛）
+      const linkOK = (l: any) => !!l && typeof l.agentId === 'string' && l.agentId !== '' && typeof l.vkeyId === 'string' && Array.isArray(l.targets);
+      const linkRaw = arr<any>(parsed.agentLinks) ?? [];
+      const agentLinks = linkRaw.filter(linkOK).map((l) => ({
+        ...l,
+        targets: l.targets.filter((p: unknown) => typeof p === 'string' && (p as string).startsWith('/')),
+        roles: l.roles && typeof l.roles === 'object' && !Array.isArray(l.roles) ? l.roles : undefined,
+        prev: l.prev && typeof l.prev === 'object' && !Array.isArray(l.prev) ? l.prev : undefined,
+      }));
+      if (agentLinks.length !== linkRaw.length) console.warn(`[store] agentLinks 丢弃 ${linkRaw.length - agentLinks.length} 条非法条目`);
       const logRaw = arr<RequestLog>(parsed.logs) ?? [];
       const logs = logRaw.filter((l: any) => !!l && typeof l.ts === 'number');
       const merged: DBShape = {
@@ -297,6 +308,7 @@ class Store {
         routes,
         vkeys,
         logs,
+        agentLinks,
         quotas: parsed.quotas && typeof parsed.quotas === 'object' && !Array.isArray(parsed.quotas) ? parsed.quotas : {},
         settings: { ...base.settings, ...(parsed.settings || {}) },
       };
@@ -307,6 +319,11 @@ class Store {
         merged.version = 3;
         this.pendingMigration = true;
         console.log('[store] 已将 v2 双表(models/autoRoutes)迁移为单表 routes，构造完成后回写');
+      }
+      // v3→v4：仅新增 agentLinks 数组字段，无字段改名/语义变更 → 补空即迁移完成，回写只为让盘上版本号诚实
+      if (!Array.isArray((parsed as any).agentLinks) || (merged.version || 0) < 4) {
+        merged.version = 4;
+        this.pendingMigration = true;
       }
       // 老库或手工改坏的库兜底：设置项重新过一遍校验
       const { value } = sanitizeSettings(
@@ -824,6 +841,31 @@ class Store {
     this.db.vkeys = this.db.vkeys.filter((k) => k.id !== id);
     delete this.db.quotas[id]; // 并发线 4(a)：不留幽灵日账（quotaOf 会在迟到 finalize 时重建，故 admin 侧还要 forgetQuota 清在途）
     this.save();
+    // agentLinks 刻意不随删：link 悬空是可见事实（agent 里还躺着配置），由「已接入」页如实展示并可撤销，
+    // 静默清账本会让用户以为 agent 侧也被清理过（docs/agent-import-design.md §14 AI-16）
+  }
+
+  // ---------- agent links（v4：一键接入登记，docs/agent-import-design.md §2.3） ----------
+  listAgentLinks() {
+    return this.db.agentLinks;
+  }
+  getAgentLink(agentId: string) {
+    return this.db.agentLinks.find((l) => l.agentId === agentId);
+  }
+  /** 同 agentId 覆盖写（重复接入=更新）。**同步落盘不走防抖**：接入回执一经发出盘上就必须已有账，
+   *  否则「回执说已接入、此刻还没有」的观测窗会让撤销/漂移两条后续路径读到空账本（DR-CB 同口径） */
+  upsertAgentLink(link: AgentLink) {
+    const i = this.db.agentLinks.findIndex((l) => l.agentId === link.agentId);
+    if (i >= 0) this.db.agentLinks[i] = link;
+    else this.db.agentLinks.push(link);
+    this.flushSync();
+    return link;
+  }
+  removeAgentLink(agentId: string) {
+    const before = this.db.agentLinks.length;
+    this.db.agentLinks = this.db.agentLinks.filter((l) => l.agentId !== agentId);
+    this.flushSync();
+    return this.db.agentLinks.length < before;
   }
 
   // ---------- logs ----------
