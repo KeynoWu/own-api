@@ -1256,6 +1256,49 @@ section('14. 信息暴露、usage 口径与主键完整性');
   }
   try { fs4.rmSync(hoDir, { recursive: true, force: true }); } catch {}
 }
+
+// ============================ 15. auto.ts 单元域（G12 守卫序 / SEC-1 限频 / NAN-1 / 时钟注入） ============================
+section('15. auto.ts 单元域（时钟注入下直测）');
+{
+  const auto = await import('../src/auto.ts');
+  auto.clearHealth();
+  let now = 1_800_000_000_000;
+  auto.setClockForTest(() => now);
+  // G12 守卫前置：单败/双挂（<3 样本）不降 0.1；≥3 全挂 → 0.1（C4 语义按注释字面 total≥3）
+  auto.recordAttempt('u-cold', false);
+  check('G12 单败冷启动 health=1.0（守卫前置）', auto.health('u-cold') === 1.0, String(auto.health('u-cold')));
+  auto.recordAttempt('u-cold', false);
+  check('G12 双挂仍 1.0（毒化成本抬到 ≥3 败/10min）', auto.health('u-cold') === 1.0, String(auto.health('u-cold')));
+  auto.recordAttempt('u-cold', false);
+  check('C4 ≥3 样本全挂 → 0.1', auto.health('u-cold') === 0.1, String(auto.health('u-cold')));
+  // SEC-1：失败样本 (route,vkey) 1/min 限频；成功样本不限频
+  auto.clearHealth();
+  auto.recordAttempt('u-sec', false, 'vk1');
+  auto.recordAttempt('u-sec', false, 'vk1'); // 限频窗内第二败被吞
+  check('SEC-1 同 vkey 失败样本 1/min 限频', auto.healthSnapshot().find((w) => w.routeId === 'u-sec')?.fail === 1, JSON.stringify(auto.healthSnapshot()));
+  now += 61_000; // 推进时钟过限频窗
+  auto.recordAttempt('u-sec', false, 'vk1');
+  check('SEC-1 限频窗过后失败样本恢复记账', auto.healthSnapshot().find((w) => w.routeId === 'u-sec')?.fail === 2, JSON.stringify(auto.healthSnapshot()));
+  auto.clearHealth();
+  for (let i = 0; i < 50; i++) auto.recordAttempt('u-sec', false, 'vkX'); // 定向连刷 50 败
+  check('SEC-1 定向刷失败被限频（只记 1，毒化封顶）', auto.healthSnapshot().find((w) => w.routeId === 'u-sec')?.fail === 1, JSON.stringify(auto.healthSnapshot()));
+  auto.clearHealth();
+  for (let i = 0; i < 50; i++) auto.recordAttempt('u-sec', true, 'vkX'); // 成功样本不限频
+  check('SEC-1 成功样本不限频（50 成全记账）', auto.healthSnapshot().find((w) => w.routeId === 'u-sec')?.ok === 50, JSON.stringify(auto.healthSnapshot()));
+  auto.clearHealth();
+  auto.recordAttempt('u-novk', false);
+  auto.recordAttempt('u-novk', false);
+  check('SEC-1 无 vkey 失败不限频（管理端直测语义不变）', auto.healthSnapshot().find((w) => w.routeId === 'u-novk')?.fail === 2, JSON.stringify(auto.healthSnapshot()));
+  // NAN-1：NaN 权重按 0 兜底，不毒化归一化
+  const items = [{ n: 'a' }, { n: 'b' }];
+  const picked = auto.pickWeighted(items, (it) => (it.n === 'a' ? Number.NaN : 5), () => 0.999);
+  check('NAN-1 单个 NaN 权重按 0 兜底（不触发均匀退化）', picked?.n === 'b', String(picked?.n));
+  const picked2 = auto.pickWeighted(items, () => Number.NaN, () => 0.5);
+  check('NAN-1 全 NaN 退化为均匀（不抛错不卡死）', !!picked2, String(picked2?.n));
+  // 时钟恢复 + 清场（置于末节，不影响此前服务器域断言）
+  auto.setClockForTest(() => Date.now());
+  auto.clearHealth();
+}
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {
   console.log('\n失败明细：');

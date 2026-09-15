@@ -19,6 +19,16 @@ interface Sample {
 }
 const windows = new Map<string, Sample[]>();
 
+// 时钟钩子（设计稿 G 时钟注入点）：测试可冻结/推进时间，覆盖限频与滑动窗在真实时钟下不可写的负例与恢复侧
+let clockNow: () => number = () => Date.now();
+export function setClockForTest(fn: () => number) { clockNow = fn; }
+
+// 失败样本限频（F6.1 + G12 修订）：每 (routeId, vkey) 每分钟至多 1 个失败样本。
+// 只限失败、不限成功——连成功一起限会反向放大污染（30RPM 诚实流量被 1 败/min 打成恒 0.5）；
+// 成功样本不限频（环形上限兜底），封顶"定向刷失败拉低候选"的污染速度。
+const FAIL_RATE_LIMIT_MS = 60_000;
+const lastFailAt = new Map<string, number>(); // key: routeId \u0000 vkeyId
+
 function prune(list: Sample[], now: number): Sample[] {
   let i = 0;
   while (i < list.length && now - list[i].ts > WATCH_WINDOW_MS) i++;
@@ -27,29 +37,39 @@ function prune(list: Sample[], now: number): Sample[] {
   return list;
 }
 
-/** 候选级样本：成功/失败的当下即时记录（429、客户端取消、超窗类 400 由调用方决定不调用，C11/C10/§8-4） */
-export function recordAttempt(routeId: string, ok: boolean) {
+/**
+ * 候选级样本：成功/失败的当下即时记录（429、客户端取消、超窗类 400 由调用方决定不调用，C11/C10/§8-4）。
+ * vkeyId 传入时失败样本按 (routeId, vkeyId) 限频；未传（管理端直测等无 key 流量）不限。
+ */
+export function recordAttempt(routeId: string, ok: boolean, vkeyId?: string) {
   if (!routeId) return;
-  const now = Date.now();
+  const now = clockNow();
+  if (!ok && vkeyId) {
+    const lk = `${routeId}\u0000${vkeyId}`;
+    const last = lastFailAt.get(lk);
+    if (last !== undefined && now - last < FAIL_RATE_LIMIT_MS) return; // 限频：丢弃本次失败样本
+    lastFailAt.set(lk, now);
+  }
   const list = prune(windows.get(routeId) || [], now);
   list.push({ ts: now, ok: ok ? 1 : 0 });
   windows.set(routeId, list);
 }
 
 /**
- * health(routeId)（§3.1）：
- *   fail>0 且 ok==0            → 0.1（C4：0 成 2 挂不得满血，钳后 0.1）
- *   样本 < 3                   → 1.0（冷启动不惩罚）
- *   否则                       → max(0.1, ok/(ok+fail))
+ * health(routeId)（§3.1 + G12 守卫前置）：
+ *   样本 < 3                    → 1.0（冷启动不惩罚——前置后单败/双挂不再瞬间钉 0.1，
+ *                                 配合失败限频，毒化成本抬到 ≥3 败/10min 且需跨 vkey）
+ *   fail>0 且 ok==0（≥3 样本）   → 0.1（C4：全挂不得满血；C4 注释「0 成 2 挂」字面即 total≥3）
+ *   否则                        → max(0.1, ok/(ok+fail))
  */
 export function health(routeId: string): number {
-  const list = prune(windows.get(routeId) || [], Date.now());
+  const list = prune(windows.get(routeId) || [], clockNow());
   const total = list.length;
   if (!total) return 1.0;
   const ok = list.reduce((n, s) => n + s.ok, 0);
   const fail = total - ok;
-  if (fail > 0 && ok === 0) return 0.1;
   if (total < 3) return 1.0;
+  if (fail > 0 && ok === 0) return 0.1;
   return Math.max(0.1, ok / total);
 }
 
@@ -68,11 +88,13 @@ export function healthSnapshot() {
 
 export function clearHealth() {
   windows.clear();
+  lastFailAt.clear();
 }
 
-/** 路由删除时清理其窗口条目，防止 windows Map 随历史 routeId 单调增长 */
+/** 路由删除时清理其窗口与限频条目，防止两个 Map 随历史 routeId 单调增长 */
 export function clearHealthFor(routeId: string) {
   windows.delete(routeId);
+  for (const k of [...lastFailAt.keys()]) if (k.startsWith(routeId + '\u0000')) lastFailAt.delete(k);
 }
 
 // ---------------------------------------------------------------- 粘性
@@ -152,9 +174,13 @@ export function clearStickyForRoute(autoName: string): number {
 /**
  * 加权随机（③）：有效权重 = weight × health。
  * 权重和为 0（理论不可达：weight>=1 且 health>=0.1）时退化为均匀。
+ * NaN 权重按 0 兜底（NAN-1）：单个 NaN 不得毒化 sum 触发整体均匀退化。
  */
 export function pickWeighted<T>(items: T[], weightOf: (t: T) => number, rand: () => number = Math.random): T {
-  const weights = items.map((it) => Math.max(0, weightOf(it)));
+  const weights = items.map((it) => {
+    const w = weightOf(it);
+    return Number.isFinite(w) && w > 0 ? w : 0;
+  });
   let sum = weights.reduce((a, b) => a + b, 0);
   if (!(sum > 0)) {
     sum = items.length;

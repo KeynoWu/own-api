@@ -195,6 +195,22 @@ function isPromptTooLong(msg: string): boolean {
   return /(context length|context window|maximum context|too many tokens|prompt is too long|input is too long|exceeds.{0,40}(context|window|length)|超.{0,8}(窗口|上下文|长度))/i.test(msg);
 }
 
+/** 带图请求检测（AR-6/F2.1）：openai image_url / anthropic image 内容块（P1.5 前仅用于 400 分流，不做候选能力过滤） */
+function chatHasImages(chatBody: any): boolean {
+  for (const m of chatBody?.messages || []) {
+    if (!Array.isArray(m?.content)) continue;
+    for (const p of m.content) if (p?.type === 'image_url' || p?.type === 'image') return true;
+  }
+  return false;
+}
+
+/**
+ * 视觉不支持的保守白名单（G2 修正）：只匹配"能力声明"类文案——模型根本不收图，换支持视觉的候选有意义。
+ * 单图处理失败类（"could not process image"、内容安全拒绝）显式不在列：那是这张图的问题，换候选同样会挂。
+ * 白名单宁缺勿滥：未命中走 D 格短接，误放进来的代价是全链烧尽。
+ */
+const VISION_UNSUPPORTED_RE = /images?\s*(?:are\s+)?not\s+supported|not\s+support(?:ing)?\s+(?:the\s+)?images?|(?:vision|multimodal|image\s+input)\s+(?:is\s+)?not\s+(?:supported|enabled)|text[- ]only\s+model|does\s+not\s+support\s+(?:the\s+)?vision/i;
+
 function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wire: WireFormat, wantsStream: boolean, inputEst: number): CandEval[] {
   const cacheMarkers = wire === 'anthropic' && hasAnthropicCacheMarkers(chatBody);
   const reqMax = Number(chatBody?.max_tokens) || Number(chatBody?.max_completion_tokens) || 0;
@@ -391,9 +407,14 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
       if (lastWasRateLimit && upstreamRetryAfter !== undefined) retryAfterMs = retryAfterMs === undefined ? upstreamRetryAfter : Math.min(retryAfterMs, upstreamRetryAfter);
       if (kind === 'invalid_request') {
         // C10：prompt 超窗 → 本候选判负、链继续（其它候选窗口更大就可能吃得下）；
-        // 其余 4xx 是请求本身的问题 → 短接全链，4xx 原样透传。
+        // F2.1 收窄版（AR-6）：带图 400 命中视觉能力声明白名单 → C 格续链（换支持视觉的候选有意义；
+        // 学习闭环与 supportsVision 过滤在 P1.5 接入）。两者都不命中 → D 格短接：
+        // 请求本身坏（真参数错误）换谁都没用，防全链烧尽 + 顶层 400 聚合（G3）。
         if (a.isAuto && isPromptTooLong(brief)) {
           return { kind: 'candidate_fail', status: 400, message: `prompt 超出候选窗口：${brief}`, sample: false };
+        }
+        if (a.isAuto && chatHasImages(a.chatBody) && VISION_UNSUPPORTED_RE.test(brief)) {
+          return { kind: 'candidate_fail', status: 400, message: brief, sample: false };
         }
         return { kind: 'chain_stop', status: up.status, message: brief };
       }
@@ -779,7 +800,7 @@ export async function gateway(c: Context, op: 'chat' | 'messages' | 'embeddings'
       isAborted,
       finalize,
       t0,
-      onSample: (rid, ok) => recordAttempt(rid, ok), // C12：定向流量也进健康窗口
+      onSample: (rid, ok) => recordAttempt(rid, ok, vkey.id), // C12：定向流量也进健康窗口（带 vkey 供失败样本限频）
       onCommitted: () => {},
     });
     if (outcome.kind === 'response') return outcome.res;
@@ -851,6 +872,22 @@ async function runAuto(ctx: AutoRunCtx) {
   const inputEst = estimateInputTokens(chatBody);
   const evals = evaluateCandidates(autoRoute, vkey, chatBody, wire, wantsStream, inputEst);
   const survivors = evals.filter((e): e is SurvivingEval => e.ok);
+  // F5.2/G19 excluded 层快照：入口评估的剔除明细落日志（文案与空存活 404 同源、同一脱敏规则：
+  // 未授权候选名退化序号防 ACL 探针、渠道名抹掉防拓扑外泄）
+  const chainExcluded = evals
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => !e.ok)
+    .map(({ e, i }) => {
+      const raw = e.reason ?? '未知原因';
+      const unauth = raw.includes('该 key 未授权此候选');
+      return {
+        routeId: e.cand.routeId,
+        name: unauth ? `候选${i + 1}` : e.name,
+        kind: (e.transient ? 'soft' : 'hard') as 'soft' | 'hard',
+        reason: raw.replace(/渠道「[^」]*」/g, '渠道').replace(/该 key 未授权此候选/, '本 key 未授权'),
+      };
+    });
+  if (chainExcluded.length) log.chainExcluded = chainExcluded;
   if (!survivors.length) {
     // 理由保留（运维排障刚需）但按 key 脱敏（审查 A-L 拓扑外泄）：未授权候选名退化为序号（不得成为 ACL 探针），
     // 渠道名一律抹掉——渠道命名是内部拓扑
@@ -918,13 +955,32 @@ async function runAuto(ctx: AutoRunCtx) {
   let stopInvalid: { status: number; message: string } | undefined;
   let budgetNote = '';
 
+  // 失败分类学落账（AR-1/AR-3/G3）：链穷尽终态由五格失败类别聚合决定——
+  //   A 格 5xx/超时/连接类 → 502；B 格 429 → 429（C11，sawRateLimit）；
+  //   C 格 超窗 400 / 视觉白名单 400（F2.1）→ candidate_fail 续链；纯 C/D 格穷尽 → 400 + 聚合文案；
+  //   D 格 其余 4xx（请求本身坏）→ chain_stop 短接（stopInvalid 顶层透传）；E 格 客户端取消 → 499。
+  let sawServerError = false; // A 格：≥500（含超时/连接类）
+  let sawInvalid4xx = false;  // C/D 格：4xx 类（404/超窗/视觉/参数错）
+  let overflowAttempts = 0;   // 纯超窗穷尽时的聚合计数（AR-3）
+  let overflowMaxWin = 0;     // 超窗候选中最大的 contextWindow
+
+  // 有效权重（v2.3 §4）：weight × health；P1.5/P2 接入 visionBias/speedFactor 后在此叠加
+  const ewOf = (e: SurvivingEval) => e.cand.weight * e.health;
+  // 首跳：加权随机（分流语义——摊开流量，避免单候选过载）
+  const chooseFirst = (): SurvivingEval | undefined => {
+    const rest = survivors.filter((e) => !tried.has(e.cand.routeId));
+    if (!rest.length) return undefined;
+    return pickWeighted(rest, ewOf);
+  };
+  // 失败续链（AR-7）：确定性降序直奔剩余里最稳的（抢救语义）；同分 tie-break routeId 字典序（CHN-1 可断言）。
+  // 只影响同一请求内的续链次序，不影响跨请求首跳分流——低权候选依然有首跳流量，不饿死冷启动。
   const chooseNext = (): SurvivingEval | undefined => {
     const rest = survivors.filter((e) => !tried.has(e.cand.routeId));
     if (!rest.length) return undefined;
-    return pickWeighted(rest, (e) => e.cand.weight * e.health);
+    return [...rest].sort((x, y) => (ewOf(y) - ewOf(x)) || (x.cand.routeId < y.cand.routeId ? -1 : x.cand.routeId > y.cand.routeId ? 1 : 0))[0];
   };
 
-  let pick = firstPick && !tried.has(firstPick.cand.routeId) ? firstPick : chooseNext();
+  let pick = firstPick && !tried.has(firstPick.cand.routeId) ? firstPick : chooseFirst();
   while (pick) {
     if (isAborted()) return autoAbort(c, wire, log, retries, finalize);
     // 链预算（N10）：每 attempt 头超时 = min(剩余预算, 渠道超时)；续链要求预算装得下最坏尝试
@@ -936,6 +992,12 @@ async function runAuto(ctx: AutoRunCtx) {
       budgetNote = `链预算 ${Math.round(maxChainMs / 1000)}s 耗尽（剩余 ${Math.max(0, Math.round(remaining / 1000))}s 不足以开启下一 attempt）`;
       break;
     }
+    // F5.2/G19 决策快照：本跳 pick 当刻的全部幸存者权重（先于 tried.add 采集，首跳含全体幸存者）
+    const pickSnapshot = survivors.filter((e) => !tried.has(e.cand.routeId)).map((e) => ({
+      routeId: e.cand.routeId, name: e.name, weight: e.cand.weight,
+      health: Math.round(e.health * 1e4) / 1e4, ew: Math.round(ewOf(e) * 1e4) / 1e4,
+    }));
+    const pickBasis: 'sticky' | 'weighted' | 'chain' = chainAttempts.length > 0 ? 'chain' : (pick === firstPick ? 'sticky' : 'weighted');
     tried.add(pick.cand.routeId);
     const cur = pick;
     const aT0 = Date.now();
@@ -945,7 +1007,7 @@ async function runAuto(ctx: AutoRunCtx) {
     const pushEntry = (status: number, error: string | undefined, committed: boolean) => {
       if (entryPushed) return;
       entryPushed = true;
-      chainAttempts.push({ routeId: cur.cand.routeId, name: cur.name, channel: cur.channel.name, status, ms: Date.now() - aT0, error: error?.slice(0, 300), committed });
+      chainAttempts.push({ routeId: cur.cand.routeId, name: cur.name, channel: cur.channel.name, status, ms: Date.now() - aT0, error: error?.slice(0, 300), committed, pickBasis, pickSnapshot });
     };
     let outcome: AttemptOutcome;
     try {
@@ -965,7 +1027,7 @@ async function runAuto(ctx: AutoRunCtx) {
       finalize: ctx.finalize,
       t0: ctx.t0,
       onPreFinalize: () => pushEntry(200, undefined, true),
-      onSample: (rid, ok) => recordAttempt(rid, ok),
+      onSample: (rid, ok) => recordAttempt(rid, ok, vkey.id),
       onCommitted: () => {
         log.routedTo = cur.name;
         if (firstPick && cur.cand.routeId === firstPick.cand.routeId) return; // 命中即已续期
@@ -992,12 +1054,20 @@ async function runAuto(ctx: AutoRunCtx) {
     }
     lastStatus = outcome.status;
     lastMessage = outcome.message;
+    // 五格落账（AR-1）：走到这里的必是 candidate_fail（response/abort 已返回、chain_stop 已断）
+    // 401/403 归 A 格侧（对客户端等价"网关背后配置坏了"，非请求本身坏）——纯鉴权穷尽终态 502 而非 400
+    if (outcome.status >= 500 || outcome.status === 401 || outcome.status === 403) sawServerError = true;
+    else if (outcome.status !== 429) sawInvalid4xx = true;
+    if (outcome.status === 400 && outcome.message.includes('超出候选窗口')) {
+      overflowAttempts++;
+      overflowMaxWin = Math.max(overflowMaxWin, cur.route.contextWindow || 0);
+    }
     // M1（v2.4 裁决）：粘性命中候选运行时判负（N8 掏空/5xx/超时）→ 本轮视同绕行：
     // 其后成功候选不得覆写原绑定。瞬态运行时失败不在改写清单；health<0.4 由下轮自然松手
     if (firstPick && cur.cand.routeId === firstPick.cand.routeId) stickyBypassed = true;
     if (outcome.rateLimit) sawRateLimit = true;
     if (outcome.retryAfterMs !== undefined) retryAfterMs = retryAfterMs === undefined ? outcome.retryAfterMs : Math.min(retryAfterMs, outcome.retryAfterMs);
-    if (outcome.sample) recordAttempt(cur.cand.routeId, false);
+    if (outcome.sample) recordAttempt(cur.cand.routeId, false, vkey.id); // 链级失败记账带 vkey（SEC-1 限频依据）
     pick = chooseNext();
   }
 
@@ -1007,8 +1077,14 @@ async function runAuto(ctx: AutoRunCtx) {
     finalize({ status: stopInvalid.status, error: `${stopInvalid.message}`, retries: retries.length ? retries : undefined });
     return fail(c, wire, stopInvalid.status, stopInvalid.message, settings.debugHeaders && retries.length ? { 'x-lm-retries': String(retries.length) } : undefined);
   }
-  const finalStatus = sawRateLimit ? 429 : 502; // C11：链终曾见 429 → 透传 429，不伪装 502
-  const msg = `${budgetNote ? budgetNote + '；' : ''}所有候选均失败：${detail}`.slice(0, 2000);
+  // 终态聚合（AR-3/G3）：链穷尽（非 chain_stop 短接）且纯 4xx（无 429/5xx 混入、非预算截断）→ 400 而非 502；
+  // 全部为超窗 → 聚合文案「所有候选窗口不足（最大 N tokens）」；其余维持 C11（429）/C17（502）语义
+  const pure4xx = sawInvalid4xx && !sawRateLimit && !sawServerError && !budgetNote && chainAttempts.length > 0;
+  const overflowOnly = pure4xx && overflowAttempts > 0 && overflowAttempts === chainAttempts.length;
+  const finalStatus = sawRateLimit ? 429 : pure4xx ? 400 : 502; // C11：链终曾见 429 → 透传 429，不伪装 502
+  const msg = overflowOnly
+    ? `所有候选窗口不足（最大 ${overflowMaxWin || '未知'} tokens）：${detail}`.slice(0, 2000)
+    : `${budgetNote ? budgetNote + '；' : ''}所有候选均失败：${detail}`.slice(0, 2000);
   finalize({ status: finalStatus, error: msg, retries: retries.length ? retries : undefined });
   return fail(c, wire, finalStatus, msg, {
     ...(settings.debugHeaders && retries.length ? { 'x-lm-retries': String(retries.length) } : {}),

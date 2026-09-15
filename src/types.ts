@@ -132,6 +132,16 @@ export interface RequestLog {
   routedTo?: string;
   /** auto 路由：跨候选尝试审计（候选/状态/耗时/原因，C18 不做成本审计） */
   chainAttempts?: ChainAttempt[];
+  /** auto 路由：入口评估时被剔除的候选及理由（F5.2/G19 三层决策快照之 excluded 层；hard=改写清单级，soft=瞬态） */
+  chainExcluded?: ChainExcluded[];
+}
+
+/** auto 链入口评估的剔除记录（excluded 层快照；理由文案与空存活 404 同源，已按 key/渠道名脱敏） */
+export interface ChainExcluded {
+  routeId: string;
+  name: string;
+  kind: 'hard' | 'soft';
+  reason: string;
 }
 
 /** auto 链上一次候选尝试的审计条目 */
@@ -144,6 +154,10 @@ export interface ChainAttempt {
   error?: string;
   /** 已提交（200 已交给框架，提交后失败不可再换候选） */
   committed?: boolean;
+  /** 决策快照（F5.2/G19）之 pick 层：本跳的挑选依据——sticky 命中 / 首跳加权随机 / 失败续链降序 */
+  pickBasis?: 'sticky' | 'weighted' | 'chain';
+  /** 决策快照（F5.2/G19）之 survivors 层：pick 当刻全部幸存候选的有效权重（与 CHN-1 断言同源） */
+  pickSnapshot?: { routeId: string; name: string; weight: number; health: number; ew: number }[];
 }
 
 export interface AutoCandidate {

@@ -378,13 +378,85 @@ check('C10 超窗不计健康分', !(await autoHealth()).windows.find((w: any) =
 check('chainAttempts 记录超窗候选在前', lgChain.some((l) => l.chainAttempts?.[0]?.name === 'auto-m-tl' && String(l.chainAttempts[0].error).includes('超出候选窗口')), JSON.stringify(lgChain[0]?.chainAttempts));
 const aOnly404 = await mkAuto({ publicName: 'auto_404only', candidates: [{ routeId: m404R.id, weight: 1 }], stickyTtlMs: 0 });
 const r404 = await autoReq('auto_404only');
-check('404 模型名 -> 候选判负续链，穷尽 502', r404.status === 502 && String(r404.body?.error?.message).includes('does not exist'), String(r404.status));
-check('C4 0 成 N 挂 health=0.1（非满血）', (await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)?.health === 0.1, JSON.stringify((await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)));
+check('404 模型名 -> 候选判负续链，穷尽 400（G3 纯 4xx 聚合终态，不再伪装 502）', r404.status === 400 && String(r404.body?.error?.message).includes('does not exist'), String(r404.status));
+// C4（G12 守卫前置版）：≥3 样本全挂 → 0.1。失败样本 (routeId,vkey) 1/min 限频（SEC-1）——
+// 单 vkey 一分钟内只记 1 败，凑 3 败需 3 把 vkey（毒化成本：≥3 败/10min 且须跨 vkey）
+const kC4b = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'c4-b' }) })).body;
+const kC4c = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'c4-c' }) })).body;
+const AHb = { authorization: `Bearer ${kC4b.key}`, 'content-type': 'application/json' };
+const AHc = { authorization: `Bearer ${kC4c.key}`, 'content-type': 'application/json' };
+await autoReq('auto_404only', {}, AHb);
+await autoReq('auto_404only', {}, AHc);
+check('C4 ≥3 样本全挂 health=0.1（G12 守卫前置后语义不变）', (await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)?.health === 0.1, JSON.stringify((await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)));
+await autoReq('auto_404only'); // VKEY 的第二次失败——应被 SEC-1 限频吞掉
+check('SEC-1 失败样本 (routeId,vkey) 1/min 限频（fail 仍 3）', (await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)?.fail === 3, JSON.stringify((await autoHealth()).windows.find((w: any) => w.routeId === m404R.id)));
 const aFailR = await mkAuto({ publicName: 'auto_fail', candidates: [{ routeId: (await mkModel({ publicName: 'auto-m-dead', channelId: chDead.id, upstreamModel: 'mock-gpt-5' })).body.id, weight: 1 }, { routeId: m404R.id, weight: 1 }], stickyTtlMs: 0 });
 const rFail = await autoReq('auto_fail');
 const failMsg = String(rFail.body?.error?.message || '');
 check('全候选失败 502 且明细回显（C17）', rFail.status === 502 && failMsg.includes('所有候选均失败') && failMsg.includes('Auto Dead'), failMsg.slice(0, 140));
 check('哨兵：502 明细绝不泄漏 key 全值', !failMsg.includes('sk-secretauto-deadkey-98765') && failMsg.includes('***'), 'mask');
+
+// —— AR-7 失败链确定性降序 + F5.2 三层决策快照 ——
+// 全败链（4×k-500）：首跳加权随机不可控，但断言改为「从实测首跳推出的期望链序」——
+// 每一步都取剩余集合的 ew 确定性降序（B/D 同分 tie-break routeId 字典序），零掷骰子依赖
+await resetAutoRT();
+const chDead2 = await mkCh('Auto Dead2', 'openai', ['k-500-desc']);
+const mDead2R = (await mkModel({ publicName: 'auto-m-dead2', channelId: chDead2.id, upstreamModel: 'mock-gpt-5' })).body;
+const chOkB = await mkCh('Auto OkB', 'openai', ['k-500-descb']);
+const mOkBR = (await mkModel({ publicName: 'auto-m-okb', channelId: chOkB.id, upstreamModel: 'mock-gpt-5' })).body;
+const chOkC = await mkCh('Auto OkC', 'openai', ['k-500-descc']);
+const mOkCR = (await mkModel({ publicName: 'auto-m-okc', channelId: chOkC.id, upstreamModel: 'mock-gpt-5' })).body;
+const chOkD = await mkCh('Auto OkD', 'openai', ['k-500-descd']);
+const mOkDR = (await mkModel({ publicName: 'auto-m-okd', channelId: chOkD.id, upstreamModel: 'mock-gpt-5' })).body;
+const aDesc = await mkAuto({ publicName: 'auto_desc', candidates: [
+  { routeId: mDead2R.id, weight: 10000 }, { routeId: mOkBR.id, weight: 5 }, { routeId: mOkCR.id, weight: 1 }, { routeId: mOkDR.id, weight: 5 }, { routeId: 'route_dangling_desc', weight: 9 },
+], stickyTtlMs: 0 });
+await autoReq('auto_desc'); // 全候选 5xx → 502，链走满 4 跳
+const lgDesc = (await getLogs('auto_desc'))[0];
+const ewOfId = (id: string) => (id === mDead2R.id ? 10000 : id === mOkCR.id ? 1 : 5);
+const allIds = [mDead2R.id, mOkBR.id, mOkCR.id, mOkDR.id];
+const firstId = lgDesc?.chainAttempts?.[0]?.routeId;
+const expectedOrder = firstId ? [firstId, ...allIds.filter((id) => id !== firstId).sort((x, y) => (ewOfId(y) - ewOfId(x)) || (x < y ? -1 : 1))] : [];
+check('AR-7 链序 = 每步剩余集合的 ew 确定性降序（含 B/D 同分 tie-break routeId）', JSON.stringify((lgDesc?.chainAttempts || []).map((x: any) => x.routeId)) === JSON.stringify(expectedOrder), JSON.stringify(lgDesc?.chainAttempts?.map((x: any) => [x.name, x.pickBasis])));
+check('AR-7 首跳 basis=weighted、续跳全 chain', lgDesc?.chainAttempts?.[0]?.pickBasis === 'weighted' && lgDesc?.chainAttempts?.slice(1).every((x: any) => x.pickBasis === 'chain'), JSON.stringify(lgDesc?.chainAttempts?.map((x: any) => x.pickBasis)));
+check('F5.2 survivors 快照逐跳收缩 4→3→2→1 且带 ew', JSON.stringify((lgDesc?.chainAttempts || []).map((x: any) => x.pickSnapshot?.length)) === '[4,3,2,1]' && lgDesc?.chainAttempts?.[0]?.pickSnapshot?.[0]?.ew === 10000, JSON.stringify(lgDesc?.chainAttempts?.map((x: any) => x.pickSnapshot?.length)));
+check('F5.2 excluded 层快照：悬空候选 hard 剔除带理由', lgDesc?.chainExcluded?.length === 1 && lgDesc.chainExcluded[0].kind === 'hard' && String(lgDesc.chainExcluded[0].reason).includes('悬空'), JSON.stringify(lgDesc?.chainExcluded));
+const winsAfterDesc = (await autoHealth()).windows;
+check('AR-7 续链健康落账：四个候选各恰记 1 败', allIds.every((id) => winsAfterDesc.find((w: any) => w.routeId === id)?.fail === 1), JSON.stringify(winsAfterDesc.map((w: any) => [w.name, w.fail])));
+
+// —— AUTH-1：双 k-401 渠道单请求恰记 1 次候选级失败（key 级重试不重复计败）——
+await resetAutoRT();
+const ch401x2 = await mkCh('Auto 401x2', 'openai', ['k-401-a2', 'k-401-b2']);
+const m401x2R = (await mkModel({ publicName: 'auto-m-401x2', channelId: ch401x2.id, upstreamModel: 'mock-gpt-5' })).body;
+const a401x2 = await mkAuto({ publicName: 'auto_401x2', candidates: [{ routeId: m401x2R.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const r401x2 = await autoReq('auto_401x2');
+check('AUTH-1 双 401 key 候选判负续链 200', r401x2.status === 200 && (await getLogs('auto_401x2'))[0]?.routedTo === 'auto-m-gpt', String(r401x2.status));
+check('AUTH-1 候选级恰记 1 败（两个 key 都挂也只 1 样本）', (await autoHealth()).windows.find((w: any) => w.routeId === m401x2R.id)?.fail === 1, JSON.stringify((await autoHealth()).windows.find((w: any) => w.routeId === m401x2R.id)));
+
+// —— AR-3/OVF-1：纯超窗穷尽 → 400 + 聚合文案「所有候选窗口不足（最大 N tokens）」——
+// mTlR 无显式窗（mkModel 默认 128000）；mTl2R 显式 200000 成为最大者，断言锚定它
+const mTl2R = (await mkModel({ publicName: 'auto-m-tl2', channelId: chAuto.id, upstreamModel: 'mock-toolong', contextWindow: 200000 })).body;
+const aOvf = await mkAuto({ publicName: 'auto_ovf', candidates: [{ routeId: mTlR.id, weight: 1 }, { routeId: mTl2R.id, weight: 1 }], stickyTtlMs: 0 });
+const rOvf = await autoReq('auto_ovf', { messages: [{ role: 'user', content: '长'.repeat(200) }] });
+check('OVF-1 纯超窗穷尽 400（非 502）', rOvf.status === 400, String(rOvf.status));
+check('OVF-1 聚合文案带最大窗口', String(rOvf.body?.error?.message).includes('所有候选窗口不足') && String(rOvf.body?.error?.message).includes('200000'), String(rOvf.body?.error?.message).slice(0, 120));
+
+// —— F2.1 收窄版：带图 400 分流（C 格白名单续链 vs D 格短接；学习闭环 P1.5 接入）——
+await resetAutoRT();
+const chNoImg = await mkCh('Auto NoImg', 'openai', ['k-ok-noimg']);
+const mNoImgR = (await mkModel({ publicName: 'auto-m-noimg', channelId: chNoImg.id, upstreamModel: 'mock-noimg' })).body;
+const aVis = await mkAuto({ publicName: 'auto_vis', candidates: [{ routeId: mNoImgR.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const imgMsg = [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }] }];
+const rVis = await autoReq('auto_vis', { messages: imgMsg });
+check('F2.1 带图 400 命中视觉白名单 → C 格续链 200', rVis.status === 200 && (await getLogs('auto_vis'))[0]?.routedTo === 'auto-m-gpt', String(rVis.status));
+check('F2.1 视觉续链不计健康样本（学习动作 P1.5 接管）', !(await autoHealth()).windows.find((w: any) => w.routeId === mNoImgR.id), JSON.stringify((await autoHealth()).windows.find((w: any) => w.routeId === mNoImgR.id)));
+const chBadp = await mkCh('Auto BadParam', 'openai', ['k-ok-badp']);
+const mBadpR = (await mkModel({ publicName: 'auto-m-badp', channelId: chBadp.id, upstreamModel: 'mock-badparam' })).body;
+const aBadp = await mkAuto({ publicName: 'auto_badp', candidates: [{ routeId: mBadpR.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const rBadp = await autoReq('auto_badp');
+check('F2.1 对照：无能力声明 400 → D 格短接顶层 400', rBadp.status === 400 && String(rBadp.body?.error?.message).includes('temperature'), String(rBadp.status));
+check('F2.1 对照：D 格短接不烧全链（mGpt 未被尝试）', ((await getLogs('auto_badp'))[0]?.chainAttempts || []).length === 1, JSON.stringify((await getLogs('auto_badp'))[0]?.chainAttempts));
+
 await resetAutoRT();
 const aR429 = await mkAuto({ publicName: 'auto_429', candidates: [{ routeId: mRateR.id, weight: 1 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
 const r429 = await autoReq('auto_429');

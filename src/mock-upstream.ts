@@ -13,11 +13,30 @@ import { Hono } from 'hono';
 
 const PORT = Number(process.env.MOCK_PORT || 8099);
 
+/** 同 key 429once-N 计数（前 N 次 429，之后放行） */
+const keyHits = new Map<string, number>();
+
 function fail(key: string): { status: number; body: any; retryAfter?: string } | undefined {
   if (key.includes('401')) return { status: 401, body: { error: { message: 'Incorrect API key provided', type: 'invalid_request_error' } } };
+  // k-429once<N>：同 key 前 N 次 429（retry-after: 1），之后放行——饱和触发/退避恢复类钉的受控失败源
+  const once = key.match(/429once(\d+)/);
+  if (once) {
+    const n = (keyHits.get(key) || 0) + 1;
+    keyHits.set(key, n);
+    if (n <= Number(once[1])) return { status: 429, body: { error: { message: 'Rate limit reached (once)', type: 'rate_limit_error' } }, retryAfter: '1' };
+    return undefined;
+  }
+  // k-429ra<X>：429 且 retry-after 头原样=X（可为 0 / 非数字 / 超大值）——F4.3 clamp 与畸形头钉
+  const ra = key.match(/429ra([^-]+)/);
+  if (ra) return { status: 429, body: { error: { message: 'Rate limit reached (ra)', type: 'rate_limit_error' } }, retryAfter: ra[1] };
   if (key.includes('429')) return { status: 429, body: { error: { message: 'Rate limit reached', type: 'rate_limit_error' } }, retryAfter: '1' };
   if (key.includes('500')) return { status: 500, body: { error: { message: 'upstream boom' } } };
   return undefined;
+}
+
+/** 带图请求（openai image_url / anthropic image 块）——F2.1 视觉 fixture 判定用 */
+function hasImageParts(messages: any[]): boolean {
+  return (messages || []).some((m) => Array.isArray(m?.content) && m.content.some((p: any) => p?.type === 'image_url' || p?.type === 'image'));
 }
 
 const delay = (key: string) => (key.includes('slow20') ? new Promise((r) => setTimeout(r, 20_000)) : key.includes('slow') ? new Promise((r) => setTimeout(r, 1200)) : Promise.resolve());
@@ -96,6 +115,14 @@ app.post('/v1/chat/completions', async (c) => {
   }
   if (body.model === 'mock-404')
     return c.json({ error: { message: 'The model `mock-404` does not exist or you do not have access to it.' } }, 404 as any);
+  if (body.model === 'mock-noimg') {
+    // F2.1 fixture：带图 400——文案命中"视觉能力声明"白名单（网关侧应 C 格续链）；无图请求正常放行
+    if (hasImageParts(body.messages))
+      return c.json({ error: { message: 'image input is not supported by this model (text-only model)', type: 'invalid_request_error' } }, 400 as any);
+  }
+  if (body.model === 'mock-badparam')
+    // F2.1 对照 fixture：400 不含能力声明文案 → 网关侧应 D 格短接（请求本身坏）
+    return c.json({ error: { message: 'Invalid parameter: temperature=999 is out of range', type: 'invalid_request_error' } }, 400 as any);
   if (body.model === 'mock-streamcut') {
     // 提交后掐流：先正常吐首块，然后流内报错（stage B 断言用）
     return new Response(
@@ -133,6 +160,9 @@ app.post('/v1/chat/completions', async (c) => {
     });
     return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
   }
+  // F5.1 fixture：可控 TTFT——模型名含 ttft<N> 时首包前延迟 N ms（上限 30s 防误用），供 SPD/慢降级/时钟窗口类钉
+  const ttft = String(body.model || '').match(/ttft(\d+)/);
+  if (ttft) await new Promise((r) => setTimeout(r, Math.min(Number(ttft[1]), 30_000)));
   await delay(key);
   const prompt = lastUser(body.messages);
   const text = `mock(openai:${body.model}) 收到: ${prompt.slice(0, 40)}`;
