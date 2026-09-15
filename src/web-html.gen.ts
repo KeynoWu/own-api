@@ -761,10 +761,14 @@ views.models = async () => {
     { name: 'priceInput', label: '输入 $/M', type: 'number', step: '0.01', value: m.priceInput ?? '' },
     { name: 'priceOutput', label: '输出 $/M', type: 'number', step: '0.01', value: m.priceOutput ?? '' },
     { name: 'maxOutputTokens', label: 'max_tokens 默认', type: 'number', value: m.maxOutputTokens ?? '' },
+    { name: 'supportsVision', label: '视觉（多模态）', type: 'select', value: m.supportsVision === true ? 'true' : m.supportsVision === false ? 'false' : '',
+      options: [{ value: '', label: '未知（unknown）——带图放行并降权，学习闭环兜底' }, { value: 'true', label: '支持视觉' }, { value: 'false', label: '不支持视觉' }],
+      hint: '手动标注后学习闭环不再覆盖（F6.3）；改回「未知」同样锁定为手动值。' },
   ], (v) => api('/api/routes/' + m.id, { method: 'PATCH', body: JSON.stringify({
       publicName: v.publicName, upstreamModel: v.upstreamModel, channelId: v.channelId, protocol: v.protocol || null, // F5
       priceInput: v.priceInput === '' ? null : Number(v.priceInput), priceOutput: v.priceOutput === '' ? null : Number(v.priceOutput),
       maxOutputTokens: v.maxOutputTokens === '' ? null : Number(v.maxOutputTokens),
+      supportsVision: v.supportsVision === '' ? null : v.supportsVision === 'true',
     }) }).then(() => { toast('已更新'); go('models'); }));
 
   const editAuto = (a) => form(a ? '编辑 ' + a.publicName : '新增自动路由', [
@@ -812,8 +816,11 @@ views.models = async () => {
           c.routeEnabled === false ? el('span', { class: 'pill' }, '路由停用') : null,
           c.channelEnabled === false ? el('span', { class: 'pill err-text' }, '渠道停用') : null,
         )) : [el('span', { class: 'muted' }, '（无候选）')]));
+    const visPill = (sv) => sv === true ? el('span', { class: 'pill ok', title: 'supportsVision=true（导入启发式或手动标注）' }, '视觉✓')
+      : sv === false ? el('span', { class: 'pill warn', title: 'supportsVision=false（手动标注或学习闭环自动降级）' }, '视觉✗')
+      : el('span', { class: 'pill', style: 'opacity:.6', title: 'unknown：无证据，带图请求放行并降权，学习闭环兜底' }, '视觉?');
     const chn = r.type === 'single'
-      ? el('td', {}, r.channelName, el('div', { class: 'muted' }, proto(r.protocol || r.channelProtocol)))
+      ? el('td', {}, r.channelName, el('div', { class: 'muted' }, proto(r.protocol || r.channelProtocol)), visPill(r.supportsVision))
       : el('td', { class: 'muted' }, '多候选');
     t.append(el('tr', {},
       el('td', { class: 'mono' }, r.publicName, typePill(r.type),

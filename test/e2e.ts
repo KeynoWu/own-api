@@ -546,6 +546,81 @@ check('SAT-6 60s 滑动窗跨 key ≥2 触发（不以链为作用域）', !!(aw
 await patchSt({ cooldownBaseMs: origSettingsP1.cooldownBaseMs, maxKeyRetries: origSettingsP1.maxKeyRetries });
 await resetAutoRT();
 
+// —— 视觉三态（P1.5 §4）：VIS-1~8 ——
+await resetAutoRT();
+const getRoute = async (id: string) => (await api('/api/routes', { headers: ADMIN })).body.find((r: any) => r.id === id);
+// VIS-2：启发式初值——已知多模态家族 → true；未知名 → unknown（undefined）
+const mVisFam = (await mkModel({ publicName: 'gpt-4o-vistest', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
+const mVisUnk = (await mkModel({ publicName: 'auto-m-visunk', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
+check('VIS-2 导入已知多模态家族 → 初值 true', (await getRoute(mVisFam.id))?.supportsVision === true, JSON.stringify((await getRoute(mVisFam.id))?.supportsVision));
+check('VIS-2 未知名 → unknown（undefined）', (await getRoute(mVisUnk.id))?.supportsVision === undefined, JSON.stringify((await getRoute(mVisUnk.id))?.supportsVision));
+// VIS-1：带图 + supportsVision=false → 软排除（粘性不覆写，同 tools 语义）
+const mVisOff = (await mkModel({ publicName: 'auto-m-visoff', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
+await patchModel(mVisOff.id, { supportsVision: false });
+const aVis1 = await mkAuto({ publicName: 'auto_vis1', candidates: [{ routeId: mVisOff.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 60000 });
+await autoReq('auto_vis1'); // 文本请求 → mVisOff 200 → 建粘
+const rVis1 = await autoReq('auto_vis1', { messages: imgMsg }); // 带图 → 软排除 → 绕行 → gpt
+check('VIS-1 带图 + false → 软排除续链 200', rVis1.status === 200 && (await getLogs('auto_vis1'))[0]?.routedTo === 'auto-m-gpt', `${rVis1.status}`);
+check('VIS-1 软排除在 chainExcluded 留痕（原因含「不支持视觉」）', JSON.stringify((await getLogs('auto_vis1'))[0]?.chainExcluded || []).includes('不支持视觉'), JSON.stringify((await getLogs('auto_vis1'))[0]?.chainExcluded));
+const vis1Sticky = (await api('/api/auto-health?route=auto_vis1', { headers: ADMIN })).body.stickyList?.[0];
+check('VIS-1 粘性不覆写（绑定保留在 false 候选上，同 tools 语义）', vis1Sticky?.routeId === mVisOff.id, JSON.stringify(vis1Sticky));
+// VIS-3：学习闭环——400 命中白名单 + 同候选 ≥2 个不同图片指纹 → 自动置 false 持久化、链继续、不记健康样本
+const mNoimg3 = (await mkModel({ publicName: 'auto-m-noimg3', channelId: chAuto.id, upstreamModel: 'mock-noimg' })).body;
+const aVis3 = await mkAuto({ publicName: 'auto_vis3', candidates: [{ routeId: mNoimg3.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const twoImgs = [{ role: 'user', content: [
+  { type: 'text', text: '两张图' },
+  { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSU=' } },
+  { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAABh' } },
+] }];
+const rVis3 = await autoReq('auto_vis3', { messages: twoImgs });
+check('VIS-3 学习触发：supportsVision 自动置 false 持久化', (await getRoute(mNoimg3.id))?.supportsVision === false, JSON.stringify((await getRoute(mNoimg3.id))?.supportsVision));
+check('VIS-3 学习后链继续（C 格）且不记健康样本', rVis3.status === 200 && (await getLogs('auto_vis3'))[0]?.routedTo === 'auto-m-gpt' && !(await autoHealth()).windows.find((w: any) => w.routeId === mNoimg3.id), `${rVis3.status}`);
+check('VIS-3 学习加锁（visionLocked）——学习值同样受 F6.3 保护', (await getRoute(mNoimg3.id))?.visionLocked === true, JSON.stringify((await getRoute(mNoimg3.id))?.visionLocked));
+// G18：同一张图反复 400（粘性+重试双击形态）只有 1 个指纹 → 不触发学习
+const mNoimg1 = (await mkModel({ publicName: 'auto-m-noimg1', channelId: chAuto.id, upstreamModel: 'mock-noimg' })).body;
+const aVis3b = await mkAuto({ publicName: 'auto_vis3b', candidates: [{ routeId: mNoimg1.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const oneImg = [{ role: 'user', content: [{ type: 'text', text: '同一张图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }] }];
+await autoReq('auto_vis3b', { messages: oneImg });
+await autoReq('auto_vis3b', { messages: oneImg });
+check('G18 同一指纹两次不学习（仍 unknown）', (await getRoute(mNoimg1.id))?.supportsVision === undefined, JSON.stringify((await getRoute(mNoimg1.id))?.supportsVision));
+// VIS-4：手动标注后学习不再覆盖；重置口回 unknown + 解锁
+const mNoimg4 = (await mkModel({ publicName: 'auto-m-noimg4', channelId: chAuto.id, upstreamModel: 'mock-noimg' })).body;
+await patchModel(mNoimg4.id, { supportsVision: true }); // 手动标 true（上锁）
+const aVis4 = await mkAuto({ publicName: 'auto_vis4', candidates: [{ routeId: mNoimg4.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const rVis4 = await autoReq('auto_vis4', { messages: twoImgs }); // 2 个不同指纹——若未锁会学习置 false
+check('VIS-4 手动标注锁定：学习不覆盖（仍 true）', rVis4.status === 200 && (await getRoute(mNoimg4.id))?.supportsVision === true, JSON.stringify((await getRoute(mNoimg4.id))?.supportsVision));
+const rVis4r = await api(`/api/routes/${mNoimg4.id}/vision/reset`, { method: 'POST', headers: ADMIN });
+check('VIS-4 重置口：回 unknown + 解锁', rVis4r.status === 200 && rVis4r.body.supportsVision === 'unknown' && rVis4r.body.visionLocked === false, JSON.stringify(rVis4r.body));
+// VIS-5：inputEst 图片 token——data URL 100×100 精算 ceil(10000/750)=14；http URL 常数 1000
+const png100 = (() => { const b = Buffer.alloc(33); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0); b.writeUInt32BE(13, 8); b.write('IHDR', 12, 'ascii'); b.writeUInt32BE(100, 16); b.writeUInt32BE(100, 20); b[24] = 8; b[25] = 2; return 'data:image/png;base64,' + b.toString('base64'); })();
+const ctReq = (url: string) => api('/v1/messages/count_tokens', { method: 'POST', headers: AH, body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url } }] }] }) });
+const ct1 = await ctReq(png100);
+const ct2 = await ctReq('https://example.com/a.png');
+check('VIS-5 data URL 100×100 精算（ceil(10000/750)=14）', ct1.body?.input_tokens === Math.ceil(2 / 4) + 14, JSON.stringify(ct1.body));
+check('VIS-5 http URL 常数 1000/图（不下载）', ct2.body?.input_tokens === Math.ceil(2 / 4) + 1000, JSON.stringify(ct2.body));
+// VIS-6：带图请求 unknown 候选 bias=0.25 后置（pickSnapshot 的 ew 值确定性断言，零 flake）
+const mVisU = (await mkModel({ publicName: 'auto-m-visu', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body; // unknown
+const chVisG = await mkCh('Auto VisG', 'openai', ['k-ok-visg']);
+const mVisG = (await mkModel({ publicName: 'auto-m-visg', channelId: chVisG.id, upstreamModel: 'mock-gpt-5' })).body;
+const aVis6 = await mkAuto({ publicName: 'auto_vis6', candidates: [{ routeId: mVisU.id, weight: 10000 }, { routeId: mVisG.id, weight: 3000 }], stickyTtlMs: 0 });
+await autoReq('auto_vis6');
+const ewText = ((await getLogs('auto_vis6'))[0]?.chainAttempts?.[0]?.pickSnapshot || []).find((x: any) => x.routeId === mVisU.id)?.ew;
+await autoReq('auto_vis6', { messages: twoImgs });
+const ewImg = ((await getLogs('auto_vis6'))[0]?.chainAttempts?.[0]?.pickSnapshot || []).find((x: any) => x.routeId === mVisU.id)?.ew;
+check('VIS-6 带图 unknown bias=0.25（ew 10000→2500）', ewText === 10000 && ewImg === 2500, `text=${ewText} img=${ewImg}`);
+// VIS-7：带图 400 判定顺序——超窗（C10）先于视觉，不双重判定
+const mDual = (await mkModel({ publicName: 'auto-m-dual400', channelId: chAuto.id, upstreamModel: 'mock-dual400' })).body;
+const aVis7 = await mkAuto({ publicName: 'auto_vis7', candidates: [{ routeId: mDual.id, weight: 10000 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
+const rVis7 = await autoReq('auto_vis7', { messages: twoImgs });
+check('VIS-7 判定顺序：C10 先行（报错含「超出候选窗口」）且续链', rVis7.status === 200 && String((await getLogs('auto_vis7'))[0]?.chainAttempts?.[0]?.error || '').includes('超出候选窗口'), JSON.stringify((await getLogs('auto_vis7'))[0]?.chainAttempts?.[0]?.error));
+check('VIS-7 C10 路径不触发视觉学习（仍 unknown）', (await getRoute(mDual.id))?.supportsVision === undefined, JSON.stringify((await getRoute(mDual.id))?.supportsVision));
+// VIS-8：带图真参数错误 → D 格短接；单候选纯 4xx 耗尽 → 顶层 400 聚合（G3）
+const mBadp2 = (await mkModel({ publicName: 'auto-m-badp2', channelId: chBadp.id, upstreamModel: 'mock-badparam' })).body;
+const aVis8 = await mkAuto({ publicName: 'auto_vis8', candidates: [{ routeId: mBadp2.id, weight: 1 }], stickyTtlMs: 0 });
+const rVis8 = await autoReq('auto_vis8', { messages: twoImgs });
+check('VIS-8 真·参数错误维持 D 格；单候选纯 4xx → 顶层 400 聚合', rVis8.status === 400 && String(rVis8.body?.error?.message).includes('temperature'), `${rVis8.status} ${String(rVis8.body?.error?.message).slice(0, 60)}`);
+await resetAutoRT();
+
 await resetAutoRT();
 const aR429 = await mkAuto({ publicName: 'auto_429', candidates: [{ routeId: mRateR.id, weight: 1 }, { routeId: mGptR.id, weight: 1 }], stickyTtlMs: 0 });
 const r429 = await autoReq('auto_429');

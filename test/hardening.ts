@@ -1323,6 +1323,27 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   // G10：parseRetryAfter 0/负/非数字归一 undefined
   const { parseRetryAfter } = await import('../src/pool.ts');
   check('G10 parseRetryAfter：0/负/非数字 → undefined，正数 → ms', parseRetryAfter('0') === undefined && parseRetryAfter('-5') === undefined && parseRetryAfter('abc') === undefined && parseRetryAfter('3600') === 3_600_000, JSON.stringify([parseRetryAfter('0'), parseRetryAfter('-5'), parseRetryAfter('abc'), parseRetryAfter('3600')]));
+  // SEC-2/F6.2/G18 单元：视觉学习门槛（60s 滑动窗 + ≥2 不同指纹 + 1h 学习冷却）
+  const vis = await import('../src/vision.ts');
+  vis.setVisionClockForTest(() => now);
+  vis.clearVisionLearning();
+  check('SEC-2 单指纹 400 不学习（G18 防同图双击）', vis.visionLearnReady('u-vis', ['fp1']) === false, 'fp1');
+  check('SEC-2 60s 窗内第 2 个不同指纹 → 学习就绪', vis.visionLearnReady('u-vis', ['fp2']) === true, 'fp2');
+  vis.markVisionLearned('u-vis'); // 学习动作 → 1h 冷却
+  check('SEC-2 学习后 1h 冷却内不再触发', vis.visionLearnReady('u-vis', ['fp3', 'fp4']) === false, 'cooldown');
+  now += 3_600_000 * 2; // +2h：冷却已过，但旧指纹也滚出 60s 窗
+  check('F6.2 指纹滚出 60s 窗后重新累计（历史不清零也不阴魂不散）', vis.visionLearnReady('u-vis', ['fp5']) === false, 'pruned');
+  check('F6.2 窗内重新凑满 2 个不同指纹 → 再次就绪', vis.visionLearnReady('u-vis', ['fp6']) === true, 'ready-again');
+  vis.clearVisionLearning();
+  // R7 单元：inputEst 图片 token——data URL 精算 / http 常数 / anthropic base64 形态
+  const { estimateInputTokens } = await import('../src/gateway.ts');
+  const png1x1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='; // 1×1
+  const imgBody = (url: string) => ({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url } }] }] });
+  check('R7 1×1 PNG data URL → ceil(1/750)=1 图 token', estimateInputTokens(imgBody(png1x1)) === Math.ceil(2 / 4) + 1, String(estimateInputTokens(imgBody(png1x1))));
+  check('R7 http URL 图 → 常数 1000（不下载）', estimateInputTokens(imgBody('https://x/a.png')) === Math.ceil(2 / 4) + 1000, String(estimateInputTokens(imgBody('https://x/a.png'))));
+  const anth = { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png1x1.slice('data:image/png;base64,'.length) } }] }] };
+  check('R7 anthropic base64 图同口径', estimateInputTokens(anth) === 1, String(estimateInputTokens(anth)));
+  vis.setVisionClockForTest(() => Date.now());
   // 时钟恢复 + 清场（置于末节，不影响此前服务器域断言）
   auto.setClockForTest(() => Date.now());
   auto.clearHealth();

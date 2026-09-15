@@ -67,6 +67,10 @@ export interface ModelRoute {
   supportsStreaming?: boolean;
   /** 是否支持 tools；缺省视为支持（仅显式 false 在 auto 硬过滤中剔除，裁决 C1） */
   supportsTools?: boolean;
+  /** 视觉三态（AR-6）：true/false/'unknown'；undefined ≡ unknown（无证据≠支持，交给学习闭环兜底） */
+  supportsVision?: true | false | 'unknown';
+  /** 用户手动标注过（F6.3）：被动学习不再覆盖；「重置回 unknown」时解锁 */
+  visionLocked?: boolean;
   /** 每百万 token 单价（美元），用于花费估算 */
   priceInput?: number;
   priceOutput?: number;
@@ -205,6 +209,8 @@ export interface Settings {
   autoMaxChainSeconds: number;
   /** 饱和态开关与退避参数（§6/F5.3：热读，enabled=false 即整体回滚饱和语义） */
   autoSaturation: { enabled: boolean; baseSec: number; maxSec: number };
+  /** 视觉三态开关（§6/AR-6）：enabled=过滤+学习闭环总闸；heuristics=导入时家族先验初值 */
+  autoVision: { enabled: boolean; heuristics: boolean };
   /** 未知模型时是否透传给默认兜底渠道 */
   fallbackChannelId?: string;
 }

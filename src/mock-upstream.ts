@@ -120,6 +120,9 @@ app.post('/v1/chat/completions', async (c) => {
     if (hasImageParts(body.messages))
       return c.json({ error: { message: 'image input is not supported by this model (text-only model)', type: 'invalid_request_error' } }, 400 as any);
   }
+  if (body.model === 'mock-dual400')
+    // VIS-7 fixture：400 同时含超窗与视觉文案——判定顺序（F2.1）要求 C10 先行，视觉不双重判定
+    return c.json({ error: { message: "This model's maximum context length is 8192 tokens. However, images are not supported by this model.", type: 'invalid_request_error' } }, 400 as any);
   if (body.model === 'mock-badparam')
     // F2.1 对照 fixture：400 不含能力声明文案 → 网关侧应 D 格短接（请求本身坏）
     return c.json({ error: { message: 'Invalid parameter: temperature=999 is out of range', type: 'invalid_request_error' } }, 400 as any);

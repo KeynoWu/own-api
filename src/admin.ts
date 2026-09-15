@@ -10,6 +10,7 @@ import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
 import { APP_VERSION } from './version.gen.ts';
 import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
+import { clearVisionLearning } from './vision.ts';
 import type { Channel } from './types.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -666,6 +667,13 @@ export function createAdmin(): Hono {
     clearSticky();
     clearSaturation(); // 四态复位（§2 复位口：health/sticky/saturation/speed——speed 于 P2 接入）
     return c.json({ ok: true });
+  });
+  /** AR-6：视觉标注一键重置回 unknown（解锁 + 清学习记忆；F6.3 的反门） */
+  app.post('/routes/:id/vision/reset', (c) => {
+    const r = store.updateModel(c.req.param('id'), { supportsVision: 'unknown', visionLocked: false });
+    if (!r || r === 'conflict') return c.json({ error: 'not found' }, 404);
+    clearVisionLearning(r.id);
+    return c.json({ ok: true, supportsVision: r.supportsVision ?? 'unknown', visionLocked: false });
   });
   app.post('/auto-health/saturation/clear', (c) => {
     const b = c.req.query('route');

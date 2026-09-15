@@ -27,6 +27,7 @@ import { availableKeyCount, classifyFailure, parseRetryAfter, pickKey, recordFai
 import { callUpstream, extractUpstreamError, sniffStreamBody, type Endpoint } from './upstream.ts';
 import { admitDailyQuota, admitRequest, computeCost, recordQuota, releaseQuota } from './usage.ts';
 import { SAT_PROBE_MS, satConfigOf, satLeftMs, STICKY_KEEP, STICKY_RESTICK, deleteSticky, getSticky, health as healthOf, pickWeighted, recordAttempt, satNote429, satNoteSuccess, setSticky, touchSticky, triggerSaturation } from './auto.ts';
+import { VISION_UNKNOWN_BIAS, VISION_UNSUPPORTED_RE, chatHasImages, imageDataTokens, imageFingerprints, markVisionLearned, visionLearnReady } from './vision.ts';
 import type { AutoCandidate, AutoRoute, ChainAttempt, Channel, ModelRoute, Protocol, RequestLog, Settings, VirtualKey } from './types.ts';
 
 export type ClientProtocol = 'openai' | 'anthropic';
@@ -195,22 +196,6 @@ function isPromptTooLong(msg: string): boolean {
   return /(context length|context window|maximum context|too many tokens|prompt is too long|input is too long|exceeds.{0,40}(context|window|length)|超.{0,8}(窗口|上下文|长度))/i.test(msg);
 }
 
-/** 带图请求检测（AR-6/F2.1）：openai image_url / anthropic image 内容块（P1.5 前仅用于 400 分流，不做候选能力过滤） */
-function chatHasImages(chatBody: any): boolean {
-  for (const m of chatBody?.messages || []) {
-    if (!Array.isArray(m?.content)) continue;
-    for (const p of m.content) if (p?.type === 'image_url' || p?.type === 'image') return true;
-  }
-  return false;
-}
-
-/**
- * 视觉不支持的保守白名单（G2 修正）：只匹配"能力声明"类文案——模型根本不收图，换支持视觉的候选有意义。
- * 单图处理失败类（"could not process image"、内容安全拒绝）显式不在列：那是这张图的问题，换候选同样会挂。
- * 白名单宁缺勿滥：未命中走 D 格短接，误放进来的代价是全链烧尽。
- */
-const VISION_UNSUPPORTED_RE = /images?\s*(?:are\s+)?not\s+supported|not\s+support(?:ing)?\s+(?:the\s+)?images?|(?:vision|multimodal|image\s+input)\s+(?:is\s+)?not\s+(?:supported|enabled)|text[- ]only\s+model|does\s+not\s+support\s+(?:the\s+)?vision/i;
-
 function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wire: WireFormat, wantsStream: boolean, inputEst: number): CandEval[] {
   const cacheMarkers = wire === 'anthropic' && hasAnthropicCacheMarkers(chatBody);
   const reqMax = Number(chatBody?.max_tokens) || Number(chatBody?.max_completion_tokens) || 0;
@@ -231,6 +216,9 @@ function evaluateCandidates(auto: AutoRoute, vkey: VirtualKey, chatBody: any, wi
     if (availableKeyCount(channel) === 0) return soft('渠道 key 全部冷却中');
     if (route.contextWindow && route.contextWindow > 0 && inputEst > route.contextWindow) return soft(`估算 prompt ${inputEst} tokens 超出其 contextWindow ${route.contextWindow}`);
     if ((chatBody?.tools?.length ?? 0) > 0 && route.supportsTools === false) return soft('请求带 tools 而候选不支持');
+    // AR-6 视觉软排除（① 硬过滤扩展）：带图 + 显式 false → 排除（与 tools/流式同语义：绕行不改写粘性）；
+    // unknown（含 undefined）→ 放行，交给学习闭环兜底，加权处 bias=0.25
+    if (chatHasImages(chatBody) && route.supportsVision === false) return soft('请求带图片而候选不支持视觉');
     if (reqMax > 0 && route.maxOutputTokens && reqMax > route.maxOutputTokens) return soft(`请求 max_tokens ${reqMax} 超出其上限 ${route.maxOutputTokens}`);
     if (wantsStream && route.supportsStreaming === false) return soft('候选不支持流式');
     if (cacheMarkers && protocol !== 'anthropic') return soft('候选协议无法承载 thinking/cache_control 语义');
@@ -417,6 +405,14 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
           return { kind: 'candidate_fail', status: 400, message: `prompt 超出候选窗口：${brief}`, sample: false };
         }
         if (a.isAuto && chatHasImages(a.chatBody) && VISION_UNSUPPORTED_RE.test(brief)) {
+          // AR-6 被动降级学习（关键闭环）：仅当 60s 窗内 ≥2 个不同图片指纹（G18 防同图双击误标 +
+          // F6.2/SEC-2 窗口）+ 未被用户手动锁定（F6.3）+ 学习冷却（1h）之外 → 置 false 持久化、链继续（C 格语义）。
+          // 判定顺序（F2.1）：超窗已在上面先行——视觉永不与 C10/D 格双重判定
+          if (route && a.settings.autoVision?.enabled !== false && route.visionLocked !== true
+            && visionLearnReady(route.id, imageFingerprints(a.chatBody))) {
+            store.updateModel(route.id, { supportsVision: false });
+            markVisionLearned(route.id);
+          }
           return { kind: 'candidate_fail', status: 400, message: brief, sample: false };
         }
         return { kind: 'chain_stop', status: up.status, message: brief };
@@ -1017,7 +1013,11 @@ async function runAuto(ctx: AutoRunCtx) {
   let overflowMaxWin = 0;     // 超窗候选中最大的 contextWindow
 
   // 有效权重（v2.3 §4）：weight × health；P1.5/P2 接入 visionBias/speedFactor 后在此叠加
-  const ewOf = (e: SurvivingEval) => e.cand.weight * e.health;
+  // R4 统一权重（§5）：weight × health × visionBias（speedFactor 于 P2 并入）。
+  // 带图请求 unknown 候选 bias=0.25 后置——非排除，尽量不付"第一次失败"的学费（VIS-6）
+  const hasImgs = chatHasImages(chatBody);
+  const visionBiasOf = (e: SurvivingEval) => (hasImgs && e.route.supportsVision !== true ? VISION_UNKNOWN_BIAS : 1);
+  const ewOf = (e: SurvivingEval) => e.cand.weight * e.health * visionBiasOf(e);
   // 首跳：加权随机（分流语义——摊开流量，避免单候选过载）
   const chooseFirst = (): SurvivingEval | undefined => {
     const rest = survivors.filter((e) => !tried.has(e.cand.routeId));
@@ -1236,7 +1236,7 @@ async function readJson(body: ReadableStream<Uint8Array> | null, maxBytes = 32 *
  */
 export function estimateInputTokens(body: any): number {
   let chars = 0;
-  let images = 0;
+  let imgTokens = 0;
   const pushContent = (content: unknown, depth = 0): void => {
     if (typeof content === 'string' || typeof content === 'number') chars += String(content).length;
     else if (Array.isArray(content) && depth <= 4) {
@@ -1247,7 +1247,10 @@ export function estimateInputTokens(body: any): number {
         else if (typeof (p as any).thinking === 'string') chars += (p as any).thinking.length;
         else if ((p as any).type === 'tool_result') pushContent((p as any).content, depth + 1);
         else if ((p as any).type === 'tool_use' && (p as any).input != null) chars += String(JSON.stringify((p as any).input)).length; // 工具调用参数也是 prompt 大头
-        else if ((p as any).type === 'image' || (p as any).type === 'image_url') images += 1;
+        else if ((p as any).type === 'image' || (p as any).type === 'image_url') {
+          // R7（P1.5）：data URL 解析 w×h 精算 ≈(w×h)/750；http URL 不为计费下载，常数 1000/图
+          imgTokens += imageDataTokens(p) ?? 1000;
+        }
       }
     }
   };
@@ -1263,7 +1266,7 @@ export function estimateInputTokens(body: any): number {
   const inp = body?.input;
   if (typeof inp === 'string' || typeof inp === 'number') chars += String(inp).length;
   else if (Array.isArray(inp)) for (const it of inp) pushContent(it);
-  return Math.ceil((chars + images * 6400) / 4);
+  return Math.ceil(chars / 4) + imgTokens;
 }
 
 /** GET /v1/models —— 对外只暴露已配置且该 key 有权访问的模型；auto 条目按 §5.2 契约合成 */

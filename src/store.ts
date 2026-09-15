@@ -2,6 +2,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, VirtualKey } from './types.ts';
+import { heuristicVision, isVisionSupport } from './vision.ts';
 import { envAny, resolveDataDir } from './bootstrap.ts';
 
 const DATA_DIR = resolveDataDir();
@@ -39,6 +40,7 @@ function defaultSettings(): Settings {
     logRetention: 2000,
     autoMaxChainSeconds: n(envAny(['OWN_API_AUTO_CHAIN_SECONDS', 'LLM_AUTO_CHAIN_SECONDS']), 300),
     autoSaturation: { enabled: true, baseSec: 60, maxSec: 1800 },
+    autoVision: { enabled: true, heuristics: true },
   };
 }
 
@@ -105,6 +107,17 @@ export function sanitizeSettings(patch: any, current: Settings): { value: Partia
         continue;
       }
       out.autoSaturation = { enabled, baseSec, maxSec };
+    } else if (k === 'autoVision') {
+      if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+        rejected.push('autoVision：需为 { enabled, heuristics } 对象');
+        continue;
+      }
+      const cur = current.autoVision || { enabled: true, heuristics: true };
+      const nv = v as Record<string, unknown>;
+      out.autoVision = {
+        enabled: nv.enabled === undefined ? cur.enabled : nv.enabled === true,
+        heuristics: nv.heuristics === undefined ? cur.heuristics : nv.heuristics === true,
+      };
     } else if (k in NUM_BOUNDS) {
       const x = Number(v);
       const bound = NUM_BOUNDS[k];
@@ -141,7 +154,7 @@ export function toStrList(v: unknown): string[] | undefined {
 
 // PATCH 可写字段白名单：主键、创建时间、号池 keys（走专门的增删接口）等一律拒之门外
 const UPDATABLE_CHANNEL_FIELDS = ['name', 'baseUrl', 'protocol', 'enabled', 'extraHeaders', 'authStyle', 'timeoutMs', 'note', 'testModel', 'modelList'];
-const UPDATABLE_MODEL_FIELDS = ['publicName', 'channelId', 'upstreamModel', 'protocol', 'enabled', 'contextWindow', 'maxOutputTokens', 'supportsStreaming', 'supportsTools', 'priceInput', 'priceOutput', 'priceCacheRead', 'priceCacheWrite', 'tags', 'note'];
+const UPDATABLE_MODEL_FIELDS = ['publicName', 'channelId', 'upstreamModel', 'protocol', 'enabled', 'contextWindow', 'maxOutputTokens', 'supportsStreaming', 'supportsTools', 'supportsVision', 'visionLocked', 'priceInput', 'priceOutput', 'priceCacheRead', 'priceCacheWrite', 'tags', 'note'];
 const UPDATABLE_VKEY_FIELDS = ['name', 'enabled', 'allowedModels', 'rpmLimit', 'dailyTokenLimit', 'note'];
 // key 级 PATCH 白名单：主键 id、key 原文、统计、冷却字段拒之门外（对齐 channel/model 设计，审查 C-M2）
 const UPDATABLE_KEY_FIELDS = ['status', 'weight', 'name', 'note'];
@@ -557,6 +570,14 @@ class Store {
       createdAt: Date.now(),
       note: input.note,
     };
+    // AR-6 启发式初值（P1.5）：显式传入优先；否则已知多模态家族 → true，其余 unknown（undefined）。
+    // 表只做先验，可经 settings.autoVision.heuristics 关闭
+    if (input.supportsVision === true || input.supportsVision === false || input.supportsVision === 'unknown') {
+      m.supportsVision = input.supportsVision;
+      m.visionLocked = input.visionLocked;
+    } else if ((this.db.settings.autoVision || { heuristics: true }).heuristics !== false) {
+      m.supportsVision = heuristicVision(input.upstreamModel, input.publicName);
+    }
     this.db.routes.push(m);
     this.save();
     return { model: m };
@@ -574,7 +595,8 @@ class Store {
       if (v === null && k !== 'publicName' && k !== 'channelId' && k !== 'upstreamModel' && k !== 'enabled' && k !== 'supportsStreaming' && k !== 'supportsTools') { next[k] = undefined; continue; } // 前端契约（审查 M2）：null=清除；字符串/布尔的 null 仍被下方类型检查丢弃
 
       if (k === 'protocol' && v !== undefined && v !== 'openai' && v !== 'anthropic') continue;
-      if ((k === 'enabled' || k === 'supportsStreaming' || k === 'supportsTools') && typeof v !== 'boolean') continue;
+      if (k === 'supportsVision' && !isVisionSupport(v)) continue; // 三态白名单：true/false/'unknown'，其余丢弃
+      if ((k === 'enabled' || k === 'supportsStreaming' || k === 'supportsTools' || k === 'visionLocked') && typeof v !== 'boolean') continue;
       if ((k === 'publicName' || k === 'channelId' || k === 'upstreamModel') && (typeof v !== 'string' || (k !== 'channelId' && !v.trim()))) continue;
       if (k === 'tags' && v !== undefined && !(Array.isArray(v) && v.every((s) => typeof s === 'string'))) continue;
       if (k === 'note' && v !== undefined && typeof v !== 'string') continue;
@@ -593,6 +615,9 @@ class Store {
       if (next.tags !== undefined) for (const t of Array.isArray(next.tags) ? next.tags : []) if (typeof t === 'string' && t) names.add(t.toLowerCase());
       for (const n of names) if (this.routeNameTaken(n, id)) return 'conflict' as const;
     }
+    // F6.3：显式改 supportsVision（未同时给 visionLocked）= 用户手动标注 → 锁定，被动学习不再覆盖。
+    // 重置口（/routes/:id/vision/reset）同时带 visionLocked=false，走 'in next' 分支不误锁
+    if (next.supportsVision !== undefined && !('visionLocked' in next)) next.visionLocked = true;
     Object.assign(m, next);
     this.save();
     return m;
