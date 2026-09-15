@@ -926,6 +926,51 @@ check('STK-2 重粘双过（健康关且 TTFT 关）→ 恢复粘性命中续期
 await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft0spaced60' });
 await api('/api/routes/' + aSpd.body.id, { method: 'DELETE', headers: ADMIN });
 
+// —— 审查修复钉：速度因子端到端分化（T5 补强：e2e 域 factor 不再恒 1，speedFactorOf→ewOf 接线实证）——
+await resetAutoRT();
+const mSpdF = (await mkModel({ publicName: 'spd-fast', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60' })).body; // decode ~300ms → ~56 tok/s
+const mSpdS = (await mkModel({ publicName: 'spd-slow', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced240' })).body; // decode ~1200ms → ~14 tok/s
+const aFac = await mkAuto({ publicName: 'auto_fac', candidates: [{ routeId: mSpdF.id, weight: 10000 }, { routeId: mSpdS.id, weight: 1 }], stickyTtlMs: 0 });
+for (let i = 0; i < 3; i++) await autoReq('auto_fac', { stream: true }); // fast ×3（单候选 bench 自锚 → EMA_fast=1）
+await patchAuto(aFac.body.id, { candidates: [{ routeId: mSpdF.id, weight: 1 }, { routeId: mSpdS.id, weight: 10000 }] });
+for (let i = 0; i < 3; i++) await autoReq('auto_fac', { stream: true }); // slow ×3（bench=下中位=慢者 p50 → raw_slow=1 → EMA_slow=1）
+await patchAuto(aFac.body.id, { candidates: [{ routeId: mSpdF.id, weight: 10000 }, { routeId: mSpdS.id, weight: 1 }] });
+await autoReq('auto_fac', { stream: true }); // fast 第 3 个 fresh 样本：raw=p50F/p50S≥2→clamp cap2 → EMA_fast=0.3×2+0.7×1=1.3
+await autoReq('auto_fac', { stream: true }); // 本次快照建于采样前：factor_fast=1.3（实值）、factor_slow=1.0（下中位自锚）
+const lFac = (await getLogs('auto_fac'))[0];
+const snapFac = lFac?.chainAttempts?.[0]?.pickSnapshot || [];
+const fFacF = snapFac.find((x: any) => x.routeId === mSpdF.id) || {};
+const fFacS = snapFac.find((x: any) => x.routeId === mSpdS.id) || {};
+check('审查钉：速度因子端到端分化——快候选 1.3（0.3×cap+0.7×1）、慢候选 1.0（下中位 bench 自锚）', fFacF.factor === 1.3 && fFacS.factor === 1, JSON.stringify(snapFac));
+check('审查钉：factor 实际进入 ew（R4 统一公式接线）：ew≈weight×factor（health≈1）', Math.abs(fFacF.ew - 10000 * fFacF.factor) < 1 && fFacS.ew === 1, JSON.stringify(snapFac));
+await api('/api/routes/' + aFac.body.id, { method: 'DELETE', headers: ADMIN });
+
+// —— 审查修复钉：采样准入负向（G15 15/16 线、非流式、direct 三条毒样本静默路径）——
+await resetAutoRT();
+const mTok15 = (await mkModel({ publicName: 'spd-tok15', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60tok15' })).body; // completion_tokens=15 <16
+const mTok16 = (await mkModel({ publicName: 'spd-tok16', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60' })).body; // =17 ≥16
+const aT15 = await mkAuto({ publicName: 'auto_tok15', candidates: [{ routeId: mTok15.id, weight: 1 }], stickyTtlMs: 0 });
+const aT16 = await mkAuto({ publicName: 'auto_tok16', candidates: [{ routeId: mTok16.id, weight: 1 }], stickyTtlMs: 0 });
+await autoReq('auto_tok15', { stream: true });
+await autoReq('auto_tok16', { stream: true });
+const ahTok = await autoHealth();
+const row15 = (ahTok.windows || []).find((w: any) => w.routeId === mTok15.id) || {};
+const row16 = (ahTok.windows || []).find((w: any) => w.routeId === mTok16.id) || {};
+check('G15 准入线负向：15tok 流式不采样（健康行在、无 tokP50）；16tok+ 采样', row15.ok != null && row15.tokP50 == null && typeof row16.tokP50 === 'number', JSON.stringify({ row15, row16 }));
+await api('/api/routes/' + aT15.body.id, { method: 'DELETE', headers: ADMIN });
+await api('/api/routes/' + aT16.body.id, { method: 'DELETE', headers: ADMIN });
+const mNs = (await mkModel({ publicName: 'spd-ns', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60' })).body;
+const aNs = await mkAuto({ publicName: 'auto_ns', candidates: [{ routeId: mNs.id, weight: 1 }], stickyTtlMs: 0 });
+await autoReq('auto_ns'); // 非流式：F3.3 仅观测落日志，不入速度状态
+const rowNs = ((await autoHealth()).windows || []).find((w: any) => w.routeId === mNs.id) || {};
+check('F3.3 负向：非流式成功不采样（健康行在、无 tokP50）', rowNs.ok != null && rowNs.tokP50 == null, JSON.stringify(rowNs));
+await api('/api/routes/' + aNs.body.id, { method: 'DELETE', headers: ADMIN });
+const mDir = (await mkModel({ publicName: 'spd-direct', channelId: chAuto.id, upstreamModel: 'mock-ttft0spaced60' })).body;
+await autoReq('spd-direct', { stream: true }); // direct 直连：attemptRoute 单候选仍记健康，但无 AttemptInput.speedCfg → 永不采速度
+const rowDir = ((await autoHealth()).windows || []).find((w: any) => w.routeId === mDir.id) || {};
+check('G14 负向：direct 直连流式不采速度（健康行在、无 tokP50/speedFactor）', rowDir.ok != null && rowDir.tokP50 == null && rowDir.speedFactor == null, JSON.stringify(rowDir));
+
+
 // —— L1 前置顺序（二轮 F10：只测"403 存在"不够，要测"403 先于探测面"）——
 const rEmbNo = await api('/v1/embeddings', { method: 'POST', headers: { authorization: `Bearer ${kNoAuto.key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'model_auto', input: 'x' }) });
 check('L1 前置：未授权 key × embeddings 也得 403（存在性探测已闭，非 400）', rEmbNo.status === 403, String(rEmbNo.status));
