@@ -277,7 +277,10 @@ function go(v, opts = {}) {
       const cur = app.firstElementChild;
       if (sameView && cur && cur.outerHTML === node.outerHTML) return; // 数据没变：零 DOM 扰动直接跳过
       const ae = document.activeElement; // 用户正在输入：本轮不替换（不抢焦点，下轮自愈）
-      if (sameView && ae && app.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+      // 只豁免文本录入（TEXTAREA / 文本类 INPUT）。SELECT 与 checkbox 是离散控件：change 即"决定已完成"，
+      // 而此刻焦点恰好就在该控件上——若一并守卫，筛选切换的刷新会被吞掉，且控件保持聚焦期间每轮 tick 持续被吞，
+      // 表现为"切换模型/时间无效"。替换后新控件按 state 重建 selected，无感。
+      if (sameView && ae && app.contains(ae) && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' && !/^(checkbox|radio|button|submit)$/.test(ae.type || '')))) return;
       app.replaceChildren(node);
       if (sameView) {
         window.scrollTo(0, keepScroll); // 替换是同步的，滚回原位防高度微差抖动
