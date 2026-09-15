@@ -202,6 +202,12 @@ export function pickWeighted<T>(items: T[], weightOf: (t: T) => number, rand: ()
 /** 饱和配置（settings.autoSaturation，热读；缺省兜底开） */
 export interface SaturationConfig { enabled: boolean; baseMs: number; maxMs: number }
 export const SAT_DEFAULTS: SaturationConfig = { enabled: true, baseMs: 60_000, maxMs: 1_800_000 };
+/** settings.autoSpeedFactor → 运行时配置；未配置兜底开 */
+export function speedConfigOf(s?: { enabled: boolean; floor: number; cap: number }): SpeedConfig {
+  if (!s) return SPEED_DEFAULTS;
+  return { enabled: s.enabled, floor: s.floor, cap: s.cap };
+}
+
 /** settings.autoSaturation（秒）→ 运行时配置（毫秒）；未配置时兜底开（旧库升级不回退语义） */
 export function satConfigOf(s?: { enabled: boolean; baseSec: number; maxSec: number }): SaturationConfig {
   if (!s) return SAT_DEFAULTS;
@@ -318,4 +324,168 @@ export function stickyListForRoute(autoName: string): { vkeyId: string; routeId:
     out.push({ vkeyId: k.slice(0, k.indexOf('\u0000')), routeId: e.routeId, expiresAt: e.expiresAt, degraded: !!e.degraded });
   }
   return out;
+}
+
+// ---------------------------------------------------------------- 速度因子（§3，AR-5）
+
+/** 速度配置（settings.autoSpeedFactor，热读） */
+export interface SpeedConfig { enabled: boolean; floor: number; cap: number }
+export const SPEED_DEFAULTS: SpeedConfig = { enabled: true, floor: 0.5, cap: 2.0 };
+
+interface SpeedSample { ts: number; tokPerSec: number; ttftMs: number }
+const SPEED_WINDOW_MS = 3_600_000;          // R3：速度窗 1h（慢不需要秒级反应，与健康 10min 窗刻意不同）
+const MAX_SPEED_SAMPLES = 256;              // F1.4：环形上限，与健康窗对齐
+const EMA_ALPHA = 0.3;                      // R3
+const SPEED_HALF_LIFE_MS = 3_600_000;       // F3.1/F3.4：样本滚出后按 1h 半衰期指数衰减回 1，不做硬重置
+const SPEED_MIN_SAMPLES = 3;                // 冷启动口径：样本 <3 → factor=1 / 视为未慢降
+const SPEED_RECOMPUTE_MS = 5_000;           // 读侧 5s 计算缓存（不逐请求扫全量）
+const STICKY_SLOW_DEMOTE = 3.0;             // G16：降粘 = TTFT ≥3× 自身基线（自身历史 p50 的 EMA，非跨候选比值）
+export const TTFT_RESTICK_X = 2.0;          // F3.2/STK-2：重粘需 <2×——与 C3 同构的迟滞带（TTFT 倍数，区别于健康 0.6 阈）
+const TTFT_RECENT_N = 8;                    // 「当前 TTFT」口径：最近 8 个样本的 p50（抗单点抖动）
+
+const speedWin = new Map<string, SpeedSample[]>();
+const speedEma = new Map<string, number>();     // 平滑因子（事件驱动：该候选每个新样本更新一次）
+const ttftBaseline = new Map<string, number>(); // 自身历史 recent-p50 的 EMA
+const ttftSlow = new Map<string, boolean>();    // 粘性慢降级迟滞状态
+const lastSampleAt = new Map<string, number>();
+let speedSnap: { at: number; floor: number; cap: number; bench: number | null; rows: Map<string, { factor: number; tokP50: number | null; ttftP50: number | null; slow: boolean }> } | null = null;
+
+export function clearSpeed() {
+  speedWin.clear();
+  speedEma.clear();
+  ttftBaseline.clear();
+  ttftSlow.clear();
+  lastSampleAt.clear();
+  speedSnap = null;
+}
+
+export function clearSpeedForRoute(routeId: string) {
+  speedWin.delete(routeId);
+  speedEma.delete(routeId);
+  ttftBaseline.delete(routeId);
+  ttftSlow.delete(routeId);
+  lastSampleAt.delete(routeId);
+  speedSnap = null;
+}
+
+const p50Of = (xs: number[]): number | null => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor((s.length - 1) / 2)];
+};
+
+/**
+ * 每 attempt 速度采样（G14/G15）：调用方保证只对流式且 completionTokens≥16 的成功 attempt 调用——
+ * tokPerSec = completionTokens / decode 秒（流末−首包，权重层指标）；ttftMs = 首包−本 attempt 起点
+ * （aT0 基准，禁止链级污染值）。非流式仅入观测（F3.3 下界口径，落日志，不进本状态）。
+ */
+export function speedNote(routeId: string, tokPerSec: number, ttftMs: number, cfg?: SpeedConfig) {
+  if (!routeId || !(tokPerSec > 0) || !(ttftMs >= 0)) return;
+  const now = clockNow();
+  const list = speedWin.get(routeId) || [];
+  list.push({ ts: now, tokPerSec, ttftMs });
+  while (list.length && now - list[0].ts > SPEED_WINDOW_MS) list.shift();
+  while (list.length > MAX_SPEED_SAMPLES) list.shift();
+  speedWin.set(routeId, list);
+  lastSampleAt.set(routeId, now);
+  speedSnap = null; // 失效读缓存
+  if (cfg) refreshSpeedEvents(routeId, cfg, now); // 事件侧更新（EMA/基线/慢降级迟滞）随样本驱动
+}
+
+/** 事件侧重算（每个新样本触发一次）：该候选的 EMA 因子 + 全候选的 TTFT 基线/慢降级迟滞 */
+function refreshSpeedEvents(newRouteId: string, cfg: SpeedConfig, now: number) {
+  const ownToks: { routeId: string; v: number }[] = [];
+  const p50s = new Map<string, { tok: number | null; ttft: number | null }>();
+  for (const [routeId, list] of speedWin) {
+    const fresh = list.filter((s) => now - s.ts <= SPEED_WINDOW_MS);
+    if (fresh.length !== list.length) speedWin.set(routeId, fresh);
+    const tok = p50Of(fresh.map((s) => s.tokPerSec));
+    p50s.set(routeId, { tok, ttft: p50Of(fresh.map((s) => s.ttftMs)) });
+    if (fresh.length >= SPEED_MIN_SAMPLES && tok !== null) ownToks.push({ routeId, v: tok });
+  }
+  // G17/SPD-5：bench = 速度样本 ≥3 的候选 own p50 的中位数；无任何合格候选 → bench null（全体 factor=1）。
+  // 单个有样本候选 → bench=自身 p50 → factor=1（有样本者不因冷启动同伴被压）
+  const bench = ownToks.length ? p50Of(ownToks.map((o) => o.v)) : null;
+  if (bench !== null && bench > 0) {
+    const me = ownToks.find((o) => o.routeId === newRouteId);
+    if (me) {
+      const raw = Math.min(cfg.cap, Math.max(cfg.floor, me.v / bench)); // 吞吐高优：own/bench（R3 改指标后的倒数形式，TTFT 类低优指标才是 bench/own）
+      const prev = speedEma.get(newRouteId);
+      speedEma.set(newRouteId, prev === undefined ? raw : EMA_ALPHA * raw + (1 - EMA_ALPHA) * prev);
+    }
+  }
+  // 粘性慢降级（G16/F3.2）：recent-8 p50 vs 自身历史 p50 EMA；3× 降、<2× 回（迟滞）；样本 <3 视为未慢降
+  for (const [routeId, list] of speedWin) {
+    const recent = list.slice(-TTFT_RECENT_N);
+    if (recent.length < SPEED_MIN_SAMPLES) {
+      ttftSlow.set(routeId, false);
+      continue;
+    }
+    const rp = p50Of(recent.map((s) => s.ttftMs));
+    if (rp === null || !(rp > 0)) continue;
+    // 倍数比较用「历史基线」（不含本次读数——EMA 若先吞慢样本，3× 判据在阶跃劣化下永不可达）
+    const prevBase = ttftBaseline.get(routeId);
+    if (prevBase === undefined) {
+      ttftBaseline.set(routeId, rp); // 播种：首个 recent-p50 即基线，不参与倍数判定
+    } else {
+      if (ttftSlow.get(routeId)) {
+        if (prevBase > 0 && rp < TTFT_RESTICK_X * prevBase) ttftSlow.set(routeId, false);
+      } else if (prevBase > 0 && rp >= STICKY_SLOW_DEMOTE * prevBase) {
+        ttftSlow.set(routeId, true);
+      }
+      ttftBaseline.set(routeId, EMA_ALPHA * rp + (1 - EMA_ALPHA) * prevBase);
+    }
+  }
+}
+
+/** 读侧快照（5s 缓存）：factor 已含衰减；bench/观测值直出 */
+function speedSnapshotRead(cfg: SpeedConfig, now: number) {
+  if (!speedSnap || now - speedSnap.at > SPEED_RECOMPUTE_MS || speedSnap.floor !== cfg.floor || speedSnap.cap !== cfg.cap) {
+    const rows = new Map<string, { factor: number; tokP50: number | null; ttftP50: number | null; slow: boolean }>();
+    let bench: number | null = null;
+    const ownToks: number[] = [];
+    for (const [, list] of speedWin) {
+      const fresh = list.filter((s) => now - s.ts <= SPEED_WINDOW_MS);
+      if (fresh.length >= SPEED_MIN_SAMPLES) {
+        const tok = p50Of(fresh.map((s) => s.tokPerSec));
+        if (tok !== null) ownToks.push(tok);
+      }
+    }
+    if (ownToks.length >= 1) bench = p50Of(ownToks);
+    for (const [routeId, list] of speedWin) {
+      const fresh = list.filter((s) => now - s.ts <= SPEED_WINDOW_MS);
+      const ema = speedEma.get(routeId);
+      const last = lastSampleAt.get(routeId) ?? now;
+      // F3.4：factor 读取值 = EMA 存值按 1h 半衰期向 1 衰减（无硬跳变）
+      const factor = ema === undefined ? 1 : 1 + (ema - 1) * Math.pow(0.5, (now - last) / SPEED_HALF_LIFE_MS);
+      rows.set(routeId, { factor, tokP50: p50Of(fresh.map((s) => s.tokPerSec)), ttftP50: p50Of(fresh.map((s) => s.ttftMs)), slow: ttftSlow.get(routeId) || false });
+    }
+    speedSnap = { at: now, floor: cfg.floor, cap: cfg.cap, bench, rows };
+  }
+  return speedSnap;
+}
+
+/** 权重层速度因子（R4 统一公式第三因子）：冷启动/关闸 → 1；有样本 → clamp(own/bench, floor, cap) 的 EMA 平滑值按半衰期衰减 */
+export function speedFactorOf(routeId: string, cfg: SpeedConfig): number {
+  if (!routeId || !cfg.enabled) return 1;
+  const snap = speedSnapshotRead(cfg, clockNow());
+  return snap.rows.get(routeId)?.factor ?? 1;
+}
+
+/** 粘性慢降级判定（SPD-3）：3× 降粘（绕行不删绑定不续期）、<2× 才回粘——迟滞带内维持原状 */
+export function ttftSlowDemoted(routeId: string, cfg: SpeedConfig): boolean {
+  if (!routeId || !cfg.enabled) return false;
+  const snap = speedSnapshotRead(cfg, clockNow());
+  return snap.rows.get(routeId)?.slow || false;
+}
+
+/** 管理台观测（R8）：speedBench + 各候选 factor/p50/slow */
+export function speedSnapshotForAdmin(cfg: SpeedConfig) {
+  const snap = speedSnapshotRead(cfg, clockNow());
+  return { bench: snap.bench, rows: [...snap.rows.entries()].map(([routeId, r]) => ({ routeId, ...r })) };
+}
+
+/** 单测注 sample（与生产同路径：speedNote 内联事件侧更新） */
+export function speedNoteForTest(routeId: string, tokPerSec: number, ttftMs: number, cfg: SpeedConfig) {
+  speedNote(routeId, tokPerSec, ttftMs, cfg);
 }

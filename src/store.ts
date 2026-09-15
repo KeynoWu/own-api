@@ -41,6 +41,7 @@ function defaultSettings(): Settings {
     autoMaxChainSeconds: n(envAny(['OWN_API_AUTO_CHAIN_SECONDS', 'LLM_AUTO_CHAIN_SECONDS']), 300),
     autoSaturation: { enabled: true, baseSec: 60, maxSec: 1800 },
     autoVision: { enabled: true, heuristics: true },
+    autoSpeedFactor: { enabled: true, floor: 0.5, cap: 2.0 },
   };
 }
 
@@ -118,6 +119,24 @@ export function sanitizeSettings(patch: any, current: Settings): { value: Partia
         enabled: nv.enabled === undefined ? cur.enabled : nv.enabled === true,
         heuristics: nv.heuristics === undefined ? cur.heuristics : nv.heuristics === true,
       };
+    } else if (k === 'autoSpeedFactor') {
+      if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+        rejected.push('autoSpeedFactor：需为 { enabled, floor, cap } 对象');
+        continue;
+      }
+      const cur = current.autoSpeedFactor || { enabled: true, floor: 0.5, cap: 2.0 };
+      const nv = v as Record<string, unknown>;
+      const nb = (x: unknown, d: number, lo: number, hi: number) => {
+        const x2 = Number(x);
+        return Number.isFinite(x2) ? Math.min(hi, Math.max(lo, x2)) : d;
+      };
+      const floor = nb(nv.floor, cur.floor, 0.1, 1);
+      const cap = nb(nv.cap, cur.cap, 1, 10);
+      if (floor > cap) {
+        rejected.push('autoSpeedFactor.floor：不能大于 cap');
+        continue;
+      }
+      out.autoSpeedFactor = { enabled: nv.enabled === undefined ? cur.enabled : nv.enabled === true, floor, cap };
     } else if (k in NUM_BOUNDS) {
       const x = Number(v);
       const bound = NUM_BOUNDS[k];

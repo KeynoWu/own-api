@@ -525,17 +525,25 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       }
       if (!o.channels.length) t.append(el('tr', {}, el('td', { class: 'muted' }, '还没有渠道，先去「渠道与号池」添加一个上游。')));
       box.append(t);
-      // 饱和候选观测（R8/P1）：自动路由正在对该候选走回退退避；剩余秒数倒计、档位、一键清
+      // 信号观测（R8/P1+P2 F4.1）：饱和候选（回退退避中）+ 慢候选（速度因子偏软）；剩余秒数倒计、一键清
       const sat = (ah && ah.saturation) || [];
-      if (sat.length) {
+      const slowRows = ((ah && ah.windows) || []).filter((w) => w.ttftSlow || (w.speedFactor != null && w.speedFactor < 0.8));
+      if (sat.length || slowRows.length) {
         const rname = new Map(((allRoutes && allRoutes.routes) || allRoutes || []).map((r) => [r.id, r.publicName || r.name || r.id]));
         box.append(el('div', { class: 'card', style: 'padding:10px 12px;margin-top:12px' },
           el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' },
-            el('h2', { style: 'margin:0' }, '饱和候选（自动路由回退中）'),
+            el('h2', { style: 'margin:0' }, '自动路由信号'),
             el('button', { class: 'btn sm', onclick: async () => { await api('/api/auto-health/saturation/clear', { method: 'POST' }); toast('已清除全部饱和态'); go('overview'); } }, '清除饱和')),
-          el('table', {}, sat.map((sn) => el('tr', {},
-            el('td', {}, rname.get(sn.routeId) || sn.routeId),
-            el('td', { class: 'muted' }, `剩余 ~${sn.leftSec}s（第 ${sn.n} 档退避）`))))));
+          el('table', {},
+            sat.map((sn) => el('tr', {},
+              el('td', {}, rname.get(sn.routeId) || sn.routeId),
+              el('td', {}, el('span', { class: 'pill warn' }, '饱和')),
+              el('td', { class: 'muted' }, `剩余 ~${sn.leftSec}s（第 ${sn.n} 档退避）`))),
+            slowRows.map((w) => el('tr', {},
+              el('td', {}, rname.get(w.routeId) || w.routeId),
+              el('td', {}, el('span', { class: 'pill' + (w.ttftSlow ? ' warn' : '') }, w.ttftSlow ? 'TTFT 慢降级' : '慢 ×' + (Math.round(w.speedFactor * 100) / 100)),
+                w.speedFactor != null ? el('span', { class: 'muted', style: 'margin-left:6px' }, '因子 ' + (Math.round(w.speedFactor * 100) / 100)) : null),
+              el('td', { class: 'muted' }, (w.ttftP50 != null ? `TTFT p50 ${Math.round(w.ttftP50)}ms · ` : '') + (w.tokP50 != null ? `吞吐 p50 ${Math.round(w.tokP50)} tok/s` : '观测样本不足')))))));
       }
     }
     if (ovSt.refresh > 0 && myGen === viewGen) { clearInterval(timer); timer = setInterval(() => go('overview'), ovSt.refresh * 1000); } // F1
@@ -812,6 +820,8 @@ views.models = async () => {
           el('span', { class: 'mono' + (c.dangling ? ' err-text' : '') }, (c.name || c.routeId) + (c.dangling ? '（悬空）' : '')),
           el('span', { class: 'muted' }, ' ×' + c.weight + ' '),
           c.weight === 0 ? el('span', { class: 'pill' }, '禁用') : c.dangling ? null : hPill(c.health ?? 1),
+          c.satLeftSec ? el('span', { class: 'pill warn', title: '饱和态：自动路由正在对该候选回退退避' }, '饱和 ' + c.satLeftSec + 's') : null,
+          c.ttftSlow ? el('span', { class: 'pill warn', title: 'TTFT 慢降级：≥3× 自身基线，粘性已降级' }, 'TTFT 慢') : (!c.ttftSlow && c.speedFactor != null && c.speedFactor < 0.8 ? el('span', { class: 'pill', title: '速度因子：decode 吞吐相对基准偏慢，权重已软降' }, '慢 ×' + (Math.round(c.speedFactor * 100) / 100)) : null),
           c.routeEnabled === false ? el('span', { class: 'pill' }, '路由停用') : null,
           c.channelEnabled === false ? el('span', { class: 'pill err-text' }, '渠道停用') : null,
         )) : [el('span', { class: 'muted' }, '（无候选）')]));

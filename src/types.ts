@@ -161,7 +161,7 @@ export interface ChainAttempt {
   /** 决策快照（F5.2/G19）之 pick 层：本跳的挑选依据——sticky 命中 / 首跳加权随机 / 失败续链降序 */
   pickBasis?: 'sticky' | 'weighted' | 'chain';
   /** 决策快照（F5.2/G19）之 survivors 层：pick 当刻全部幸存候选的有效权重（与 CHN-1 断言同源） */
-  pickSnapshot?: { routeId: string; name: string; weight: number; health: number; ew: number }[];
+  pickSnapshot?: { routeId: string; name: string; weight: number; health: number; ew: number; factor?: number }[];
 }
 
 export interface AutoCandidate {
@@ -211,6 +211,8 @@ export interface Settings {
   autoSaturation: { enabled: boolean; baseSec: number; maxSec: number };
   /** 视觉三态开关（§6/AR-6）：enabled=过滤+学习闭环总闸；heuristics=导入时家族先验初值 */
   autoVision: { enabled: boolean; heuristics: boolean };
+  /** 速度因子开关与钳制（§6/AR-5）：factor=clamp(own/bench, floor, cap) 的 EMA 平滑值 */
+  autoSpeedFactor: { enabled: boolean; floor: number; cap: number };
   /** 未知模型时是否透传给默认兜底渠道 */
   fallbackChannelId?: string;
 }

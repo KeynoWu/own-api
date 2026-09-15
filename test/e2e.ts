@@ -893,6 +893,36 @@ await patchModel(mN11R.id, { upstreamModel: 'mock-gpt-5' });
 await autoReq('auto_n11');
 check('N11：命中失败后成功候选不得覆写——绑定回到 n11（覆写回归必红）', (await getLogs('auto_n11'))[0]?.routedTo === 'auto-m-n11', String((await getLogs('auto_n11'))[0]?.routedTo));
 
+// —— SPD-3 集成钉（P2 §3/G16/F3.2：粘性慢降级绕行——绑定保留、不续期；F5.2 pickSnapshot.factor 观测）——
+await resetAutoRT();
+const mSpdM = (await mkModel({ publicName: 'spd-m', channelId: chAuto.id, upstreamModel: 'mock-ttft0' })).body; // F5.1 fixture：ttft<N> 首包延迟 N ms
+const aSpd = await mkAuto({ publicName: 'auto_spd', candidates: [{ routeId: mSpdM.id, weight: 10000 }, { routeId: mGpt2R.id, weight: 1 }], stickyTtlMs: 60000 });
+for (let i = 0; i < 4; i++) await autoReq('auto_spd', { stream: true }); // 快基线样本 ×4 + 建粘
+const stkProbeSpd = async () => ((await api('/api/auto-health?route=auto_spd', { headers: ADMIN })).body.stickyList || []);
+check('SPD-3 前置：粘性已建立在 spd-m', (await stkProbeSpd()).some((x: any) => x.routeId === mSpdM.id), JSON.stringify(await stkProbeSpd()));
+const ahSpd0 = await autoHealth();
+check('SPD-2/R8 观测面：windows 行带 speedFactor、全局带 speedBench', typeof (((ahSpd0.windows || []).find((w: any) => w.routeId === mSpdM.id) || {}).speedFactor) === 'number' && ahSpd0.speedBench != null, JSON.stringify(ahSpd0.windows));
+await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft400' }); // 切慢 TTFT（同模型换上游，SAT-5 模式）
+for (let i = 0; i < 6; i++) await autoReq('auto_spd', { stream: true }); // 慢样本 ×6（400ms）→ recent-8 p50 ≥3× 历史基线 → 降粘
+const ahSpd = await autoHealth();
+const spdRow = (ahSpd.windows || []).find((w: any) => w.routeId === mSpdM.id);
+check('SPD-3 观测面：/auto-health ttftSlow 置位（≥3× 历史基线）', spdRow && spdRow.ttftSlow === true, JSON.stringify(spdRow));
+const lSpd = (await getLogs('auto_spd'))[0];
+const snapSpd = lSpd?.chainAttempts?.[0]?.pickSnapshot || [];
+check('F5.2 pickSnapshot 带 factor（速度因子进观测快照）', snapSpd.length > 0 && snapSpd.every((x: any) => typeof x.factor === 'number'), JSON.stringify(snapSpd).slice(0, 160));
+const rSpdByp = await autoReq('auto_spd', { stream: true });
+const lSpdByp = (await getLogs('auto_spd'))[0];
+check('SPD-3 慢降级 → 粘性绕行：pickBasis=weighted（非 sticky 命中）', rSpdByp.status === 200 && lSpdByp?.chainAttempts?.[0]?.pickBasis === 'weighted', JSON.stringify({ basis: lSpdByp?.chainAttempts?.[0]?.pickBasis }));
+check('SPD-3 绑定保留不删除（F3.2：绕行不清绑定）', (await stkProbeSpd()).some((x: any) => x.routeId === mSpdM.id), JSON.stringify(await stkProbeSpd()));
+const ahSpd2 = await autoHealth();
+// 绕行请求自身也是慢样本 → 基线 EMA 逐样本吸收后 <2× 迟滞自动翻回（F3.2 回粘语义：瞬态降粘 + 权重层接管持续慢）
+check('F3.2 迟滞自动回粘：基线吸收慢态后 ttftSlow 自动翻回', ((ahSpd2.windows || []).find((w: any) => w.routeId === mSpdM.id) || {}).ttftSlow === false, JSON.stringify(ahSpd2.windows));
+await autoReq('auto_spd', { stream: true }); // TTFT 关已翻回 + 健康关通过 → 重粘双过（STK-2/F3.2）
+const lStk2 = (await getLogs('auto_spd'))[0];
+check('STK-2 重粘双过（健康关且 TTFT 关）→ 恢复粘性命中续期', lStk2?.chainAttempts?.[0]?.pickBasis === 'sticky', JSON.stringify({ basis: lStk2?.chainAttempts?.[0]?.pickBasis }));
+await patchModel(mSpdM.id, { upstreamModel: 'mock-ttft0' });
+await api('/api/routes/' + aSpd.body.id, { method: 'DELETE', headers: ADMIN });
+
 // —— L1 前置顺序（二轮 F10：只测"403 存在"不够，要测"403 先于探测面"）——
 const rEmbNo = await api('/v1/embeddings', { method: 'POST', headers: { authorization: `Bearer ${kNoAuto.key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'model_auto', input: 'x' }) });
 check('L1 前置：未授权 key × embeddings 也得 403（存在性探测已闭，非 400）', rEmbNo.status === 403, String(rEmbNo.status));

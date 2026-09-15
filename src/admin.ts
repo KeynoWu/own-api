@@ -9,7 +9,7 @@ import { buildUrl, extractUpstreamError } from './upstream.ts';
 import { buildSpeedStats, buildStats, quotaSnapshot } from './usage.ts';
 import { buildBundle, buildImportPlan, applyPlan } from './config-bundle.ts';
 import { APP_VERSION } from './version.gen.ts';
-import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
+import { clearHealth, clearHealthFor, clearSaturation, clearSaturationForRoute, clearSpeed, clearSticky, clearStickyForRoute, healthSnapshot, saturationSnapshot, speedSnapshotForAdmin, stickyCount, stickyCountForRoute, stickyListForRoute } from './auto.ts';
 import { clearVisionLearning } from './vision.ts';
 import type { Channel } from './types.ts';
 
@@ -354,9 +354,12 @@ export function createAdmin(): Hono {
   });
 
   // ---------- routes（v3 统一路由表：type: 'single' | 'auto'，模块合并） ----------
-  const enrichRoute = (r: any, snap: any[]): any =>
+  const enrichRoute = (r: any, snap: any[], speedRows: Map<string, any>, satRows: Map<string, any>): any =>
     r.type === 'single'
-      ? { ...r, channelName: store.getChannel(r.channelId)?.name || '(渠道已删除)', channelProtocol: store.getChannel(r.channelId)?.protocol }
+      ? { ...r,
+          channelName: store.getChannel(r.channelId)?.name || '(渠道已删除)', channelProtocol: store.getChannel(r.channelId)?.protocol,
+          speedFactor: speedRows.get(r.id)?.factor, ttftP50: speedRows.get(r.id)?.ttftP50, tokP50: speedRows.get(r.id)?.tokP50,
+          ttftSlow: speedRows.get(r.id)?.slow || false, satLeftSec: satRows.get(r.id)?.leftSec }
       : {
           ...r,
           candidates: r.candidates.map((cd: any) => {
@@ -372,6 +375,7 @@ export function createAdmin(): Hono {
               dangling: !m,
               health: snap.find((h) => h.routeId === cd.routeId)?.health ?? 1,
               healthDetail: snap.find((h) => h.routeId === cd.routeId),
+              speedFactor: speedRows.get(cd.routeId)?.factor, ttftSlow: speedRows.get(cd.routeId)?.slow || false, satLeftSec: satRows.get(cd.routeId)?.leftSec,
             };
           }),
         };
@@ -379,8 +383,11 @@ export function createAdmin(): Hono {
     const type = c.req.query('type');
     if (type !== undefined && type !== 'single' && type !== 'auto') return c.json({ error: "type 需为 'single' 或 'auto'" }, 400);
     const snap = healthSnapshot();
+    const speed = speedSnapshotForAdmin(store.getSettings().autoSpeedFactor || { enabled: true, floor: 0.5, cap: 2.0 });
+    const speedRows = new Map(speed.rows.map((x) => [x.routeId, x]));
+    const satRows = new Map(saturationSnapshot().map((x) => [x.routeId, x]));
     const all = store.listRoutes();
-    return c.json((type ? all.filter((r) => r.type === type) : all).map((r) => enrichRoute(r, snap)));
+    return c.json((type ? all.filter((r) => r.type === type) : all).map((r) => enrichRoute(r, snap, speedRows, satRows)));
   });
 
   app.post('/routes', async (c) => {
@@ -654,18 +661,27 @@ export function createAdmin(): Hono {
     });
     // 饱和观测（R8）：行内并 saturatedUntil/leftSec/n；saturation 数组单列全量
     const satMap = new Map(saturationSnapshot().map((s) => [s.routeId, s]));
+    const speed = speedSnapshotForAdmin(store.getSettings().autoSpeedFactor || { enabled: true, floor: 0.5, cap: 2.0 });
+    const speedMap = new Map(speed.rows.map((x) => [x.routeId, x]));
     const windows = snap.map((h) => {
-      const s = satMap.get(h.routeId);
-      return s ? { ...h, saturatedUntil: s.until, satLeftSec: s.leftSec, satN: s.n } : h;
+      const sn = satMap.get(h.routeId);
+      const sp = speedMap.get(h.routeId);
+      return {
+        ...h,
+        ...(sn ? { saturatedUntil: sn.until, satLeftSec: sn.leftSec, satN: sn.n } : {}),
+        ...(sp ? { speedFactor: Math.round(sp.factor * 1e4) / 1e4, tokP50: sp.tokP50, ttftP50: sp.ttftP50, ttftSlow: sp.slow } : {}),
+      };
     });
+    const speedBench = speed.bench;
     const routeQ = c.req.query('route');
-    if (routeQ) return c.json({ windows, stickyEntries: stickyCount(), stickyForRoute: stickyCountForRoute(String(routeQ)), stickyList: stickyListForRoute(String(routeQ)), saturation: [...satMap.values()] });
-    return c.json({ windows, stickyEntries: stickyCount(), saturation: [...satMap.values()] });
+    if (routeQ) return c.json({ windows, stickyEntries: stickyCount(), stickyForRoute: stickyCountForRoute(String(routeQ)), stickyList: stickyListForRoute(String(routeQ)), saturation: [...satMap.values()], speedBench });
+    return c.json({ windows, stickyEntries: stickyCount(), saturation: [...satMap.values()], speedBench });
   });
   app.post('/auto-health/reset', (c) => {
     clearHealth();
     clearSticky();
-    clearSaturation(); // 四态复位（§2 复位口：health/sticky/saturation/speed——speed 于 P2 接入）
+    clearSaturation();
+    clearSpeed(); // 五态复位（R9 复位口：health/sticky/saturation/speed；视觉学习记忆走 vision/reset）
     return c.json({ ok: true });
   });
   /** AR-6：视觉标注一键重置回 unknown（解锁 + 清学习记忆；F6.3 的反门） */

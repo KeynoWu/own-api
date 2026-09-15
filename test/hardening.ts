@@ -1344,10 +1344,63 @@ section('15. auto.ts 单元域（时钟注入下直测）');
   const anth = { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png1x1.slice('data:image/png;base64,'.length) } }] }] };
   check('R7 anthropic base64 图同口径', estimateInputTokens(anth) === 1, String(estimateInputTokens(anth)));
   vis.setVisionClockForTest(() => Date.now());
+
+  // ---------- 15b. 速度因子状态机（SPD 钉：时钟注入下直测 §3） ----------
+  auto.clearSpeed();
+  const speedCfg = { enabled: true, floor: 0.5, cap: 2.0 };
+  // SPD-2 冷启动：样本 <3 → factor=1；单候选有样本 → bench=自身 → factor=1（不因冷启动同伴被压，G17）
+  auto.speedNoteForTest('u-spdA', 100, 500, speedCfg);
+  check('SPD-2 冷启动（1 样本）factor=1', auto.speedFactorOf('u-spdA', speedCfg) === 1, String(auto.speedFactorOf('u-spdA', speedCfg)));
+  auto.speedNoteForTest('u-spdA', 100, 500, speedCfg);
+  check('SPD-2 冷启动（2 样本）仍 factor=1', auto.speedFactorOf('u-spdA', speedCfg) === 1, String(auto.speedFactorOf('u-spdA', speedCfg)));
+  auto.speedNoteForTest('u-spdA', 100, 500, speedCfg);
+  check('SPD-5 单候选达标（3 样本）→ bench=自身 p50 → factor=1', auto.speedFactorOf('u-spdA', speedCfg) === 1, String(auto.speedFactorOf('u-spdA', speedCfg)));
+  // SPD-1 clamp 两端：快候选 200 tok/s（own/bench=2.0 → 顶格 cap）、慢候选 40 tok/s（0.4 → 落 floor 0.5）
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  auto.speedNoteForTest('u-spdFast', 200, 300, speedCfg);
+  const fFast = auto.speedFactorOf('u-spdFast', speedCfg);
+  auto.speedNoteForTest('u-spdSlow', 40, 900, speedCfg);
+  auto.speedNoteForTest('u-spdSlow', 40, 900, speedCfg);
+  auto.speedNoteForTest('u-spdSlow', 40, 900, speedCfg);
+  const fSlow = auto.speedFactorOf('u-spdSlow', speedCfg);
+  // bench = median(p50A=100, p50Fast=200, p50Slow=40) = 100 → raw: A=1, Fast=2→cap, Slow=0.4→floor
+  check('SPD-1 快候选 raw=2.0 顶格 cap（EMA 首样本=raw）', fFast === 2.0, String(fFast));
+  check('SPD-1 慢候选 raw=0.4 → floor 0.5', fSlow === 0.5, String(fSlow));
+  // SPD-4 衰减回 1（F3.4）：1h 半衰期——快候选 1h 后 factor 从 2 衰到 1.5，无硬跳 1
+  now += 3_600_000;
+  const fFastDecay = auto.speedFactorOf('u-spdFast', speedCfg);
+  check('SPD-4 1h 半衰期：factor 2.0 → 1.5（平滑衰减非硬重置）', Math.abs(fFastDecay - 1.5) < 1e-9, String(fFastDecay));
+  now += 3_600_000 * 4;
+  const fFastDecay2 = auto.speedFactorOf('u-spdFast', speedCfg);
+  check('SPD-4 累计 5h：2.0 → 1.03125（指数逼近 1 不越过）', Math.abs(fFastDecay2 - 1.03125) < 1e-9, String(fFastDecay2));
+  // SPD-3 粘性慢降级迟滞（G16/F3.2）：recent-8 p50 vs 自身基线 EMA，3× 降 / <2× 回
+  // 基线播种：10 个正常 TTFT=200ms 样本（recent-p50=200 → baseline EMA 收敛 200）
+  for (let i = 0; i < 10; i++) auto.speedNoteForTest('u-spdStick', 100, 200, speedCfg);
+  check('SPD-3 基线期未慢降', auto.ttftSlowDemoted('u-spdStick', speedCfg) === false, String(auto.ttftSlowDemoted('u-spdStick', speedCfg)));
+  // 6 个慢样本 TTFT=700：第 6 个起 recent-8 多数转慢 → rp=700 与「更新前基线」200 比 ≥3×600 → 降粘
+  // （基线=历史 EMA，比较先于更新——阶跃劣化才可触发；基线随后被慢样本 EMA 逐步抬走）
+  for (let i = 0; i < 6; i++) auto.speedNoteForTest('u-spdStick', 100, 700, speedCfg);
+  check('SPD-3 TTFT p50 ≥3× 历史基线 → 慢降级置位', auto.ttftSlowDemoted('u-spdStick', speedCfg) === true, String(auto.ttftSlowDemoted('u-spdStick', speedCfg)));
+  // 8 个 TTFT=100 → recent-8 p50 回落 <2× 基线 EMA → 重粘（迟滞翻回）
+  for (let i = 0; i < 8; i++) auto.speedNoteForTest('u-spdStick', 100, 100, speedCfg);
+  check('SPD-3 recent p50 回落 <2× 基线 EMA → 自动重粘（迟滞翻回）', auto.ttftSlowDemoted('u-spdStick', speedCfg) === false, String(auto.ttftSlowDemoted('u-spdStick', speedCfg)));
+  // SPD-3 样本 <3 → 视为未慢降
+  auto.clearSpeed();
+  auto.speedNoteForTest('u-spdFew', 100, 900, speedCfg);
+  auto.speedNoteForTest('u-spdFew', 100, 900, speedCfg);
+  check('SPD-3 样本 <3 视为未慢降', auto.ttftSlowDemoted('u-spdFew', speedCfg) === false, String(auto.ttftSlowDemoted('u-spdFew', speedCfg)));
+  // 关闸（enabled=false）→ factor 恒 1、慢降级恒 false（R4 第四因子可整体旁路）
+  const offCfg = { enabled: false, floor: 0.5, cap: 2.0 };
+  auto.speedNoteForTest('u-spdA', 40, 900, speedCfg);
+  check('R4 enabled=false → factor=1 旁路', auto.speedFactorOf('u-spdA', offCfg) === 1 && auto.ttftSlowDemoted('u-spdA', offCfg) === false, String(auto.speedFactorOf('u-spdA', offCfg)));
+  auto.clearSpeed();
+  vis.setVisionClockForTest(() => Date.now());
   // 时钟恢复 + 清场（置于末节，不影响此前服务器域断言）
   auto.setClockForTest(() => Date.now());
   auto.clearHealth();
   auto.clearSaturation();
+  auto.clearSpeed();
 }
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {

@@ -26,7 +26,7 @@ import {
 import { availableKeyCount, classifyFailure, parseRetryAfter, pickKey, recordFailure, recordSuccess } from './pool.ts';
 import { callUpstream, extractUpstreamError, sniffStreamBody, type Endpoint } from './upstream.ts';
 import { admitDailyQuota, admitRequest, computeCost, recordQuota, releaseQuota } from './usage.ts';
-import { SAT_PROBE_MS, satConfigOf, satLeftMs, STICKY_KEEP, STICKY_RESTICK, deleteSticky, getSticky, health as healthOf, pickWeighted, recordAttempt, satNote429, satNoteSuccess, setSticky, touchSticky, triggerSaturation } from './auto.ts';
+import { SAT_PROBE_MS, satConfigOf, satLeftMs, speedConfigOf, speedFactorOf, speedNote, STICKY_KEEP, STICKY_RESTICK, deleteSticky, getSticky, health as healthOf, pickWeighted, recordAttempt, satNote429, satNoteSuccess, setSticky, touchSticky, triggerSaturation, ttftSlowDemoted } from './auto.ts';
 import { VISION_UNKNOWN_BIAS, VISION_UNSUPPORTED_RE, chatHasImages, imageDataTokens, imageFingerprints, markVisionLearned, visionLearnReady } from './vision.ts';
 import type { AutoCandidate, AutoRoute, ChainAttempt, Channel, ModelRoute, Protocol, RequestLog, Settings, VirtualKey } from './types.ts';
 
@@ -251,6 +251,8 @@ interface AttemptInput {
   /** 本次 attempt 的响应头超时（auto 链已由预算 min 过，N10-a） */
   headTimeoutMs: number;
   idleTimeoutMs: number;
+  /** 速度配置（AR-5 采样用；direct 直连轮不采——auto 候选样本才进权重层状态） */
+  speedCfg?: { enabled: boolean; floor: number; cap: number };
   /** auto 链预算的绝对截止（Date.now() 基准）。key 级重试的每一次 callUpstream 前按剩余预算重算头/空闲超时（审查 L4：让预算成硬上限） */
   budgetDeadline?: number;
   maxAttempts: number;
@@ -283,6 +285,7 @@ type AttemptOutcome =
  * 提交点=交出 Response（stage A/B 分界，§8-1）；此后的失败只发 error 帧。
  */
 async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
+  const attemptT0 = Date.now(); // G14：per-attempt 计时基准（禁止链级污染值进速度/粘性状态）
   const { c, log, settings, client, wire, op, chatBody, wantsStream, route, channel, upstreamModel, protocol, aliasName } = a;
   Object.assign(log, { publicName: a.logPublicName, channelId: channel.id, channelName: channel.name });
 
@@ -464,6 +467,13 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
         return;
       }
       if (routeId) a.onSample(routeId, !err); // stream 失败（提交后）也计候选失败样本（F4 两分法）
+      if (!err && route && firstContentAt) {
+        // AR-5 速度采样（G14/G15）：per-attempt 口径——decode 窗 = 流末−首包（不含 prefill/前序候选）；
+        // completionTokens≥16 才入权重层（废掉 max_tokens=1 + 巨 prefill 的吞吐毒样本）；
+        // TTFT = 首包 − 本 attempt 起点（attemptT0），非流式不采（F3.3 仅观测，落日志）
+        const ct = usage.completionTokens || 0;
+        if (ct >= 16 && a.speedCfg) speedNote(route.id, ct / Math.max(0.001, (Date.now() - firstContentAt) / 1000), firstContentAt - attemptT0, a.speedCfg);
+      }
       a.finalize(
         err
           ? {
@@ -874,6 +884,7 @@ async function runAuto(ctx: AutoRunCtx) {
   // ② 饱和过滤（AR-4）：饱和候选保留在 evals（transient=true/reason=saturated——粘性绕行分支读它判定"不删绑定"），
   // 仅移出存活集。探测例外（SAT-3 后半）：剩余 <5s 且链预算装得下最坏一跳 → 放回（成败照常，成功即清零）
   const satCfg = satConfigOf(settings.autoSaturation);
+  const speedCfg = speedConfigOf(settings.autoSpeedFactor);
   const satLeft = new Map<string, number>(); // routeId → 剩余 ms（仅未放回探测的）
   if (satCfg.enabled) {
     // G1 口径：软排除（含「key 全冷却」瞬态）不掩盖饱和——硬排除才不参与饱和回退。
@@ -971,7 +982,11 @@ async function runAuto(ctx: AutoRunCtx) {
     const entry = getSticky(vkey.id, autoName);
     if (entry) {
       const target = survivors.find((e) => e.cand.routeId === entry.routeId);
-      if (target && target.health >= STICKY_KEEP) {
+      if (target && target.health >= STICKY_KEEP && ttftSlowDemoted(target.cand.routeId, speedCfg)) {
+        // SPD-3 粘性慢降级（G16/F3.2）：TTFT ≥3× 自身基线 → 本轮绕行：绑定保留（不删）、不续期；
+        // <2× 时本判定自动翻回 → 下一轮恢复正常命中续期（迟滞带内维持绕行）
+        stickyBypassed = true;
+      } else if (target && target.health >= STICKY_KEEP) {
         firstPick = target;
         touchSticky(vkey.id, autoName, autoRoute.stickyTtlMs); // 命中续期（滑动 TTL）
       } else if (!target) {
@@ -1013,11 +1028,12 @@ async function runAuto(ctx: AutoRunCtx) {
   let overflowMaxWin = 0;     // 超窗候选中最大的 contextWindow
 
   // 有效权重（v2.3 §4）：weight × health；P1.5/P2 接入 visionBias/speedFactor 后在此叠加
-  // R4 统一权重（§5）：weight × health × visionBias（speedFactor 于 P2 并入）。
-  // 带图请求 unknown 候选 bias=0.25 后置——非排除，尽量不付"第一次失败"的学费（VIS-6）
+  // R4 统一权重（§5）：weight × health × visionBias × speedFactor。
+  // 带图请求 unknown 候选 bias=0.25 后置——非排除，尽量不付"第一次失败"的学费（VIS-6）；
+  // 速度因子软降权（AR-5）：慢候选流量自然漂移，不剔除
   const hasImgs = chatHasImages(chatBody);
   const visionBiasOf = (e: SurvivingEval) => (hasImgs && e.route.supportsVision !== true ? VISION_UNKNOWN_BIAS : 1);
-  const ewOf = (e: SurvivingEval) => e.cand.weight * e.health * visionBiasOf(e);
+  const ewOf = (e: SurvivingEval) => e.cand.weight * e.health * visionBiasOf(e) * speedFactorOf(e.cand.routeId, speedCfg);
   // 首跳：加权随机（分流语义——摊开流量，避免单候选过载）
   const chooseFirst = (): SurvivingEval | undefined => {
     const rest = survivors.filter((e) => !tried.has(e.cand.routeId));
@@ -1048,6 +1064,7 @@ async function runAuto(ctx: AutoRunCtx) {
     const pickSnapshot = survivors.filter((e) => !tried.has(e.cand.routeId)).map((e) => ({
       routeId: e.cand.routeId, name: e.name, weight: e.cand.weight,
       health: Math.round(e.health * 1e4) / 1e4, ew: Math.round(ewOf(e) * 1e4) / 1e4,
+      factor: Math.round(speedFactorOf(e.cand.routeId, speedCfg) * 1e4) / 1e4,
     }));
     const pickBasis: 'sticky' | 'weighted' | 'chain' = chainAttempts.length > 0 ? 'chain' : (pick === firstPick ? 'sticky' : 'weighted');
     tried.add(pick.cand.routeId);
@@ -1069,6 +1086,7 @@ async function runAuto(ctx: AutoRunCtx) {
       // 响应体 model 恒为 auto 名（§5.2，aliasDiffers 对 auto 恒真）；日志记候选外名 + routedTo
       aliasName: autoName, logPublicName: cur.name, aliasDiffers: true, fallback: false,
       retries,
+      speedCfg, // AR-5：速度采样配置（attemptRoute 内流末采样用）
       headTimeoutMs,
       idleTimeoutMs: ctx.idleTimeoutMs, // S4/L4：头/空闲超时由 attemptRoute 每次按剩余预算重算（budgetDeadline）
       budgetDeadline: chainT0 + maxChainMs,
@@ -1084,7 +1102,8 @@ async function runAuto(ctx: AutoRunCtx) {
         log.routedTo = cur.name;
         if (firstPick && cur.cand.routeId === firstPick.cand.routeId) return; // 命中即已续期
         if (stickyBypassed) return; // 绕行轮不得覆写原绑定（C3）
-        if (autoRoute.stickyTtlMs > 0 && healthOf(cur.cand.routeId) >= STICKY_RESTICK) setSticky(vkey.id, autoName, cur.cand.routeId, autoRoute.stickyTtlMs);
+        // F3.2/STK-2 重粘双过：健康关（≥0.6）且 TTFT 关（未处于 ≥3× 慢降级；迟滞带 <2× 由 ttftSlowDemoted 翻回）
+        if (autoRoute.stickyTtlMs > 0 && healthOf(cur.cand.routeId) >= STICKY_RESTICK && !ttftSlowDemoted(cur.cand.routeId, speedCfg)) setSticky(vkey.id, autoName, cur.cand.routeId, autoRoute.stickyTtlMs);
       },
     });
     } catch (err) {
