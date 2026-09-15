@@ -100,6 +100,18 @@ jobs:
         run: echo "::error::release 只允许 v* tag 推送触发；dispatch 仅可用于验证 build" && exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: artifacts, merge-multiple: 'true' }
+      # v0.1.10 事故修复：upload-artifact v4 按匹配目录保留 dmg//nsis/ 子层，merge 后产物在
+      # artifacts/dmg、artifacts/nsis 下——根层平铺 glob 与别名步骤全部零匹配，且别名步骤的
+      # case 恰好吞掉 cp 报错造成静默假象。平铺 + 硬校验一步到位。
+      - name: 产物平铺归一
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in artifacts/dmg/*.dmg artifacts/nsis/*.exe; do mv "$f" artifacts/; done
+          N=$(find artifacts -maxdepth 1 \( -name '*.dmg' -o -name '*.exe' \) | wc -l)
+          echo "平铺后安装包数: $N"
+          [ "$N" -ge 3 ] || { echo "::error::平铺后安装包少于 3——artifact 下载/结构不符合预期"; exit 1; }
+          find artifacts -maxdepth 1 -type f | sort
       - name: 资产数量硬校验（三平台缺一不可）
         run: test "$(find artifacts -name '*.dmg' -o -name '*.exe' | wc -l)" -ge 3
       - name: 校验和（必须在 checkout 之前——checkout 会清掉未跟踪的 artifacts/，v0.1.7/v0.1.8 两次事故同根因）
@@ -110,6 +122,7 @@ jobs:
         working-directory: artifacts
         run: |
           set -e
+          shopt -s nullglob
           for f in *.dmg *.exe; do
             case "$f" in
               *aarch64.dmg)  cp "$f" own-api-macos-arm64.dmg ;;
@@ -128,8 +141,8 @@ jobs:
           printf '\n完整更新史：%s/blob/%s/CHANGELOG.md\n' "$GITHUB_SERVER_URL" "$GITHUB_REF_NAME" >> release-body.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          # softprops 的 glob 里 `**` 不匹配根层文件——v0.1.9 曾因此零匹配红掉；
-          # 产物全部平铺在 artifacts/ 根（merge-multiple + 别名步骤均 cd 进去），平铺 glob 即可
+          # 平铺 glob（`**` 不匹配根层文件）；前提由「产物平铺归一」步骤保证——v0.1.9/v0.1.10 两次
+          # 零匹配事故同根因：merge 下载后产物在 dmg//nsis/ 子层，未平铺
           files: |
             artifacts/*.dmg
             artifacts/*.exe
