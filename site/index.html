@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>own-api · 多个大模型，一个管理台管住</title>
-<meta name="description" content="own-api：跑在你本机的大模型管理台 + 统一网关。公司发的每个模型集中接入、可视化管理：改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型；本机装了的 agent（ZCode / oh-my-pi / Claude Code / dsh）一键写入统一入口。macOS / Windows 桌面版，数据全在本地。">
+<meta name="description" content="own-api：跑在你本机的大模型管理台 + 统一网关。公司发的模型、自己买的各厂商渠道，集中接入、可视化管理：改 model 名就换供应商，auto 名自动绕开慢的和挂掉的模型；本机装了的 agent（ZCode / oh-my-pi / Claude Code / dsh）一键写入统一入口。macOS / Windows 桌面版，数据全在本地。">
 <meta property="og:type" content="website">
 <meta property="og:title" content="own-api · 多个大模型，一个管理台">
-<meta property="og:description" content="集中管理公司发的多个大模型：统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂；本机 agent 一键接入。本机运行，数据不出门。">
+<meta property="og:description" content="集中管理多个大模型——公司发的、各厂商买的：统一 base_url + 统一 key，model 名即路由，auto 自动路由绕开慢与挂；本机 agent 一键接入。本机运行，数据不出门。">
 <meta property="og:url" content="https://keynowu.github.io/own-api/">
 <meta name="theme-color" content="#0B1120">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230F1A2E'/%3E%3Cpath d='M32 13a19 19 0 1 0 19 19h-7a12 12 0 1 1-12-12z' fill='%23EAF1FB'/%3E%3Cpath d='M32 13a19 19 0 0 1 19 13l-8-2a12 12 0 0 0-7-6.5z' fill='%23EAF1FB'/%3E%3Ccircle cx='32' cy='32' r='6.5' fill='%2338BDF8'/%3E%3C/svg%3E">
@@ -261,7 +261,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
 <section class="hero" aria-labelledby="h1">
   <div class="wrap">
     <span class="badge"><i aria-hidden="true"></i>多模型管理台 · 本机运行 · macOS / Windows</span>
-    <h1 id="h1">公司发了 <em>N</em> 个大模型，我用 <em>1</em> 个管理台全管住。</h1>
+    <h1 id="h1">公司发的模型、自己买的 key，我用 <em>1</em> 个管理台全管住。</h1>
     <div class="hero-grid" style="margin-top:var(--sp-4)">
       <div>
       <p class="sub">每个模型一个 baseURL，谁快谁慢全凭感觉？own-api 在你本机开一个多模型管理台：
@@ -309,7 +309,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
   <div class="wrap">
     <p class="sec-tag reveal">Why own-api</p>
     <h2 id="pain-h" class="reveal">模型一多，管理就散了架</h2>
-    <p class="sec-sub reveal">公司部署了一堆模型免费给大家用——听起来很爽，管起来很痛。</p>
+    <p class="sec-sub reveal">公司发的模型免费管够，自己再买几家厂商的 key——模型一多，管起来全是痛。</p>
     <div class="pains">
       <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>模型散落，没有一处能看全</p><p class="a">这家一个 baseURL、那家一个 key，散在各个 agent 的配置里，谁接了什么全靠回忆。</p></div>
       <div class="pain reveal"><p class="q"><span class="x" aria-hidden="true">×</span>谁快谁慢，全凭感觉</p><p class="a">排队、加载、抽风。你想绕开慢模型，就得记住"今天谁状态好"这种玄学。</p></div>
@@ -329,7 +329,7 @@ footer{border-top:1px solid var(--border-soft);padding:var(--sp-6) 0;color:var(-
       <article class="feat reveal">
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
         <h3>多渠道集中管理</h3>
-        <p>每家上游（baseURL + key）一条渠道，测试连通、批量导模型、启停切换全在一张表里。一个渠道多把 key 组成号池：加权最小负载轮询，401 / 429 / 5xx 自动冷却退避、换 key 重试，到期自动回池。</p>
+        <p>公司内网、各厂商官方 API、本地推理——每家上游（baseURL + key）一条渠道，测试连通、批量导模型、启停切换全在一张表里。一个渠道多把 key 组成号池：加权最小负载轮询，401 / 429 / 5xx 自动冷却退避、换 key 重试，到期自动回池。</p>
       </article>
       <article class="feat reveal">
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h6m-6 5h10m-10 5h6"/><path d="M16 4v16l4-3m-4 3-4-3"/></svg></span>
@@ -560,8 +560,8 @@ claude
         <p class="a">应用没有坏，是 Gatekeeper 对未签名应用的隔离误报：安装包未购买 Apple 开发者签名，浏览器下载后会被打上隔离标记（quarantine）；macOS 15 起取消了「右键 → 打开」豁免，直接报「已损坏」。把应用拖进「应用程序」后，终端执行 <code>xattr -dr com.apple.quarantine /Applications/own-api.app</code> 移除标记即可正常打开。提示权限不足时，在 系统设置 → 隐私与安全性 → 完全磁盘访问 里给终端授权后重试；macOS 14 及更早仍可右键图标 →「打开」。</p>
       </details>
       <details class="reveal">
-        <summary>公司发了一堆模型、baseURL 各不相同，都能管进来吗？</summary>
-        <p class="a">能，这正是它的主职：每个渠道独立填 baseURL、协议（OpenAI 兼容 / Anthropic 原生）和自己的 key，测连通后上游模型一键导入路由表；几十个渠道也是同一张表管理。团队内还能用「配置组」把渠道与路由导出成 JSON 分发——不含任何密钥，每人自己填。</p>
+        <summary>手上模型一多（公司发的、各厂商买的），baseURL 各不相同，都能管进来吗？</summary>
+        <p class="a">能，这正是它的主职：不管 key 是公司发的还是从哪家厂商买的，每个渠道独立填 baseURL、协议（OpenAI 兼容 / Anthropic 原生）和自己的 key，测连通后上游模型一键导入路由表；几十个渠道也是同一张表管理。团队内还能用「配置组」把渠道与路由导出成 JSON 分发——不含任何密钥，每人自己填。</p>
       </details>
       <details class="reveal">
         <summary>支持哪些上游协议？Codex 新版能用吗？</summary>

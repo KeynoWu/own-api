@@ -5,7 +5,7 @@
 [![ci](https://github.com/KeynoWu/own-api/actions/workflows/ci.yml/badge.svg)](https://github.com/KeynoWu/own-api/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-本地大模型管理器 + 统一代理网关（号池）。
+本地多模型管理器 + 统一代理网关（号池）：公司发的模型、自己买的各厂商渠道，统一接入、统一路由、统一看账。
 
 一个进程同时提供 **管理台** 和 **统一代理入口**：所有 agent 只配置同一个 base_url + 同一个 key，
 把请求里的 `model` 换成哪个名字，网关就自动路由到那个模型对应的真实 `base_url` 与真实 `api_key`。
