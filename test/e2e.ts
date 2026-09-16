@@ -425,6 +425,53 @@ check('F5.2 excluded 层快照：悬空候选 hard 剔除带理由', lgDesc?.cha
 const winsAfterDesc = (await autoHealth()).windows;
 check('AR-7 续链健康落账：四个候选各恰记 1 败', allIds.every((id) => winsAfterDesc.find((w: any) => w.routeId === id)?.fail === 1), JSON.stringify(winsAfterDesc.map((w: any) => [w.name, w.fail])));
 
+// —— DR-16 首跳策略（firstHop）：random=缺省加权摇号（分流语义不变）；best=确定性 top-1（“一直用好用的”会话语义）——
+// best 只改“没有粘性时怎么选第一跳”：粘性/慢降绕行/失败续链/饱和退避全部照旧。
+// 同分断言需两候选 ew 恒等（health 1.0 × speedFactor 1）→ 用零样本新路由，避免历史样本污染等式。
+await resetAutoRT();
+const rBadPost = await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'auto', publicName: 'dr16_bad', candidates: [{ routeId: mGptR.id, weight: 1 }], firstHop: 'fastest' }) });
+check('DR-16 校验：创建时 firstHop 只收 random/best', rBadPost.status === 400, String(rBadPost.status));
+const aBest = (await mkAuto({ publicName: 'dr16_best', candidates: [
+  { routeId: mGpt2R.id, weight: 1 }, { routeId: mGptR.id, weight: 100 },
+], stickyTtlMs: 0, firstHop: 'best' })).body;
+check('DR-16 创建落库 firstHop=best', aBest?.firstHop === 'best', JSON.stringify(aBest?.firstHop));
+let bestHits = 0, bestBasis = '';
+for (let i = 0; i < 8; i++) {
+  if ((await autoReq('dr16_best')).status === 200) bestHits++;
+  bestBasis = (await getLogs('dr16_best'))[0]?.chainAttempts?.[0]?.pickBasis || '';
+}
+check('DR-16 best 首跳确定性：8/8 全落 weight-100 候选（random 模式 8 次摇中 weight-1 的概率≈7.5%，不会全中）', bestHits === 8, String(bestHits));
+check('DR-16 best 首跳 basis=best（日志溯源可区分加权随机/粘性/续链）', bestBasis === 'best', bestBasis);
+const aRand = (await mkAuto({ publicName: 'dr16_rand', candidates: [
+  { routeId: mGpt2R.id, weight: 1 }, { routeId: mGptR.id, weight: 100 },
+], stickyTtlMs: 0 })).body;
+check('DR-16 缺省 random：不传 firstHop 落库 random（存量行为不变）', aRand?.firstHop === 'random', JSON.stringify(aRand?.firstHop));
+await autoReq('dr16_rand');
+check('DR-16 random 首跳 basis=weighted（默认路径不受影响）', (await getLogs('dr16_rand'))[0]?.chainAttempts?.[0]?.pickBasis === 'weighted', JSON.stringify((await getLogs('dr16_rand'))[0]?.chainAttempts?.[0]?.pickBasis));
+// best + 失败换链：top 候选挂了照样续链抢救（best 模式下“报错就切”依旧成立）
+const chDead3 = await mkCh('DR16 Dead', 'openai', ['k-500-desc']);
+const mDead3R = (await mkModel({ publicName: 'dr16-m-dead', channelId: chDead3.id, upstreamModel: 'mock-gpt-5' })).body;
+const aBestFail = await mkAuto({ publicName: 'dr16_bestfail', candidates: [
+  { routeId: mDead3R.id, weight: 100 }, { routeId: mGpt2R.id, weight: 1 },
+], stickyTtlMs: 0, firstHop: 'best' });
+await autoReq('dr16_bestfail');
+const lgBF = (await getLogs('dr16_bestfail'))[0];
+check('DR-16 best 首跳失败 → 续链抢救 weight-1 候选 200（首跳 best / 续跳 chain）', lgBF?.status === 200 && lgBF?.chainAttempts?.length === 2 && lgBF.chainAttempts[0].pickBasis === 'best' && lgBF.chainAttempts[1].pickBasis === 'chain' && lgBF?.routedTo === 'auto-m-gpt2', JSON.stringify(lgBF?.chainAttempts?.map((x: any) => [x.name, x.pickBasis])));
+// best 同分 tie-break：权重×健康×速度全等（新候选零样本）→ routeId 字典序小者（CHN-1 同源，确定性可断言）
+const mTieA = (await mkModel({ publicName: 'dr16-m-tiea', channelId: chAuto.id, upstreamModel: 'mock-gpt-5' })).body;
+const mTieB = (await mkModel({ publicName: 'dr16-m-tieb', channelId: chAuto.id, upstreamModel: 'mock-gpt-mini' })).body;
+const aTie = await mkAuto({ publicName: 'dr16_tie', candidates: [
+  { routeId: mTieA.id, weight: 1 }, { routeId: mTieB.id, weight: 1 },
+], stickyTtlMs: 0, firstHop: 'best' });
+await autoReq('dr16_tie');
+check('DR-16 best 同分 tie-break：确定性走 routeId 字典序小者', (await getLogs('dr16_tie'))[0]?.chainAttempts?.[0]?.routeId === (mTieA.id < mTieB.id ? mTieA.id : mTieB.id), JSON.stringify((await getLogs('dr16_tie'))[0]?.chainAttempts?.[0]?.routeId));
+// PATCH 校验 + 来回切换
+const rBadPatch = await api('/api/routes/' + aBest.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ firstHop: 'fastest' }) });
+check('DR-16 PATCH：firstHop 拒绝非法值', rBadPatch.status === 400, String(rBadPatch.status));
+await api('/api/routes/' + aBest.id, { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ firstHop: 'random' }) });
+const routesNow = (await api('/api/routes', { headers: ADMIN })).body;
+check('DR-16 PATCH：切回 random 生效', routesNow.find((r: any) => r.id === aBest.id)?.firstHop === 'random');
+
 // —— AUTH-1：双 k-401 渠道单请求恰记 1 次候选级失败（key 级重试不重复计败）——
 await resetAutoRT();
 const ch401x2 = await mkCh('Auto 401x2', 'openai', ['k-401-a2', 'k-401-b2']);

@@ -716,12 +716,16 @@ class Store {
     if (error) return { error };
     const ttl = input?.stickyTtlMs === undefined ? 300_000 : Number(input.stickyTtlMs);
     if (!Number.isInteger(ttl) || ttl < 0 || ttl > 86_400_000) return { error: 'stickyTtlMs 必须是 0~86400000 的整数（0=关粘性）' };
+    // DR-16：首跳策略，缺省 random 保持存量行为
+    const firstHop = input?.firstHop === undefined ? 'random' : input.firstHop;
+    if (firstHop !== 'random' && firstHop !== 'best') return { error: "firstHop 必须是 'random' 或 'best'" };
     const auto: AutoRoute = {
       type: 'auto',
       id: newId('auto'),
       publicName,
       candidates: candidates ?? [],
       stickyTtlMs: ttl,
+      firstHop,
       enabled: input?.enabled !== false,
       createdAt: Date.now(),
       note: typeof input?.note === 'string' ? input.note : undefined,
@@ -751,6 +755,10 @@ class Store {
       const ttl = Number(patch.stickyTtlMs);
       if (!Number.isInteger(ttl) || ttl < 0 || ttl > 86_400_000) return { error: 'stickyTtlMs 必须是 0~86400000 的整数' };
       next.stickyTtlMs = ttl;
+    }
+    if (patch?.firstHop !== undefined) {
+      if (patch.firstHop !== 'random' && patch.firstHop !== 'best') return { error: "firstHop 必须是 'random' 或 'best'" };
+      next.firstHop = patch.firstHop;
     }
     if (patch?.enabled !== undefined) {
       if (typeof patch.enabled !== 'boolean') return { error: 'enabled 必须是布尔' };

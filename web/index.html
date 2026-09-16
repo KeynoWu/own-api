@@ -866,6 +866,10 @@ views.models = async () => {
       options: models.map((m) => ({ value: m.id, label: m.publicName + '（' + m.channelName + (m.enabled ? '' : ' · 已停用') + '）' }))
         .concat((a?.candidates || []).filter((c) => c.routeId && !models.some((m) => m.id === c.routeId)).map((c) => ({ value: c.routeId, label: (c.name || c.routeId) + '（路由已删除·悬空）' }))) },
     { name: 'stickyTtlMs', label: '粘性 TTL（ms，0=关）', type: 'number', value: a?.stickyTtlMs ?? 300000, hint: '同一 key + auto 名命中后滑动续期；重启网关即清空' },
+    { name: 'firstHop', label: '首跳策略（DR-16）', type: 'select', value: a?.firstHop ?? 'random', options: [
+      { value: 'random', label: '加权随机（默认）——按有效权重分流，摊开流量、候选保持温热' },
+      { value: 'best', label: '当前最强——确定性选有效权重最高者，不摇号' },
+    ], hint: 'best：新会话/粘性过期时直奔「当前最强」（weight×健康×速度，动态）。粘性、变慢绕行、报错换链语义全部不变——适合“一直用好用的，除非它出状况”' },
     { name: 'note', label: '备注', value: a?.note || '', full: true },
   ], (v) => {
     const candidates = v.candidates.filter((c) => c.routeId);
@@ -873,8 +877,9 @@ views.models = async () => {
     if (new Set(candidates.map((c) => c.routeId)).size !== candidates.length) throw new Error('候选模型不能重复');
     if (candidates.some((c) => !Number.isFinite(c.weight) || c.weight < 0)) throw new Error('权重须为 ≥0 的数字');
     if (!candidates.length) throw new Error('至少填一个候选');
-    const body = a ? { publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || '' }
-      : { type: 'auto', publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), note: v.note || '' };
+    const firstHop = v.firstHop === 'best' ? 'best' : 'random';
+    const body = a ? { publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), firstHop, note: v.note || '' }
+      : { type: 'auto', publicName: v.publicName, candidates, stickyTtlMs: v.stickyTtlMs === '' ? 300000 : Number(v.stickyTtlMs), firstHop, note: v.note || '' };
     return api(a ? '/api/routes/' + a.id : '/api/routes', { method: a ? 'PATCH' : 'POST', body: JSON.stringify(body) })
       .then((r) => { if (r && r.error) throw new Error(r.error); toast('已保存'); go('models'); });
   });
@@ -919,7 +924,7 @@ views.models = async () => {
         r.type === 'auto' && r.note ? el('div', { class: 'muted', style: 'font-size:11px' }, r.note) : null),
       dest, chn,
       el('td', { class: 'mono muted' }, r.type === 'single' ? (r.priceInput != null ? r.priceInput + ' / ' + r.priceOutput : '-') : '-'),
-      el('td', { class: 'mono muted' }, r.type === 'auto' ? (r.stickyTtlMs ? Math.round(r.stickyTtlMs / 1000) + 's' : '关') : '-'),
+      el('td', { class: 'mono muted' }, r.type === 'auto' ? (r.stickyTtlMs ? Math.round(r.stickyTtlMs / 1000) + 's' : '关') + (r.firstHop === 'best' ? ' ·最强首跳' : '') : '-'),
       el('td', {}, r.enabled ? el('span', { class: 'pill ok' }, '启用') : el('span', { class: 'pill' }, '停用')),
       el('td', {}, el('div', { class: 'row' },
         el('button', { class: 'btn sm', onclick: () => api('/api/routes/' + r.id, { method: 'PATCH', body: JSON.stringify({ enabled: !r.enabled }) }).then(() => go('models')) }, r.enabled ? '停用' : '启用'),

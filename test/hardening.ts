@@ -1102,6 +1102,9 @@ section('14. 信息暴露、usage 口径与主键完整性');
     'modelBits/⚠/⊘/rowTip 缺其一');
   check('UI 钉（DR-14）：模型统计不再按 auto 名塌桶——按真实候选（publicName）归因，未及尝试才回落 auto 名',
     html4.includes('groupAgg((l) => l.publicName || l.requestedModel)'), 'picker 被改回 requestedModel？');
+  // DR-16（首跳策略）：开关在编辑器里 + body 带上 + 列表可见标记——拆了消费端等于功能隐身
+  check('UI 钉（DR-16）：首跳策略开关在场（编辑器 select + 提交 body + 列表「最强首跳」标记三处消费）',
+    html4.includes('firstHop') && html4.includes('当前最强') && html4.includes('最强首跳'), 'firstHop 消费端缺失');
 
   // ① 选择态
   await ui.agentWizard({ id: 'vk1', name: 'default' });

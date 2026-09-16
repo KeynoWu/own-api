@@ -158,8 +158,8 @@ export interface ChainAttempt {
   error?: string;
   /** 已提交（200 已交给框架，提交后失败不可再换候选） */
   committed?: boolean;
-  /** 决策快照（F5.2/G19）之 pick 层：本跳的挑选依据——sticky 命中 / 首跳加权随机 / 失败续链降序 */
-  pickBasis?: 'sticky' | 'weighted' | 'chain';
+  /** 决策快照（F5.2/G19）之 pick 层：本跳的挑选依据——sticky 命中 / 首跳加权随机 / best 首跳确定性最强 / 失败续链降序 */
+  pickBasis?: 'sticky' | 'weighted' | 'best' | 'chain';
   /** 决策快照（F5.2/G19）之 survivors 层：pick 当刻全部幸存候选的有效权重（与 CHN-1 断言同源） */
   pickSnapshot?: { routeId: string; name: string; weight: number; health: number; ew: number; factor?: number }[];
 }
@@ -180,6 +180,8 @@ export interface AutoRoute {
   candidates: AutoCandidate[];
   /** 粘性 TTL（ms），命中续期；0 = 关粘性 */
   stickyTtlMs: number;
+  /** DR-16 首跳策略：random=加权随机（默认，分流语义）；best=确定性选有效权重当前最高者（“一直用好用的”会话语义） */
+  firstHop?: 'random' | 'best';
   enabled: boolean;
   createdAt: number;
   note?: string;

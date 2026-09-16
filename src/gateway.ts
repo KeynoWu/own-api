@@ -1041,10 +1041,14 @@ async function runAuto(ctx: AutoRunCtx) {
   const hasImgs = chatHasImages(chatBody);
   const visionBiasOf = (e: SurvivingEval) => (hasImgs && visionOn && e.route.supportsVision !== true ? VISION_UNKNOWN_BIAS : 1);
   const ewOf = (e: SurvivingEval) => e.cand.weight * e.health * visionBiasOf(e) * speedFactorOf(e.cand.routeId, speedCfg);
-  // 首跳：加权随机（分流语义——摊开流量，避免单候选过载）
+  // 首跳（DR-16）：缺省 random=加权随机（分流语义——摊开流量，避免单候选过载）；
+  // firstHop='best'=确定性选当前有效权重最高者（“一直用好用的”会话语义），同分 tie-break routeId 字典序（与 AR-7 续链同源，可断言）。
+  // best 只改变"没有粘性时怎么选第一跳"：粘性命中、慢降绕行、失败续链、饱和退避全部照旧。
   const chooseFirst = (): SurvivingEval | undefined => {
     const rest = survivors.filter((e) => !tried.has(e.cand.routeId));
     if (!rest.length) return undefined;
+    if (autoRoute.firstHop === 'best')
+      return [...rest].sort((x, y) => (ewOf(y) - ewOf(x)) || (x.cand.routeId < y.cand.routeId ? -1 : x.cand.routeId > y.cand.routeId ? 1 : 0))[0];
     return pickWeighted(rest, ewOf);
   };
   // 失败续链（AR-7）：确定性降序直奔剩余里最稳的（抢救语义）；同分 tie-break routeId 字典序（CHN-1 可断言）。
@@ -1073,7 +1077,7 @@ async function runAuto(ctx: AutoRunCtx) {
       health: Math.round(e.health * 1e4) / 1e4, ew: Math.round(ewOf(e) * 1e4) / 1e4,
       factor: Math.round(speedFactorOf(e.cand.routeId, speedCfg) * 1e4) / 1e4,
     }));
-    const pickBasis: 'sticky' | 'weighted' | 'chain' = chainAttempts.length > 0 ? 'chain' : (pick === firstPick ? 'sticky' : 'weighted');
+    const pickBasis: 'sticky' | 'weighted' | 'best' | 'chain' = chainAttempts.length > 0 ? 'chain' : pick === firstPick ? 'sticky' : autoRoute.firstHop === 'best' ? 'best' : 'weighted';
     tried.add(pick.cand.routeId);
     const cur = pick;
     const aT0 = Date.now();
