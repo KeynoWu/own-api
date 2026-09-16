@@ -1095,6 +1095,14 @@ section('14. 信息暴露、usage 口径与主键完整性');
   const settle = () => new Promise((r) => setTimeout(r, 5)); // 向导里 onclick 是 () => doX() 不返 promise，靠宏任务刷一次
   check('UI 钉源锚点唯一（向导/探针回执若被重构挪位，本钉必须响）', html4.split('async function agentWizard(').length === 2 && html4.split('function probeVerdict(').length === 2);
 
+  // DR-14（auto 报错归因可见）：chainAttempts/chainExcluded 早已逐跳记账在案，展示层拆了消费端等于账白记——
+  // 计费模型列的痕迹（⚠ 失败候选 / ⊘ 入口剔除）、悬停明细、模型统计的真实候选归因，三者钉死
+  check('UI 钉（DR-14）：日志行按真实模型显罪——⚠chainAttempts / ⊘chainExcluded / 悬停 rowTip 三处消费都在场',
+    html4.includes('const modelBits = (l) => {') && html4.includes("'⚠ ' + a.name + ' ' + a.status") && html4.includes("'⊘ ' + e.name") && html4.includes('const rowTip = (l) => [chainTip(l)'),
+    'modelBits/⚠/⊘/rowTip 缺其一');
+  check('UI 钉（DR-14）：模型统计不再按 auto 名塌桶——按真实候选（publicName）归因，未及尝试才回落 auto 名',
+    html4.includes('groupAgg((l) => l.publicName || l.requestedModel)'), 'picker 被改回 requestedModel？');
+
   // ① 选择态
   await ui.agentWizard({ id: 'vk1', name: 'default' });
   await settle();

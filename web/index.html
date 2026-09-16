@@ -318,6 +318,23 @@ addEventListener('hashchange', () => { const v = location.hash.slice(1) || 'over
 
 views.loading = () => el('div', { class: 'muted' }, '加载中…');
 
+// DR-14（auto 报错归因可见）：候选链每一跳的真实模型/渠道/状态早已记在 chainAttempts 里，展示层必须消费——
+// 计费模型列挂「⚠ 候选名 状态」失败痕迹；入口被剔除的候选（如 key 全冷却）挂「⊘ 候选名」；行悬停拼候选明细（哪个模型）+ retries 明细（哪把 key）。
+// 两层都要：失败链常见形态是前一跳 4xx 进了 chainAttempts、后续跳 key 冷却进了 chainExcluded——漏掉后者就只剩光秃秃的 auto 名
+const failedChain = (l) => (l.chainAttempts || []).filter((a) => a.status >= 400);
+const chainTip = (l) => [...(l.chainAttempts || []).map((a) => `候选 ${a.name}（${a.channel}）→ ${a.status}${a.error ? '：' + a.error.slice(0, 200) : ''}`), ...(l.chainExcluded || []).map((e) => `剔除 ${e.name}（${e.kind === 'hard' ? '硬约束' : '瞬态'}）：${e.reason}`)].join('\n');
+const rowTip = (l) => [chainTip(l), (l.retries || []).join('\n'), l.error || ''].filter(Boolean).join('\n');
+const modelBits = (l) => {
+  const s = el('span', { class: 'mono' });
+  s.append(l.requestedModel || '-');
+  if (l.routedTo && l.routedTo !== l.requestedModel) s.append(' → ' + l.routedTo);
+  for (const a of failedChain(l))
+    s.append(el('span', { class: 'mono', style: 'color:var(--err);margin-left:8px;font-size:11px', title: (a.error || '').slice(0, 300) }, '⚠ ' + a.name + ' ' + a.status));
+  for (const e of l.chainExcluded || [])
+    s.append(el('span', { class: 'mono muted', style: 'margin-left:8px;font-size:11px', title: e.reason }, '⊘ ' + e.name));
+  return s;
+};
+
 const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: 'v' }, v, sub ? el('small', {}, ' ' + sub) : null));
 
 // ---------------- 概览 ----------------
@@ -499,10 +516,10 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       const t = el('table');
       t.append(el('tr', {}, el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, '计费模型'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '总成本'), el('th', {}, '用时/首字'), el('th', {}, '状态'), el('th', {}, '来源')));
       for (const l of rows.slice(0, 200)) {
-        t.append(el('tr', { title: (l.retries || []).join('\n') || l.error || '' },
+        t.append(el('tr', { title: rowTip(l) },
           el('td', { class: 'mono muted' }, new Date(l.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })),
           el('td', { class: 'muted' }, l.channelName || '-'),
-          el('td', { class: 'mono' }, (l.requestedModel || '-') + (l.routedTo && l.routedTo !== l.requestedModel ? ' → ' + l.routedTo : '')),
+          el('td', {}, modelBits(l)),
           el('td', { class: 'mono' }, num(l.promptTokens)), el('td', { class: 'mono' }, num(l.completionTokens)),
           el('td', { class: 'mono' }, money(l.costUsd)),
           el('td', { class: 'mono muted' }, l.latencyMs + 'ms' + (l.ttftMs ? ' / ' + l.ttftMs + 'ms' : '')),
@@ -513,7 +530,8 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       box.append(t);
       if (rows.length > 200) box.append(el('div', { class: 'muted', style: 'margin-top:6px' }, '共 ' + rows.length + ' 条，仅显示最近 200 条'));
     } else if (ovSt.tab === 'provider' || ovSt.tab === 'model') {
-      const g = ovSt.tab === 'provider' ? groupAgg((l) => l.channelName) : groupAgg((l) => l.requestedModel);
+      // DR-14：模型统计按真实候选归因——成功=落点候选（publicName），失败链=最后尝试候选；未及尝试（404 无候选等）回落 auto 名
+      const g = ovSt.tab === 'provider' ? groupAgg((l) => l.channelName) : groupAgg((l) => l.publicName || l.requestedModel);
       const t = el('table');
       t.append(el('tr', {}, el('th', {}, ovSt.tab === 'provider' ? 'Provider（渠道）' : '模型'), el('th', {}, '请求'), el('th', {}, '失败'), el('th', {}, '输入'), el('th', {}, '输出'), el('th', {}, '缓存读/写'), el('th', {}, '成本'), el('th', {}, '平均延迟')));
       for (const b of g) {
@@ -1320,10 +1338,10 @@ views.logs = async () => {
   const list = el('div', { class: 'card', style: 'padding:0;max-height:70vh;overflow:auto' });
   let onlyErr = false;
   const render = (l) =>
-    el('div', { class: 'log-line', style: l.ok ? '' : 'background:rgba(248,81,73,.06)', title: (l.retries || []).join('\n') || l.error || '' },
+    el('div', { class: 'log-line', style: l.ok ? '' : 'background:rgba(248,81,73,.06)', title: rowTip(l) },
       el('span', { class: 'pill ' + (l.ok ? 'ok' : 'err') }, String(l.status)),
       el('span', { class: 'mono' }, clock(l.ts)),
-      el('span', { class: 'mono' }, l.requestedModel || '-'),
+      modelBits(l),
       el('span', { class: 'mono muted' }, l.channelName || '-'),
       el('span', { class: 'mono muted' }, `${l.latencyMs}ms` + (l.ttftMs ? ` · ttft ${l.ttftMs}ms` : '') + (l.attempts > 1 ? ` · ×${l.attempts}` : '')),
       el('span', { class: 'mono muted' }, `${l.promptTokens}↑ ${l.completionTokens}↓` + (l.cacheReadTokens ? ` · c${l.cacheReadTokens}` : '')),
@@ -1371,7 +1389,7 @@ views.logs = async () => {
     el('button', { class: 'btn sm', onclick: reload }, '刷新'),
     el('button', { class: 'btn sm danger', onclick: () => confirm('清空全部日志？') && api('/api/logs', { method: 'DELETE' }).then(reload) }, '清空'),
     el('span', { class: es ? 'pill ok' : 'pill warn' }, es ? '实时推送中' : '实时推送不可用（ticket 获取失败，可手动刷新）'),
-    el('span', { class: 'muted' }, '×N 表示该请求在号池里试过 N 个 key'),
+    el('span', { class: 'muted' }, '×N 表示该请求在号池里试过 N 个 key；⚠=auto 链内失败候选（名+状态）⊘=入口即被剔除的候选，悬停看细节'),
   ), list);
   return box;
 };
