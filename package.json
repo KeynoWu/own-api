@@ -1,10 +1,10 @@
 {
   "name": "own-api",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "本地大模型管理器 + 统一代理网关（号池）",
+  "description": "本地多模型管理器 + 统一代理网关（号池）",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
