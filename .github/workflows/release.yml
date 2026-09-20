@@ -155,18 +155,32 @@ jobs:
       - name: 发布后资产硬校验（软校验不可靠，传完必须见真资产）
         shell: bash
         run: |
-          # v0.1.14 事故：上传步骤已逐个 ✅ 且 softprops 已报 "Release ready"，紧随其后的单次
-          # API 查询却只看到 1 个资产——/releases/tags 视图有最终一致性延迟，查早了就是假红
-          # （release 本体 7/7 齐全，run 却被标 failure）。改为退避轮询：资产数只增不减，
-          # 读到 ≥7 即为真；轮询耗尽仍不足才是上传环节真失败。
-          # v0.1.15 复发：8 次 × 5s（40s 窗）仍撞上收敛延迟——窗口拉到 ~165s（次数 12 + 递增退避）。
+          # 真根因（v0.1.16 才挖到，v0.1.14/v0.1.15 两次「假警报」都是它，当年的"最终一致性延迟"
+          # 判断是误诊）：原来的 --jq '[.assets] | length' 把 assets 数组又包了一层，长度恒为 1——
+          # 无论 release 有几个资产，查询永远报 1，于是校验必然判失败（release 本体其实一直是 7/7）。
+          # 现在：① jq 用 .assets[]（不包层）；② 不再只数个数，按**预期资产名逐项比对**——
+          # 数量对但传错文件（v0.1.9/v0.1.10 的零匹配事故同族）也拦得住。轮询只留 6×5s 做轻量保险。
+          V="${GITHUB_REF_NAME#v}"
+          printf '%s\n' \
+            own-api-macos-arm64.dmg \
+            own-api-macos-x64.dmg \
+            own-api-windows-x64-setup.exe \
+            "own-api_${V}_aarch64.dmg" \
+            "own-api_${V}_x64.dmg" \
+            "own-api_${V}_x64-setup.exe" \
+            sha256sums.txt | sort > /tmp/want.txt
           ok=""
-          for i in $(seq 1 12); do
-            N=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '[.assets] | length')
-            echo "第 $i 次查询 release 资产数: $N"
-            [ "$N" -ge 7 ] && { ok=1; break; }
-            sleep $(( i < 3 ? 5 * i : 15 ))
+          for i in $(seq 1 6); do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '.assets[].name' | sort > /tmp/have.txt
+            echo "第 $i 次查询 release 资产数: $(grep -c . /tmp/have.txt || true)"
+            if diff -q /tmp/want.txt /tmp/have.txt >/dev/null; then ok=1; break; fi
+            sleep 5
           done
-          [ -n "$ok" ] || { echo "::error::轮询 12 次（退避，约 165s）后 release 资产仍少于 7（3 平台包 + 3 别名直链 + sha256sums）——上传环节真失败"; exit 1; }
+          if [ -z "$ok" ]; then
+            echo "::error::release 资产与预期 7 项不符（3 平台包 + 3 别名直链 + sha256sums）——上传环节真失败"
+            diff /tmp/want.txt /tmp/have.txt || true
+            exit 1
+          fi
+          echo "资产 7/7 逐项比对通过（按名字，不是数个数）"
         env:
           GH_TOKEN: ${{ github.token }}
