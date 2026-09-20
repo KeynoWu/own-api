@@ -830,9 +830,9 @@ section('14. 信息暴露、usage 口径与主键完整性');
   mchild.kill();
   await new Promise<void>((r) => { mchild.on('exit', () => r()); setTimeout(r, 4000); });
   const migDb = JSON.parse(fs3.readFileSync(join(migDir, 'db.json'), 'utf8'));
-  // v4 起 agentLinks 属当前版：v2 库一路升满（合表 + 补 agentLinks）。断言跟着当前版走而非钉死 3——
-  // 落盘版本号不诚实才是 bug
-  check('迁移落盘回写：routes 取代 models/autoRoutes（v2 直升当前版 v4）', migDb.version === 4 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined && Array.isArray(migDb.agentLinks), JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, links: Array.isArray(migDb.agentLinks), legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
+  // v4 起 agentLinks、v5 起 rollups 属当前版：v2 库一路升满（合表 + 补 agentLinks + 补 rollups）。
+  // 断言跟着当前版走而非钉死 3——落盘版本号不诚实才是 bug
+  check('迁移落盘回写：routes 取代 models/autoRoutes（v2 直升当前版 v5）', migDb.version === 5 && Array.isArray(migDb.routes) && migDb.models === undefined && migDb.autoRoutes === undefined && Array.isArray(migDb.agentLinks) && Array.isArray(migDb.rollups), JSON.stringify({ v: migDb.version, routes: (migDb.routes || []).length, links: Array.isArray(migDb.agentLinks), rollups: Array.isArray(migDb.rollups), legacyLeft: migDb.models !== undefined || migDb.autoRoutes !== undefined }));
   rmSync(migDir, { recursive: true, force: true });
 }
 // ---- 审查 P2：脏库迁移矩阵（元素级过滤；坏条目丢弃并告警，好数据一概保全） ----
@@ -891,7 +891,7 @@ section('14. 信息暴露、usage 口径与主键完整性');
   dchild.kill();
   await new Promise<void>((r) => { dchild.on('exit', () => r()); setTimeout(r, 4000); });
   const dDb = JSON.parse(fs4.readFileSync(join(dirtyDir, 'db.json'), 'utf8'));
-  check('P2 脏库迁移同样回写当前版 v4 且只带清洗后的数据', dDb.version === 4 && dDb.routes?.length === 3 && dDb.channels?.length === 1 && dDb.vkeys?.length === 1, JSON.stringify([dDb.version, dDb.routes?.length, dDb.channels?.length, dDb.vkeys?.length]));
+  check('P2 脏库迁移同样回写当前版 v5 且只带清洗后的数据', dDb.version === 5 && dDb.routes?.length === 3 && dDb.channels?.length === 1 && dDb.vkeys?.length === 1 && Array.isArray(dDb.rollups), JSON.stringify([dDb.version, dDb.routes?.length, dDb.channels?.length, dDb.vkeys?.length, Array.isArray(dDb.rollups)]));
   rmSync(dirtyDir, { recursive: true, force: true });
 }
 
@@ -1105,6 +1105,10 @@ section('14. 信息暴露、usage 口径与主键完整性');
   // DR-16（首跳策略）：开关在编辑器里 + body 带上 + 列表可见标记——拆了消费端等于功能隐身
   check('UI 钉（DR-16）：首跳策略开关在场（编辑器 select + 提交 body + 列表「最强首跳」标记三处消费）',
     html4.includes('firstHop') && html4.includes('当前最强') && html4.includes('最强首跳'), 'firstHop 消费端缺失');
+
+  // DR-17（日账本）：统计页消费 /api/rollups（伪日志 _n 权重进聚合）+ 模型筛选双匹配 + 横幅改口——拆了合并端，长窗统计退回 2000 条视野
+  check('UI 钉（DR-17）：日账本合并在场（fetch /api/rollups + _n 权重聚合 + 模型筛选 routedTo 双匹配 + 折账横幅）',
+    html4.includes("/api/rollups") && html4.includes('l._n || 1') && html4.includes('l.routedTo === ovSt.model') && html4.includes('已折进日账本'), 'rollups 消费端缺失');
 
   // ① 选择态
   await ui.agentWizard({ id: 'vk1', name: 'default' });

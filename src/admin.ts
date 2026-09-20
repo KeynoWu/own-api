@@ -524,6 +524,13 @@ export function createAdmin(): Hono {
     return c.json([...logs].slice(-limit).reverse());
   });
 
+  // DR-17 日账本：被裁日志的降采样账（本地日×归因模型×渠道）。长窗统计的真相来源——
+  // 原始日志窗只有 retention 条，账本行与之不相交；消费方（使用统计页）负责合并渲染，不双计
+  app.get('/rollups', (c) => {
+    const rows = [...store.db.rollups].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+    return c.json({ rows });
+  });
+
   /** SSE 实时日志。回调必须保持挂起，否则 Hono 会立刻关闭响应 */
   app.get('/logs/stream', (c) => {
     return stream(c, async (s) => {

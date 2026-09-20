@@ -1,12 +1,21 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AgentLink, AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, VirtualKey } from './types.ts';
+import type { AgentLink, AutoCandidate, AutoRoute, Channel, DBShape, ModelRoute, RequestLog, RouteEntry, Settings, UsageRollup, VirtualKey } from './types.ts';
 import { heuristicVision, isVisionSupport } from './vision.ts';
 import { envAny, resolveDataDir } from './bootstrap.ts';
 
 const DATA_DIR = resolveDataDir();
 const DB_FILE = envAny(['OWN_API_DB_FILE', 'LLM_DB_FILE']) || join(DATA_DIR, 'db.json');
+/** DR-17 日账本行数上限（天数×模型×渠道的乘积，正常量级几年到不了） */
+const MAX_ROLLUPS = 6000;
+
+/** 本地时区 YYYY-MM-DD（DR-17 日账本分桶锚点——账按"使用发生那天"记，不按折账时刻） */
+function localDay(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 /** 数据目录（last-session.json 等桌面壳交接文件写在这里） */
 export function getDataDir() {
@@ -161,7 +170,7 @@ function freshVKey(): VirtualKey {
 }
 
 function emptyDb(): DBShape {
-  return { version: 4, quotas: {}, channels: [], routes: [], vkeys: [], logs: [], agentLinks: [], settings: defaultSettings() };
+  return { version: 5, quotas: {}, channels: [], routes: [], vkeys: [], logs: [], agentLinks: [], rollups: [], settings: defaultSettings() };
 }
 
 /** 归一化成字符串数组：支持数组，或每行一个的字符串；去重去空 */
@@ -323,6 +332,22 @@ class Store {
       // v3→v4：仅新增 agentLinks 数组字段，无字段改名/语义变更 → 补空即迁移完成，回写只为让盘上版本号诚实
       if (!Array.isArray((parsed as any).agentLinks) || (merged.version || 0) < 4) {
         merged.version = 4;
+        this.pendingMigration = true;
+      }
+      // v4→v5（DR-17）：日账本 rollups——同规补空即迁移；元素级清洗防坏行毒化统计合并
+      const rollRaw = arr<any>(parsed.rollups) ?? [];
+      const rollOK = (r: any) => !!r && typeof r.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.day)
+        && typeof r.model === 'string' && typeof r.channel === 'string' && typeof r.requests === 'number';
+      const rollups = rollRaw.filter(rollOK).map((r: any) => ({
+        ...r,
+        requests: r.requests || 0, errors: r.errors || 0,
+        pin: r.pin || 0, pout: r.pout || 0, cr: r.cr || 0, cw: r.cw || 0,
+        costUsd: r.costUsd || 0, latSumMs: r.latSumMs || 0, latN: r.latN || 0,
+      }));
+      if (rollups.length !== rollRaw.length) console.warn(`[store] rollups 丢弃 ${rollRaw.length - rollups.length} 条非法行（day/model/channel/requests 形状不齐）`);
+      merged.rollups = rollups;
+      if (!Array.isArray((parsed as any).rollups) || (merged.version || 0) < 5) {
+        merged.version = 5;
         this.pendingMigration = true;
       }
       // 老库或手工改坏的库兜底：设置项重新过一遍校验
@@ -883,12 +908,70 @@ class Store {
     // 不拷快照的话"已落库历史"会被后续改动静默改写（一致性从靠纪律改为靠机制）
     this.db.logs.push({ ...log, ...(log.retries ? { retries: [...log.retries] } : {}), ...(log.chainAttempts ? { chainAttempts: [...log.chainAttempts] } : {}) });
     const cap = this.db.settings.logRetention;
-    if (this.db.logs.length > cap) this.db.logs.splice(0, this.db.logs.length - cap);
+    if (this.db.logs.length > cap) {
+      // DR-17：被裁日志不静默丢弃——先折日账本 + JSONL 冷备，再从原始窗移除
+      this.archiveLogs(this.db.logs.splice(0, this.db.logs.length - cap));
+    }
     this.save();
   }
   clearLogs() {
+    // DR-17：清空同规先折账/冷备——原始日志离开内存的每条路径都必须先过账本，否则长窗统计与现实脱节
+    this.archiveLogs(this.db.logs);
     this.db.logs = [];
     this.save();
+  }
+
+  // ---------- DR-17 日账本 + JSONL 冷备 ----------
+  /** 被裁/被清日志的去向：① 按 本地日×归因模型×渠道 折进日账本（长窗统计的真相来源；
+   *  账本行与原始日志集不相交，合并统计不双计）；② 原文追加进数据目录月度 JSONL 冷备
+   *  （日志本就不含 prompt/响应内容，只有计数与链路元数据）。
+   *  冷备写失败只告警不抛——它是尽力而为的旁路，不得拖垮请求主路径；账本在内存折好后随 save() 落盘。 */
+  private archiveLogs(evicted: RequestLog[]) {
+    if (!evicted.length) return;
+    const fold = new Map<string, UsageRollup>();
+    const files = new Map<string, string[]>();
+    for (const l of evicted) {
+      const day = localDay(l.ts);
+      const model = l.publicName || l.requestedModel || '-';
+      const channel = l.channelName || '-';
+      const cr = l.cacheReadTokens || 0, cw = l.cacheWriteTokens || 0;
+      const key = day + '|' + model + '|' + channel;
+      const r = fold.get(key) ?? { day, model, channel, requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, costUsd: 0, latSumMs: 0, latN: 0 };
+      r.requests++;
+      if (!l.ok) r.errors++;
+      r.pin += Math.max(0, (l.promptTokens || 0) - cr - cw);
+      r.pout += l.completionTokens || 0;
+      r.cr += cr; r.cw += cw;
+      r.costUsd += l.costUsd || 0;
+      if (typeof l.latencyMs === 'number' && l.latencyMs > 0) { r.latSumMs += l.latencyMs; r.latN++; }
+      fold.set(key, r);
+      const ym = day.slice(0, 7).replace('-', '');
+      const lines = files.get(ym) ?? [];
+      lines.push(JSON.stringify(l));
+      files.set(ym, lines);
+    }
+    for (const r of fold.values()) {
+      const ex = this.db.rollups.find((x) => x.day === r.day && x.model === r.model && x.channel === r.channel);
+      if (ex) {
+        ex.requests += r.requests; ex.errors += r.errors;
+        ex.pin += r.pin; ex.pout += r.pout; ex.cr += r.cr; ex.cw += r.cw;
+        ex.costUsd += r.costUsd; ex.latSumMs += r.latSumMs; ex.latN += r.latN;
+      } else this.db.rollups.push(r);
+    }
+    // 账本行数上限：按最旧的天整体裁（正常几年都到不了；到顶说明维度异常膨胀，保最新不保旧）
+    if (this.db.rollups.length > MAX_ROLLUPS) {
+      const days = [...new Set(this.db.rollups.map((r) => r.day))].sort();
+      const cut = new Set(days.slice(0, Math.max(1, days.length - Math.floor(MAX_ROLLUPS / 8))));
+      this.db.rollups = this.db.rollups.filter((r) => !cut.has(r.day));
+      console.warn(`[store] 日账本超上限，已裁最旧 ${cut.size} 天的行`);
+    }
+    for (const [ym, lines] of files) {
+      try {
+        appendFileSync(join(DATA_DIR, `logs-archive-${ym}.jsonl`), lines.join('\n') + '\n', { mode: 0o600 });
+      } catch (e) {
+        console.warn(`[store] 日志冷备写入失败（不影响请求与统计）: ${(e as Error).message}`);
+      }
+    }
   }
 
   getSettings() {

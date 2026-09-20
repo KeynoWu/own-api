@@ -259,8 +259,28 @@ export interface Quota {
   costUsd: number;
 }
 
+/** DR-17 日账本（v5）：被裁日志的降采样账——按 本地日×归因模型×渠道 折叠，与原始日志集不相交（合并统计不双计）。
+ *  粒度取舍：只存计数与平均延迟原料（p50/p95/链路痕迹属明细语义，随原始窗过期） */
+export interface UsageRollup {
+  /** 本地时区 YYYY-MM-DD（折叠时点取日志自身 ts） */
+  day: string;
+  /** 归因模型：折叠时点的 publicName || requestedModel（与 DR-14 统计口径同源） */
+  model: string;
+  channel: string;
+  requests: number;
+  errors: number;
+  /** 净新增输入（Σ(prompt − cr − cw)），与 KPI/成本公式同口径 */
+  pin: number;
+  pout: number;
+  cr: number;
+  cw: number;
+  costUsd: number;
+  latSumMs: number;
+  latN: number;
+}
+
 export interface DBShape {
-  /** 3=v3 单表 routes；4=v4 增 agentLinks（agent 接入登记） */
+  /** 3=v3 单表 routes；4=v4 增 agentLinks；5=v5 增 rollups（DR-17 日账本） */
   version: number;
   /** 按天配额累计（vkeyId -> Quota），与日志裁剪解耦 */
   quotas: Record<string, Quota>;
@@ -271,5 +291,7 @@ export interface DBShape {
   logs: RequestLog[];
   /** agent 一键接入登记（v4）；旧库缺字段时 store 兜底空数组 */
   agentLinks: AgentLink[];
+  /** 日账本（v5，DR-17）；旧库缺字段时 store 兜底空数组。本机数据态，不进配置组导出 */
+  rollups: UsageRollup[];
   settings: Settings;
 }

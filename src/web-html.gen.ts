@@ -344,7 +344,9 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
 {
   const newAgg = () => ({ requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, cost: 0 });
   const addAgg = (b, l) => {
-    b.requests++; if (!l.ok) b.errors++;
+    // _n/_e：日账本伪日志的请求/失败权重（DR-17）；原始日志无 _n/_e，各自视作 1
+    b.requests += l._n || 1;
+    b.errors += l.ok ? 0 : (l._e || 1);
     const cr = l.cacheReadTokens || 0, cw = l.cacheWriteTokens || 0;
     b.pin += Math.max(0, (l.promptTokens || 0) - cr - cw);
     b.pout += l.completionTokens || 0; b.cr += cr; b.cw += cw; b.cost += l.costUsd || 0;
@@ -432,9 +434,10 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
   views.overview = async () => {
     const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
     // 号池健康页才顺带取 auto-health/routes（饱和观测 R8）——其他页不加请求
-    const [o, allLogs, ah, allRoutes] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000'),
+    const [o, allLogs, ah, allRoutes, rollRes] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000'),
       ovSt.tab === 'pool' ? api('/api/auto-health').catch(() => null) : Promise.resolve(null),
-      ovSt.tab === 'pool' ? api('/api/routes').catch(() => null) : Promise.resolve(null)]);
+      ovSt.tab === 'pool' ? api('/api/routes').catch(() => null) : Promise.resolve(null),
+      api('/api/rollups').catch(() => null)]);
     const box = el('div');
     if (updateState && updateState.updateAvailable && !updateState.error) box.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px' },
       '检测到新版本 v' + updateState.latest + '（当前 v' + updateState.current + '）——',
@@ -444,8 +447,21 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime();
     })(); // L6：KPI 与图表桶同锚
     let logs = allLogs.filter((l) => l.ts >= from);
-    const modelNames = [...new Set(allLogs.map((l) => l.requestedModel).filter(Boolean))].sort();
-    if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model);
+    // 模型筛选双匹配：请求名（如 model_auto）或实际落点（routedTo）——DR-14 统计已按真实模型归因，筛选器同规
+    const modelNames = [...new Set([...allLogs.map((l) => l.requestedModel), ...allLogs.map((l) => l.routedTo)].filter(Boolean))].sort();
+    if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model || l.routedTo === ovSt.model);
+    // DR-17 日账本合并：被裁日志已按 本地日×归因模型×渠道 折叠——伪日志（_n 请求权重）只进聚合视图
+    // （KPI/趋势/Provider/模型统计），不进「请求日志」明细表；账本行与原始日志不相交，合并不双计
+    const rollLogs = ((((rollRes || {}).body || {}).rows) || []).map((r) => ({
+      _n: r.requests || 0, _e: r.errors || 0, ok: (r.errors || 0) === 0, status: (r.errors || 0) ? 500 : 200,
+      ts: (() => { const p = String(r.day).split('-').map(Number); return new Date(p[0], (p[1] || 1) - 1, p[2] || 1, 12).getTime(); })(),
+      requestedModel: r.model, publicName: r.model, channelName: r.channel,
+      promptTokens: (r.pin || 0) + (r.cr || 0) + (r.cw || 0), completionTokens: r.pout || 0,
+      cacheReadTokens: r.cr || 0, cacheWriteTokens: r.cw || 0, costUsd: r.costUsd || 0,
+      // latencyMs 存「和」不存均值——groupAgg 的 latSum 累加后 ÷ 合并请求数才是精确加权平均
+      latencyMs: r.latSumMs || 0, wire: 'openai', stream: false, retries: [], chainAttempts: [],
+    }));
+    const aggLogs = ovSt.model ? [...logs, ...rollLogs.filter((l) => l.requestedModel === ovSt.model)] : [...logs, ...rollLogs];
     const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
     box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
       el('div', {},
@@ -459,10 +475,10 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
     // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
     if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
       box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, o.logRetention && o.logRetention <= 5000
-        ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早的请求记录已被丢弃，本窗口统计可能不完整'
+        ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早记录已折进日账本（明细不可查，KPI/趋势/统计仍完整）'
         : '本页统计仅取最近 5000 条日志——更早记录未纳入（当前保留上限 ' + (o.logRetention || '未设') + ' 条）'));
     }
-    const tot = newAgg(); logs.forEach((l) => addAgg(tot, l));
+    const tot = newAgg(); aggLogs.forEach((l) => addAgg(tot, l));
     const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
     const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
     const hero = el('div', { class: 'card', style: 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px' },
@@ -486,7 +502,7 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
     const buckets = new Map();
     const startT = ovSt.hours === 'day' ? align(from) : align(Date.now() - (ovSt.hours * 3600e3 - step));
     for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
-    for (const l of logs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
+    for (const l of aggLogs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
     const bArr = [...buckets.values()];
     const chartCard = el('div', { class: 'card', style: 'margin-top:12px' },
       el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { style: 'margin:0' }, '使用趋势'),
@@ -498,7 +514,7 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       ...TABS.map(([k, t]) => el('button', { class: 'btn sm' + (ovSt.tab === k ? ' primary' : ''), onclick: () => { ovSt.tab = k; go('overview'); } }, t))));
     const groupAgg = (keyFn) => {
       const m = new Map();
-      for (const l of logs) {
+      for (const l of aggLogs) {
         const k = keyFn(l) || '-';
         if (!m.has(k)) m.set(k, Object.assign({ key: k, latSum: 0 }, newAgg()));
         const b = m.get(k); addAgg(b, l); b.latSum += l.latencyMs || 0;

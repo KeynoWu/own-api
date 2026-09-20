@@ -2214,6 +2214,65 @@ ui-theme:
   rmSync(AG, { recursive: true, force: true });
 }
 // ================================================================
+// DR-17 日志修剪不丢账：被裁日志折进日账本（本地日×归因模型×渠道）+ JSONL 冷备；
+// 使用统计长窗（7 天/30 天）由 原始日志 ∪ 日账本 合并而成，账本行与原始日志不相交不双计
+// ================================================================
+{
+  section('18. DR-17 日账本与冷备：修剪/清空先折账，统计合并不双计');
+  // 全增量断言：前面章节可能已触发过裁剪/清日志/换 key——不假设白纸，全部记基线看增量
+  const roll0 = ((await api('/api/rollups', { headers: ADMIN })).body?.rows ?? []) as any[];
+  const ym = new Date(); const ymStr = `${ym.getFullYear()}${String(ym.getMonth() + 1).padStart(2, '0')}`;
+  const arcFile = join(DATA, `logs-archive-${ymStr}.jsonl`);
+  const arcN0 = existsSync(arcFile) ? readFileSync(arcFile, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+  const rawB: any = (await api('/api/logs?limit=5000', { headers: ADMIN })).body;
+  const rawN0 = (rawB.logs || rawB.data || rawB).length;
+  // 自备 vkey：配置组导入等章节可能已换掉默认 key，不赌存量状态
+  const vk17 = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'r17-vk' }) })).body as any;
+  const AH17 = { authorization: `Bearer ${vk17.key}`, 'content-type': 'application/json' };
+  // 造两个专属模型 + 5 条请求 → 压缩保留窗到 4 → 再打 1 条触发裁剪
+  const chR17 = await mkCh('R17 Ch', 'openai', ['k-ok-r17']);
+  const mA = await mkModel({ publicName: 'm17a', channelId: chR17.id, upstreamModel: 'gpt-mini' });
+  const mB = await mkModel({ publicName: 'm17b', channelId: chR17.id, upstreamModel: 'gpt-mini' });
+  let fired = 0;
+  for (const m of [mA.body.publicName, mB.body.publicName, mA.body.publicName, mB.body.publicName, mA.body.publicName]) {
+    const r = await api('/v1/chat/completions', { method: 'POST', headers: AH17, body: JSON.stringify({ model: m, messages: [{ role: 'user', content: 'hi' }] }) });
+    if (r.status !== 200) { check('R17 前置请求', false, `status=${r.status}`); break; }
+    fired++;
+  }
+  const oldRet = ((await api('/api/settings', { headers: ADMIN })).body?.logRetention) ?? 2000;
+  await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ logRetention: 4 }) });
+  const rawAfterCap: any = (await api('/api/logs?limit=5000', { headers: ADMIN })).body;
+  const logsArr: any[] = rawAfterCap.logs || rawAfterCap.data || rawAfterCap;
+  check('R17-1 缩窗本身不裁日志（裁剪只由下一次 pushLog 触发——先见账后落盘的时序前提）', fired === 5 && logsArr.length === rawN0 + 5, `len=${logsArr.length} base=${rawN0}`);
+  await api('/v1/chat/completions', { method: 'POST', headers: AH17, body: JSON.stringify({ model: mB.body.publicName, messages: [{ role: 'user', content: 'hi' }] }) });
+  const logs2Raw: any = (await api('/api/logs?limit=5000', { headers: ADMIN })).body;
+  const logs2: any[] = logs2Raw.logs || logs2Raw.data || logs2Raw;
+  check('R17-2 修剪后原始窗恰为 retention 条（4）', logs2.length === 4, `len=${logs2.length}`);
+  const roll1 = ((await api('/api/rollups', { headers: ADMIN })).body?.rows ?? []) as any[];
+  const m17aRoll = roll1.filter((r) => r.model === 'm17a');
+  check('R17-3 被裁日志按 归因模型 折账：m17a 恰 1 条进账本（publicName 口径，与 DR-14 统计同源）', m17aRoll.length === 1 && m17aRoll[0].requests === 1 && m17aRoll[0].errors === 0, JSON.stringify(m17aRoll));
+  check('R17-4 账本行字段齐全（day=今天/渠道名/净输入口径 token 计数在位）', roll1.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.day) && typeof r.channel === 'string' && typeof r.pin === 'number' && typeof r.cr === 'number' && typeof r.costUsd === 'number'), JSON.stringify(roll1[0]));
+  // 不双计的互补口径：m17a 发出 3 条 = 账本 1（被裁）+ 原始窗 2（留存），两本账拼起来恰是全量
+  check('R17-5 账本与原始窗互补不双计：m17a 发出 3 = 账本 1 + 原始窗 2', m17aRoll[0]?.requests === 1 && logs2.filter((l) => l.requestedModel === 'm17a').length === 2, `账本=${m17aRoll[0]?.requests} 原始=${logs2.filter((l) => l.requestedModel === 'm17a').length}`);
+  // 冷备：被裁原文追加进数据目录月度 JSONL。被裁数 = 缩窗后原始长度 +1（本次 push）- retention（增量口径）
+  const evictedN = logsArr.length + 1 - 4;
+  const arcN1 = existsSync(arcFile) ? readFileSync(arcFile, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+  check('R17-6 JSONL 冷备在位：行数增量=被裁数，且为可解析的完整日志（含 promptTokens 计数、不含 prompt 内容字段）', arcN1 - arcN0 === evictedN && evictedN > 0 && (() => { const lines = readFileSync(arcFile, 'utf8').trim().split('\n').filter(Boolean); try { const o = JSON.parse(lines[lines.length - 1]); return typeof o.promptTokens === 'number' && !('messages' in o) && !('content' in o); } catch { return false; } })(), `evicted=${evictedN} arc ${arcN0}→${arcN1}`);
+  // 合并口径：清空日志也先折账（原始日志离开内存的每条路径都过账本）
+  const rollSumBefore = roll1.reduce((s, r) => s + r.requests, 0);
+  await api('/api/logs', { method: 'DELETE', headers: ADMIN });
+  const roll2 = ((await api('/api/rollups', { headers: ADMIN })).body?.rows ?? []) as any[];
+  const logs3Raw: any = (await api('/api/logs?limit=5000', { headers: ADMIN })).body;
+  const logs3: any[] = logs3Raw.logs || logs3Raw.data || logs3Raw;
+  const arcN2 = existsSync(arcFile) ? readFileSync(arcFile, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+  check('R17-7 clearLogs 同规折账：账本请求总数 +4（清掉的 4 条进账），原始窗归零，冷备同步 +4 行', logs3.length === 0 && roll2.reduce((s, r) => s + r.requests, 0) === rollSumBefore + 4 && arcN2 === arcN1 + 4, `arc ${arcN1}→${arcN2} rollSum ${rollSumBefore}→${roll2.reduce((s, r) => s + r.requests, 0)}`);
+  // 配置组导出不夹带本机数据态（账本与日志同规：导出的是配置，不是账）
+  const bundle = (await api('/api/config/export', { headers: ADMIN })).body;
+  check('R17-8 配置组导出不含 rollups（账本属本机数据态）', !!bundle && !('rollups' in bundle) && !('logs' in (bundle as any)), Object.keys(bundle || {}).join(','));
+  await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ logRetention: oldRet }) });
+  check('R17-9 保留窗恢复（测试不污染后续断言的日志视野）', ((await api('/api/settings', { headers: ADMIN })).body?.logRetention) === oldRet, `ret=${oldRet}`);
+}
+// ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {
   console.log('\n失败明细：');
