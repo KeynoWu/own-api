@@ -2153,29 +2153,31 @@ ui-theme:
   await api('/api/agents/dsh', { method: 'DELETE', headers: ADMIN });
   const dPtrBack = parseY(DSF).state.data['agent-default-model'];
   check('AI-67d noop 过的合并写入点撤销时放回原值，不留下空映射（撤销是还原，不是删形状）', dPtrBack?.provider === 'own-api' && dPtrBack?.model === 'gpt-4o', JSON.stringify(dPtrBack));
-  // 网关换端口（sync 的卖点之一）：请求 Host 就是新地址，旧块写的还是旧端口
+  // 网关换端口（sync 的卖点之一）：本进程监听地址变了，旧块写的还是旧端口。
+  // 地址来源**不能**是请求 Host 头（审查 P1-3：DNS-rebinding 页面可拿伪造 Host 把 baseUrl 连同明文
+  // vkey 一起写进对方配置，此后 prompt 与 key 持续外送）。生产由 index.ts 在 listen 回调注入 selfBase，
+  // 测试同样走这条注入路径模拟换端口——原实现借 Host 头伪造端口，那正是漏洞本体（机制被 P1-3 移除）。
   putDsh();
   await APPLY(D);
-  // 派生基址取自请求的 Host 头，而 undici（global fetch）会吞掉手工设置的 Host——实测过：换 Host 打过去，
-  // 服务端看到的还是原端口，于是「同步成功」其实是一次 noop。要真模拟换端口，得走认 Host 的 node:http。
-  const portSync = (host: string) =>
-    new Promise<any>((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port: Number(BASE.split(':')[2]), path: '/api/agents/dsh/sync', method: 'POST', headers: { ...ADMIN, Host: host } }, (res) => {
-        let d = '';
-        res.on('data', (c) => (d += c));
-        res.on('end', () => {
-          try {
-            resolve({ status: res.statusCode, body: JSON.parse(d) });
-          } catch {
-            resolve({ status: res.statusCode, body: d });
-          }
-        });
-      });
-      req.on('error', reject);
-      req.end('{"confirm":true}');
+  // P1-3 反向钉：请求 Host 头不再能改写基址。放在换端口之前——此刻盘上基址 = selfBase = BASE，
+  // 旧实现（用 Host 派生）会把基址写成 evil.example，新实现保持 127.0.0.1，因此这条钉能真正区分两者。
+  const forgedHost = await new Promise<any>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: Number(BASE.split(':')[2]), path: '/api/agents/dsh/sync', method: 'POST', headers: { ...ADMIN, Host: 'evil.example' } }, (res) => {
+      let d = '';
+      res.on('data', (c) => (d += c));
+      res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(d) }); } catch { resolve({ status: res.statusCode, body: d }); } });
     });
-  const sPort: any = (await portSync('127.0.0.1:9999')).body;
-  check('AI-70 网关换了端口 → 旧块凭账本里记的基址仍认是我们的，同步把地址刷成新端口（§15-5）', sPort?.status === 'success' && rdDsh()['llm-pi-ai'].providers['own-api'].baseURL === 'http://127.0.0.1:9999/v1' && (await D_LINK()).baseUrl === 'http://127.0.0.1:9999', JSON.stringify([sPort?.status, sPort?.plan?.errors]));
+    req.on('error', reject);
+    req.end('{"confirm":true}');
+  });
+  const dshAfterForged = rdDsh()['llm-pi-ai'].providers['own-api'].baseURL;
+  check('P1-3 钉：伪造 Host=evil.example 的 sync 不得把基址写成攻击者域（地址只来自本机监听地址）',
+    forgedHost.status === 200 && !String(dshAfterForged).includes('evil.example') && String(dshAfterForged).startsWith('http://127.0.0.1:'), `${forgedHost.status} ${dshAfterForged}`);
+  setSelfBaseUrl('http://127.0.0.1:9999'); // 复用 §16 已注入的 setSelfBaseUrl（同一作用域，勿重复声明）
+  const sPort: any = (await SYNC('dsh', { confirm: true })).body;
+  const sPortOK = sPort?.status === 'success' && rdDsh()['llm-pi-ai'].providers['own-api'].baseURL === 'http://127.0.0.1:9999/v1' && (await D_LINK()).baseUrl === 'http://127.0.0.1:9999';
+  setSelfBaseUrl(BASE); // 立即还原：后续断言的探针仍打 BASE
+  check('AI-70 网关换了端口 → 旧块凭账本里记的基址仍认是我们的，同步把地址刷成新端口（§15-5）', sPortOK, JSON.stringify([sPort?.status, sPort?.plan?.errors]));
   tamperD('baseURL: http://127.0.0.1:9999/v1', 'baseURL: https://someone-else.example/v1');
   const sSteal: any = (await SYNC('dsh', { confirm: true })).body;
   check('AI-70b 放松只放松到「账本证明的那一份」：盘上现值指向第三家 → 照旧拒覆盖（§9-4 没被放宽成抢别人）', sSteal?.status === 'failed' && readFileSync(DSF, 'utf8').includes('https://someone-else.example/v1'), JSON.stringify(sSteal?.plan?.errors || sSteal?.status));
@@ -2271,6 +2273,25 @@ ui-theme:
   check('R17-8 配置组导出不含 rollups（账本属本机数据态）', !!bundle && !('rollups' in bundle) && !('logs' in (bundle as any)), Object.keys(bundle || {}).join(','));
   await api('/api/settings', { method: 'PATCH', headers: ADMIN, body: JSON.stringify({ logRetention: oldRet }) });
   check('R17-9 保留窗恢复（测试不污染后续断言的日志视野）', ((await api('/api/settings', { headers: ADMIN })).body?.logRetention) === oldRet, `ret=${oldRet}`);
+}
+// §19 审查 P1-1 污点钉：畸形上游 usage 不得以字符串落库
+// （字符串会经 /api/logs 到控制台、被拼进 tooltip 的 innerHTML 执行——存储型 XSS 的完整入口）
+{
+  const vk19 = (await api('/api/vkeys', { method: 'POST', headers: ADMIN, body: JSON.stringify({ name: 'p19-vk' }) })).body as any;
+  const AH19 = { authorization: `Bearer ${vk19.key}`, 'content-type': 'application/json' };
+  const ch19 = (await api('/api/channels', { headers: ADMIN })).body[0].id;
+  await api('/api/routes', { method: 'POST', headers: ADMIN, body: JSON.stringify({ type: 'single', publicName: 'dirty-usage', channelId: ch19, upstreamModel: 'mock-dirty-usage' }) });
+  const dRes = await api('/v1/chat/completions', { method: 'POST', headers: AH19, body: JSON.stringify({ model: 'dirty-usage', messages: [{ role: 'user', content: 'hi' }] }) });
+  check('P19-1 畸形 usage 不阻断请求（上游 200 照常温转发，只归零记账）', dRes.status === 200, String(dRes.status));
+  const dRaw: any = (await api('/api/logs?limit=50', { headers: ADMIN })).body;
+  const dArr: any[] = dRaw.logs || dRaw.data || dRaw;
+  const dOne = dArr.find((l) => l.requestedModel === 'dirty-usage' || l.routedTo === 'dirty-usage');
+  check('P19-2 入口归一：四个计数字段全是数字且为 0（字符串不得落库）',
+    !!dOne && [dOne.promptTokens, dOne.completionTokens, dOne.cacheReadTokens, dOne.cacheWriteTokens].every((v) => typeof v === 'number' && Number.isFinite(v)) && dOne.completionTokens === 0 && dOne.promptTokens === 0,
+    JSON.stringify(dOne && { p: dOne.promptTokens, c: dOne.completionTokens, cr: dOne.cacheReadTokens, cw: dOne.cacheWriteTokens }));
+  check('P19-3 载荷不出现在整条日志里（含参数/报错/重试字段）', !!dOne && !JSON.stringify(dOne).includes('__pwned'), JSON.stringify(dOne).slice(0, 160));
+  const dStat: any = (await api('/api/stats', { headers: ADMIN })).body;
+  check('P19-4 统计求和未被字符串污染（KPI 仍是数字）', !JSON.stringify(dStat).includes('__pwned'), JSON.stringify(dStat).slice(0, 120));
 }
 // ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);

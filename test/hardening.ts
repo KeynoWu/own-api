@@ -1107,6 +1107,8 @@ section('14. 信息暴露、usage 口径与主键完整性');
     html4.includes('firstHop') && html4.includes('当前最强') && html4.includes('最强首跳'), 'firstHop 消费端缺失');
 
   // DR-17（日账本）：统计页消费 /api/rollups（伪日志 _n 权重进聚合）+ 模型筛选双匹配 + 横幅改口——拆了合并端，长窗统计退回 2000 条视野
+  // 注意：本条只是「源码在场」钉（防误删消费端）。真正的口径守护是 P1-5 行为钉（抽真实窗口块求值，
+  // 锁「账本行必须与原始日志同过时间窗」）——P1-5 那条才是这类回归的防线，别再往本条堆字面量。
   check('UI 钉（DR-17）：日账本合并在场（fetch /api/rollups + _n 权重聚合 + 模型筛选 routedTo 双匹配 + 折账横幅）',
     html4.includes("/api/rollups") && html4.includes('l._n || 1') && html4.includes('l.routedTo === ovSt.model') && html4.includes('已折进日账本'), 'rollups 消费端缺失');
 
@@ -1228,6 +1230,66 @@ section('14. 信息暴露、usage 口径与主键完整性');
   const agg2 = newAgg();
   addAgg(agg2, { ok: false, promptTokens: 10, completionTokens: 0, cacheReadTokens: 90, cacheWriteTokens: 90 });
   check('P6 前端聚合：缓存>prompt 时真实输入夹 0，坏样本不污染统计', agg2.pin === 0 && agg2.errors === 1, JSON.stringify(agg2));
+}
+{
+  // 审查 P1-1 修复钉（服务端）：畸形上游 usage 必须入口归零。
+  // 此前只有流式 mergeUsage 有 typeof 闸，非流式直通 → 字符串落库 → /api/logs → tooltip innerHTML 执行。
+  const t1: any = await import('../src/translate.ts');
+  const pwn = '<img src=x onerror=globalThis.__pwned=1>';
+  const o = t1.usageFromOpenai({ prompt_tokens: pwn, completion_tokens: pwn, prompt_tokens_details: { cached_tokens: pwn }, cache_creation_input_tokens: pwn });
+  check('P1-1 钉：OpenAI 口径畸形 usage 四字段全部归零且都是 number（字符串不得进 Usage）',
+    ['promptTokens', 'completionTokens', 'cacheReadTokens', 'cacheWriteTokens'].every((k) => typeof o[k] === 'number' && o[k] === 0), JSON.stringify(o));
+  const a = t1.usageFromAnthropic({ input_tokens: -5, output_tokens: Number.NaN, cache_read_input_tokens: '1e3', cache_creation_input_tokens: Number.POSITIVE_INFINITY });
+  check('P1-1 钉：Anthropic 口径负数/NaN/数字字符串/Infinity 全部归零（不是"字符串转数字"而是拒绝）',
+    ['promptTokens', 'completionTokens', 'cacheReadTokens', 'cacheWriteTokens'].every((k) => typeof a[k] === 'number' && a[k] === 0), JSON.stringify(a));
+  const good = t1.usageFromOpenai({ prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } });
+  check('P1-1 钉：合法数值原样保留（口径未改，KPI/计费不受影响）',
+    good.promptTokens === 100 && good.completionTokens === 20 && good.cacheReadTokens === 40, JSON.stringify(good));
+}
+{
+  // 审查 P1-5 修复钉（前端窗口）：抽出真实源码块求值，锁「账本行必须与原始日志同过时间窗」。
+  // 只钉源码字符串（旧"空钉"）挡不住这类回归——这里跑的是真代码，改窗口口径必然红。
+  const fsW = await import('node:fs');
+  const htmlW = fsW.readFileSync('web/index.html', 'utf8');
+  const wStart = htmlW.indexOf('const from = (() => {');
+  const wMark = htmlW.indexOf('const aggLogs = ');
+  const wEnd = htmlW.indexOf(';', wMark);
+  check('P1-5 钉可定位：前端窗口块（from→aggLogs）仍可被抽取（重构即红，逼同步改钉）',
+    wStart >= 0 && wMark > wStart && wEnd > wMark, `start=${wStart} mark=${wMark} end=${wEnd}`);
+  const wSrc = htmlW.slice(wStart, wEnd + 1);
+  const wRun = (ovSt: any, allLogs: any[], rollRes: any) =>
+    new Function('ovSt', 'allLogs', 'rollRes', wSrc + '\nreturn { aggLogs, from, rollLogs, logs };')(ovSt, allLogs, rollRes);
+  const dayStr = (off: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - off);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+  const rRows = [
+    { day: dayStr(0), model: 'm1', channel: 'c', requests: 5, errors: 0, pin: 100, pout: 10, cr: 0, cw: 0, costUsd: 1, latSumMs: 0, latN: 0 },
+    { day: dayStr(30), model: 'm1', channel: 'c', requests: 7, errors: 0, pin: 200, pout: 20, cr: 0, cw: 0, costUsd: 2, latSumMs: 0, latN: 0 },
+  ];
+  const rawToday = [{ ts: Date.now(), requestedModel: 'm1', ok: true, promptTokens: 1, completionTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }];
+  const today = wRun({ hours: 'day', model: '' }, rawToday, { body: { rows: rRows } });
+  check('P1-5 钉：「今天」档只纳入今日账本行——历史账不得混进 KPI/统计表',
+    today.rollLogs.length === 1 && today.aggLogs.length === 2, `roll=${today.rollLogs.length} agg=${today.aggLogs.length}`);
+  const wide = wRun({ hours: '720', model: '' }, rawToday, { body: { rows: rRows } });
+  check('P1-5 钉：近 30 天档把两条账本行都纳入（是过滤而非砍掉账本）', wide.rollLogs.length === 2, `roll=${wide.rollLogs.length}`);
+  const noHit = wRun({ hours: 'day', model: 'other' }, rawToday, { body: { rows: rRows } });
+  check('P1-5 钉：模型筛选在账本上同样生效（无命中即空，不残留历史）', noHit.aggLogs.length === 0, `agg=${noHit.aggLogs.length}`);
+  const empty = wRun({ hours: 'day', model: '' }, [], null);
+  check('P1-5 钉：无账本/无日志时零崩溃（rollRes 为 null 也安全）', empty.aggLogs.length === 0, `agg=${empty.aggLogs.length}`);
+}
+{
+  // 审查 P1-1 展示层钉：tooltip 不得再用 innerHTML 拼数据（上游字符串曾可在此执行——
+  // CSP 的 'unsafe-inline' 不拦内联事件处理器）。没有 DOM 无法跑真实 tooltip，故钉两件事：
+  // 旧拼接形态必须消失，且新形态必须是 el()/String() 文本节点构造。
+  const fsT = await import('node:fs');
+  const htmlT = fsT.readFileSync('web/index.html', 'utf8');
+  const oldSplice = /k \+ '<span style="float:right/.test(htmlT);
+  const elBuild = htmlT.includes("tip.append(el('div'") && /String\(v\)\)+;/.test(htmlT);
+  const clearOnly = /tip\.innerHTML\s*=\s*''/.test(htmlT);
+  check('P1-1 展示层钉：tooltip 走 el()/textContent 构造，旧 innerHTML 数据拼接形态已消失',
+    !oldSplice && elBuild && clearOnly, `oldSplice=${oldSplice} elBuild=${elBuild} clearOnly=${clearOnly}`);
 }
 {
   const t: any = await import('../src/translate.ts');

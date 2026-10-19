@@ -416,10 +416,15 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       const d = new Date(b.t);
       const tl = (d.getMonth() + 1) + '/' + d.getDate() + (hourly ? ' ' + String(d.getHours()).padStart(2, '0') + ':00' : '');
       const rows = [['请求数', num(b.requests) + (b.errors ? '（失败 ' + b.errors + '）' : '')]].concat(series.map((se) => [se.name, se.fmt(se.get(b))]));
-      tip.innerHTML = '<div style="color:var(--dimmer,#8b93a3);font-size:11px;margin-bottom:2px">' + tl + '</div>' +
-        rows.map(([k, v], ri) => '<div' + (ri === 0 ? ' style="font-weight:600"' : '') + '>' +
-          (ri === 0 ? '' : '<i style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + series[ri - 1].color + ';margin-right:6px"></i>') +
-          k + '<span style="float:right;margin-left:14px;font-family:ui-monospace,SFMono-Regular,monospace">' + v + '</span></div>').join('');
+      // 审查 P1-1 展示层收口：tooltip 不再用 innerHTML 拼数据（上游字符串此前可在此执行——
+      // CSP 的 'unsafe-inline' 不拦内联事件处理器）。骨架与数据都走 el()，文本一律 createTextNode，
+      // innerHTML 只留清空用途。
+      tip.innerHTML = '';
+      tip.append(el('div', { style: 'color:var(--dimmer,#8b93a3);font-size:11px;margin-bottom:2px' }, tl));
+      rows.forEach(([k, v], ri) => tip.append(el('div', ri === 0 ? { style: 'font-weight:600' } : {},
+        ri === 0 ? null : el('i', { style: 'display:inline-block;width:7px;height:7px;border-radius:50%;background:' + series[ri - 1].color + ';margin-right:6px' }),
+        k,
+        el('span', { style: 'float:right;margin-left:14px;font-family:ui-monospace,SFMono-Regular,monospace' }, String(v)))));
       for (const n of [guide, ...dots, tip]) n.style.opacity = '1';
       const px = (X(i) * r.width) / W, py = e.clientY - r.top;
       const tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -451,7 +456,7 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
     if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model || l.routedTo === ovSt.model);
     // DR-17 日账本合并：被裁日志已按 本地日×归因模型×渠道 折叠——伪日志（_n 请求权重）只进聚合视图
     // （KPI/趋势/Provider/模型统计），不进「请求日志」明细表；账本行与原始日志不相交，合并不双计
-    const rollLogs = ((((rollRes || {}).body || {}).rows) || []).map((r) => ({
+    const rollAll = ((((rollRes || {}).body || {}).rows) || []).map((r) => ({
       _n: r.requests || 0, _e: r.errors || 0, ok: (r.errors || 0) === 0, status: (r.errors || 0) ? 500 : 200,
       ts: (() => { const p = String(r.day).split('-').map(Number); return new Date(p[0], (p[1] || 1) - 1, p[2] || 1, 12).getTime(); })(),
       requestedModel: r.model, publicName: r.model, channelName: r.channel,
@@ -460,6 +465,10 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       // latencyMs 存「和」不存均值——groupAgg 的 latSum 累加后 ÷ 合并请求数才是精确加权平均
       latencyMs: r.latSumMs || 0, wire: 'openai', stream: false, retries: [], chainAttempts: [],
     }));
+    // 审查 P1-5：账本行也必须过同一个时间窗——此前只过模型，于是「今天」档把建库以来全部历史账
+    // 都算进了 KPI 与统计表（趋势图因桶外丢弃恰好正确，现象是「图对、头部数字离谱」）。
+    // 口径：账本是日粒度，ts 取该本地日正午，故窗口边界按天近似——不足一天的尾/首日可能整天计入。
+    const rollLogs = rollAll.filter((l) => l.ts >= from);
     const aggLogs = ovSt.model ? [...logs, ...rollLogs.filter((l) => l.requestedModel === ovSt.model)] : [...logs, ...rollLogs];
     const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
     box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },

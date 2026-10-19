@@ -288,7 +288,13 @@ class Store {
           protocol = 'openai';
         }
         const keysRaw = Array.isArray(ch.keys) ? ch.keys : [];
-        const keys = keysRaw.filter((k: any) => !!k && typeof k.id === 'string' && typeof k.key === 'string' && k.key !== '');
+        const keys = keysRaw
+          .filter((k: any) => !!k && typeof k.id === 'string' && typeof k.key === 'string' && k.key !== '')
+          // P1-4：冷却成因按元素级净化——手改库塞进来的任意串不得进入归因判断
+          .map((k: any) => ({
+            ...k,
+            cooldownReason: k.cooldownReason === 'rate_limit' || k.cooldownReason === 'auth' || k.cooldownReason === 'upstream' ? k.cooldownReason : undefined,
+          }));
         if (keys.length !== keysRaw.length) console.warn(`[store] 渠道 ${ch.id} 丢弃 ${keysRaw.length - keys.length} 个坏 key 元素`);
         return { ...ch, protocol, keys };
       });
@@ -558,6 +564,7 @@ class Store {
     Object.assign(k, next);
     if (patch.status === 'active') {
       k.cooldownUntil = undefined;
+      k.cooldownReason = undefined;
       k.lastError = undefined;
     }
     this.save();

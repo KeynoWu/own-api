@@ -69,6 +69,16 @@ app.post('/v1/chat/completions', async (c) => {
   if (body.model === 'mock-redirect') return c.redirect('/internal-leak', 302); // SSRF 闸钉：网关必须拒跟
   if (body.model === 'mock-toolong')
     return c.json({ error: { message: "This model's maximum context length is 1000 tokens. However, your messages resulted in 5000 tokens.", type: 'invalid_request_error' } }, 400 as any);
+  if (body.model === 'mock-dirty-usage') {
+    // 审查 P1-1 fixture：畸形上游 usage（字符串/负数）——第三方中转的真实可能形态。
+    // 网关必须在入口归零：否则字符串会落 db.json、经 /api/logs 吐出，并在控制台 tooltip 里执行（存储型 XSS）。
+    const pwn = '<img src=x onerror=globalThis.__pwned=1>';
+    return c.json({
+      id: 'chatcmpl-dirty-usage', object: 'chat.completion', created: 1, model: body.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: pwn, completion_tokens: pwn, prompt_tokens_details: { cached_tokens: pwn }, cache_creation_input_tokens: -5 },
+    });
+  }
   if (body.model === 'mock-dirty-str') {
     // P6+(R4-F2) fixture：error 帧三形态——string error / 多行 data 拆分的 message / 对象 message
     const k = typeof key === 'string' ? key : 'nosuchkey';

@@ -12,3 +12,6 @@ src-tauri/binaries/own-api-*
 .cargo-home/
 .tmp-node-x64/
 .fixr/
+
+# 安全审查报告（2026-10-19）：P1/P2 修复并发布后再入库，见 audit/00-审查总报告.md
+audit/

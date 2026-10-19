@@ -457,13 +457,22 @@ export interface Usage {
 
 export const emptyUsage = (): Usage => ({ promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 
+/**
+ * 上游 usage 数值归一（审查 P1-1）。第三方中转是本项目的一等公民场景，其 usage 完全可能是
+ * 字符串/负数/NaN：此前只有流式 mergeUsage 有 typeof 闸，非流式直通——字符串会原样落库、
+ * 被 /api/logs 吐出、在前端被字符串拼接后拼进 tip.innerHTML，构成存储型 XSS（CSP 的
+ * 'unsafe-inline' 不拦内联事件处理器），同时污染统计求和并让图表 toFixed 抛错。
+ * 口径与 mergeUsage 对齐：非有限正数一律 0。
+ */
+const numOr0 = (v: any): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+
 export function usageFromOpenai(u: any): Partial<Usage> {
   if (!u) return {};
   return {
-    promptTokens: u.prompt_tokens || 0,
-    completionTokens: u.completion_tokens || 0,
-    cacheReadTokens: u.prompt_tokens_details?.cached_tokens || u.cache_read_input_tokens || 0,
-    cacheWriteTokens: u.cache_creation_input_tokens || u.prompt_tokens_details?.cache_write_tokens || 0,
+    promptTokens: numOr0(u.prompt_tokens),
+    completionTokens: numOr0(u.completion_tokens),
+    cacheReadTokens: numOr0(u.prompt_tokens_details?.cached_tokens || u.cache_read_input_tokens),
+    cacheWriteTokens: numOr0(u.cache_creation_input_tokens || u.prompt_tokens_details?.cache_write_tokens),
   };
 }
 
@@ -474,11 +483,13 @@ export function usageFromOpenai(u: any): Partial<Usage> {
  */
 export function usageFromAnthropic(u: any): Partial<Usage> {
   if (!u) return {};
-  const cacheRead = u.cache_read_input_tokens || 0;
-  const cacheWrite = u.cache_creation_input_tokens || 0;
+  // 同 usageFromOpenai（审查 P1-1）：Anthropic 口径同样必须数值归一——字符串会以加法拼接的形式
+  // 变本加厉（"-5" + "1e3" = "-51e3"），既污染统计也把注入载荷送进日志/控制台。
+  const cacheRead = numOr0(u.cache_read_input_tokens);
+  const cacheWrite = numOr0(u.cache_creation_input_tokens);
   return {
-    promptTokens: (u.input_tokens || 0) + cacheRead + cacheWrite,
-    completionTokens: u.output_tokens || 0,
+    promptTokens: numOr0(u.input_tokens) + cacheRead + cacheWrite,
+    completionTokens: numOr0(u.output_tokens),
     cacheReadTokens: cacheRead,
     cacheWriteTokens: cacheWrite,
   };

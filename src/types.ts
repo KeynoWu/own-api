@@ -13,6 +13,9 @@ export interface ChannelKey {
   status: KeyStatus;
   /** 冷却到期时间戳（ms）。cooldown 状态且未到期时不参与选取 */
   cooldownUntil?: number;
+  /** 本次冷却的成因（审查 P1-4）：拿不到 key 时据此归因——限流造成的号池不可用不算健康样本（C11 传递），
+   *  认证/服务端错误造成的照旧记账（C12 钉）。老库无此字段 = 未知 → 按旧行为（记账）处理。 */
+  cooldownReason?: 'auth' | 'rate_limit' | 'upstream';
   lastError?: string;
   lastErrorAt?: number;
   lastUsedAt?: number;

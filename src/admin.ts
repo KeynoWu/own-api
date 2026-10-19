@@ -672,9 +672,11 @@ export function createAdmin(): Hono {
   /** 写面闸门：非回环一律 403（§9-2）。plan 也用它——plan 会读本机文件并回报结构事实 */
   const agentWriteGate = (c: any) => (isLocalish(c) ? null : c.json({ error: 'loopback only：写入本机 agent 配置仅限本机直连' }, 403));
 
-  /** 写进对方文件里的网关基址：请求体里没有 URL 字段可传，只能由本机监听地址派生（探针同源同理） */
-  const reqBase = (c: any) =>
-    `${new URL(c.req.url).protocol}//${c.req.header('host') || `127.0.0.1:${process.env.OWN_API_PORT || process.env.PORT || 8787}`}`.replace(/\/+$/, '');
+  /** 写进对方文件里的网关基址：只认本进程真实监听地址（selfBase，index.ts 在 listen 回调注入）。
+   *  审查 P1-3：此前取请求 Host 头——DNS-rebinding 页面天然满足「socket 回环 + Host=攻击者域」，
+   *  可把 baseUrl 固化成攻击者域、并把明文 vkey 一并写进对方配置，此后 prompt 与 key 持续外送。
+   *  请求体与请求头都不再是基址来源（与 agent-import 文件头「零外部入参」的承诺对齐）。 */
+  const reqBase = () => selfBase() || `http://127.0.0.1:${process.env.OWN_API_PORT || process.env.PORT || 8787}`;
   /** 主模型的有效对外协议：单模型看路由（缺省继承渠道）；auto 走 openai（候选可混合，网关负责互转） */
   const protocolOf = (model: string): 'openai' | 'anthropic' => {
     const single = store.findModelByName(model);
@@ -718,7 +720,7 @@ export function createAdmin(): Hono {
       adapter,
       body,
       // oursBases：预览与提交必须同一把尺（DR-CB），所以两处都带账本基址——否则「预览说冲突、点同步却成功」
-      ctx: { home: agentHome(), baseUrl: reqBase(c), apiKey: vk.key, vkeyId: vk.id, model, protocol, models, roles: filterRoles(adapter, wantRoles), prevLink: saved, oursBases: saved ? [saved.baseUrl] : undefined },
+      ctx: { home: agentHome(), baseUrl: reqBase(), apiKey: vk.key, vkeyId: vk.id, model, protocol, models, roles: filterRoles(adapter, wantRoles), prevLink: saved, oursBases: saved ? [saved.baseUrl] : undefined },
     };
   };
 
@@ -784,7 +786,7 @@ export function createAdmin(): Hono {
     if (!models.some((m) => m.id === link.model)) {
       return c.json({ error: `主模型 ${link.model} 已不在这把 key 的可用范围内（被删除或不再授权）。同步不替你挑新模型——请重新接入并选一个`, allowed: models.map((m) => m.id) }, 409);
     }
-    const ctx = { home: agentHome(), baseUrl: reqBase(c), apiKey: vk.key, vkeyId: vk.id, model: link.model, protocol: protocolOf(link.model), models, roles: link.roles, prevLink: link, oursBases: [link.baseUrl] };
+    const ctx = { home: agentHome(), baseUrl: reqBase(), apiKey: vk.key, vkeyId: vk.id, model: link.model, protocol: protocolOf(link.model), models, roles: link.roles, prevLink: link, oursBases: [link.baseUrl] };
     const res = applyLink(adapter, ctx);
     let saved = res.link;
     if (res.link) {
@@ -886,17 +888,22 @@ export function createAdmin(): Hono {
   // ---------- 客户端接入示例 ----------
   app.get('/snippet', (c) => {
     const vk = store.listVKeys().find((k) => k.enabled) || store.listVKeys()[0];
-    const base = `${new URL(c.req.url).protocol}//${c.req.header('host') || `localhost:${process.env.PORT || 8787}`}`;
+    // 基址优先用本进程真实监听地址（生产恒注入）；未注入时退回旧 Host 口径以兼容测试引导
+    const base = selfBase() || `${new URL(c.req.url).protocol}//${c.req.header('host') || `localhost:${process.env.PORT || 8787}`}`;
     const model = store.listModels().find((m) => m.enabled)?.publicName || 'gpt-4o';
     if (!vk) return c.json({ error: '还没有对外 key' }, 404);
+    // 审查 P1-2：明文 key 只在本机直连时出现。此前只闸了 key 字段，curl/openaiSdk/claudeCode/
+    // codexCli 四个剪贴板模板仍无条件内插 vk.key——掩码战役被这个单点整个绕过。
+    const reveal = isLocalish(c);
+    const shown = reveal ? vk.key : '（明文 key 请在本机直连的管理台查看复制）';
     return c.json({
       baseUrl: base,
-      key: isLocalish(c) ? vk.key : '（明文 key 请在本机直连的管理台查看复制）', // R1-S1：掩码战役后最后的无闸明文出口，与 reveal 同口径
+      key: shown, // R1-S1：掩码战役后最后的无闸明文出口，与 reveal 同口径
       model,
-      curl: `curl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${vk.key}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}'`,
-      openaiSdk: `import OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${vk.key}" });\nconst r = await client.chat.completions.create({ model: "${model}", messages: [{ role: "user", content: "hi" }] });`,
-      claudeCode: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${vk.key}"\nexport ANTHROPIC_MODEL="${model}"`,
-      codexCli: `# ~/.codex/config.toml\nmodel = "${model}"\n[model_providers.own-api]\nname = "own-api"\nbase_url = "${base}/v1"\nenv_key = "OWN_API_KEY"\n\n# export OWN_API_KEY="${vk.key}"`,
+      curl: `curl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${shown}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}'`,
+      openaiSdk: `import OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${shown}" });\nconst r = await client.chat.completions.create({ model: "${model}", messages: [{ role: "user", content: "hi" }] });`,
+      claudeCode: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${shown}"\nexport ANTHROPIC_MODEL="${model}"`,
+      codexCli: `# ~/.codex/config.toml\nmodel = "${model}"\n[model_providers.own-api]\nname = "own-api"\nbase_url = "${base}/v1"\nenv_key = "OWN_API_KEY"\n\n# export OWN_API_KEY="${shown}"`,
     });
   });
 

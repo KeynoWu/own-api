@@ -113,6 +113,9 @@ export function recordFailure(
   if (cooldownMs > 0) {
     key.status = 'cooldown';
     key.cooldownUntil = now + cooldownMs;
+    // 审查 P1-4：记下成因。号池"拿不到 key"时用它区分「限流打进去的冷却」（C11：不算健康样本，
+    // 且要传递到同渠道兄弟候选）与「认证/服务端故障」（C12：照旧进健康窗口）。
+    key.cooldownReason = kind === 'rate_limit' ? 'rate_limit' : kind === 'auth' ? 'auth' : 'upstream';
   }
   store.save();
   return { retryable: true, cooldownMs };
@@ -123,6 +126,7 @@ export function recordSuccess(channel: Channel, key: ChannelKey) {
     key.totalErrors = 0;
     key.status = 'active';
     key.cooldownUntil = undefined;
+    key.cooldownReason = undefined; // 复活即清成因（P1-4）
     key.lastError = undefined;
   }
   void channel;

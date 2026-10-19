@@ -329,6 +329,16 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     if (!key) {
       if (!retries.length) lastMessage = `渠道 "${channel.name}" 号池为空或全部禁用`;
       else if (tried.size >= channel.keys.length) lastMessage = `${lastMessage}（号池 ${tried.size} 把 key 已全部尝试）`;
+      // 审查 P1-4：拿不到 key 时按冷却成因归因。若候选可用的 key 全是被"限流"打进去的冷却，
+      // 本候选（含同渠道兄弟候选）学不到任何自身健康信息——C11「rate_limit 不计健康样本」必须传递，
+      // 否则一个候选的 429 会把兄弟候选的健康分一起压到 0.1，并在链记录里被伪造成没发生过的 502。
+      // 反向：认证/服务端故障造成的冷却照旧进健康窗口（C12 钉：定向流量也进健康窗口）。
+      const cooling = channel.keys.filter((k) => k.status === 'cooldown' && !!k.cooldownUntil && k.cooldownUntil > Date.now());
+      if (cooling.length > 0 && cooling.every((k) => k.cooldownReason === 'rate_limit')) {
+        lastWasRateLimit = true;
+        lastStatus = 429;
+        if (retryAfterMs === undefined) retryAfterMs = Math.max(0, Math.min(...cooling.map((k) => (k.cooldownUntil as number) - Date.now())));
+      }
       break;
     }
     log.attempts = a.attemptBase + attempt;
@@ -613,7 +623,8 @@ async function attemptRoute(a: AttemptInput): Promise<AttemptOutcome> {
     return { kind: 'response', res: c.json(legacyObj as any, 200, headers) };
   }
 
-  // key 级重试穷尽：候选判负（rate_limit 不计健康样本，C11）
+  // key 级重试穷尽：候选判负（rate_limit 不计健康样本，C11；P1-4 让"限流造成的号池不可用"同样不计——
+  // 见上面 !key 分支的成因归因）
   return { kind: 'candidate_fail', status: lastStatus, message: lastMessage, sample: !lastWasRateLimit, rateLimit: lastWasRateLimit, retryAfterMs };
 }
 
