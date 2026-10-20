@@ -340,8 +340,9 @@ const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' 
 
 // ---------------- 概览 ----------------
 // ---------------- 使用统计（首页） ----------------
-const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start: null }, model: '', fstat: '', tab: 'logs', refresh: 30 };
-// hours: 'day'=自然日（本地零点起）；数字=滚动小时窗。range=日历自定义区间 { from, to }（[from,to) 右开，to=结束次日零点）
+const ovSt = { range: null, cal: { open: false, month: null, start: null }, model: '', fstat: '', tab: 'logs', refresh: 30 };
+// 窗口只有两种：『今天』（本地自然日 [零点, now]）或日历区间 { from, to }（[from,to) 右开，to=结束次日零点）。
+// 滚动档（近 24 小时 / 近 7 天 / 近 30 天）已移除：要看别的日期一律走日历，避免「同名档两套窗口」
 // 两者互斥：选中自定义区间时 hours 档位让位（下拉里以 'custom' 显示区间文案），切回预设会清空 range
 {
   const newAgg = () => ({ requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, cost: 0 });
@@ -467,13 +468,12 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
       for (let k = 1; (lead + days + k - 1) % 7 !== 0; k++) { const d = new Date(year, month, days + k); cells.push({ ts: d.getTime(), day: d.getDate(), inMonth: false }); }
       return cells;
     };
-    // 窗口解析：预设 4 档（to=now，含当前桶）或日历区间（[from,to) 右开，to=结束次日零点）
+    // 窗口解析：只看两种——日历区间（[from,to) 右开，to=结束次日零点）或『今天』（[零点, now]，含当前桶）。
+    // 任何未知档位（例如升级前残留在内存里的 hours）一律退化为『今天』，不崩、不静默换窗。
     const statWin = (st, now) => {
       if (st.range) { const span = st.range.to - st.range.from; return { from: st.range.from, to: st.range.to, toIncl: false, custom: true, hourly: span <= 2 * 86400e3, label: rangeLabel(st.range) }; }
-      if (st.hours === 'day') { const d = new Date(now); d.setHours(0, 0, 0, 0); return { from: d.getTime(), to: now, toIncl: true, custom: false, hourly: true, label: '今天' }; }
-      const d = new Date(now - st.hours * 3600e3);
-      if (st.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0);
-      return { from: d.getTime(), to: now, toIncl: true, custom: false, hourly: st.hours <= 48, label: st.hours === 24 ? '近 24 小时' : st.hours === 168 ? '近 7 天' : '近 30 天' };
+      const d = new Date(now); d.setHours(0, 0, 0, 0);
+      return { from: d.getTime(), to: now, toIncl: true, custom: false, hourly: true, label: '今天' };
     };
     // 明细取数上限：自定义区间取 LOG_LIMIT+1 条——多取一条才能把「恰好 5000 条、一条没少」与
     // 「超过 5000 条、真被裁」区分开（只取 5000 时两者同形，判据必然误报）
@@ -522,15 +522,9 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
     // （伪 ts >= from），对「今天/7 天/30 天」够用，但没有上界：自定义的过去区间会把窗后的账本日一起拖进来。
     // DR-UC-1：账本改为按**日区间相交**过窗（rowDay ∩ [from,to) ≠ ∅，两端都判）——既补上界，也与查询时刻无关
     // （不再依赖「正午伪 ts 碰巧落在窗内」）。doc-calendar 在 docs/usage-calendar-design.md §4.5 推演了这件事。
-    // 代价如实记账（不假装与 v0.1.17 全同）：账本只有天粒度，与窗相交的那天按**整天**计入，因此
-    // 「今天/7 天/30 天」三档与 v0.1.17 一致，而「近 24 小时」档在窗起点落于昨天时会多算昨天整天
-    // （v0.1.17 用正午比下界：午后排除昨天、上午又包含昨天，同一档位随查询时刻漂移）。多计部分由
-    // 下方 rollPartial 显式提示，不静默。
+    // 账本只有天粒度，与窗相交的那天按整天计入；本页两种窗口（今天 / 日历区间）的 from 都是本地日零点，
+    // 因此不存在「跨在窗前的半天」——口径与 v0.1.17 的『今天』档完全一致，也不再有随查询时刻漂移的问题。
     const rollLogs = rollAll.filter((l) => l._d0 < win.to && nextDay(l._d0) > win.from);
-    // 账本行「日起点早于窗起点」= 这天在窗前还有一部分，整天计入故最多多算这一段（预设「近 24 小时」档会撞上）。
-    // 必须按**天**去重：账本行粒度是 本地日×模型×渠道，同一天多行只算一天，否则横幅的「N 天」会被放大。
-    // （与模型筛选无关：跨不跨窗只取决于日的起点，任何筛选都不改变这个天数。）
-    const rollPartial = new Set(rollLogs.filter((l) => l._d0 < win.from).map((l) => l._d0)).size;
     const aggLogs = ovSt.model ? [...logs, ...rollLogs.filter((l) => l.requestedModel === ovSt.model)] : [...logs, ...rollLogs];
     const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
     box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
@@ -543,10 +537,11 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
         // 日历入口：开着时按钮高亮；打开时把月历定位到当前窗口起点，并清掉半选的起点
         el('button', { class: 'btn sm' + (ovSt.cal.open ? ' primary' : ''), title: '按日历选择某一天或某个区间',
           onclick: () => { ovSt.cal.open = !ovSt.cal.open; ovSt.cal.month = ovSt.cal.month || win.from; ovSt.cal.start = null; go('overview'); } }, '📅 日历'),
-        // 自定义区间生效时，下拉里以 'custom' 档显示区间文案（选中它本身不切档，避免误清区间）
-        sel([...(win.custom ? [['custom', win.label]] : []), ['day', '今天'], ['24', '近 24 小时'], ['168', '近 7 天'], ['720', '近 30 天']],
-          win.custom ? 'custom' : String(ovSt.hours),
-          (v) => { if (v === 'custom') return; ovSt.range = null; ovSt.cal.start = null; ovSt.hours = v === 'day' ? 'day' : Number(v); go('overview'); }),
+        // 档位只剩『今天』：区间生效时下拉里以 'custom' 显示区间文案（选中它本身不切档，避免误清区间）。
+        // 其他日期一律用日历选——滚动档（近 24 小时 / 近 7 天 / 近 30 天）已按owner决定移除。
+        sel([...(win.custom ? [['custom', win.label]] : []), ['day', '今天']],
+          win.custom ? 'custom' : 'day',
+          (v) => { if (v === 'custom') return; ovSt.range = null; ovSt.cal.start = null; go('overview'); }),
       )));
     // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说。
     // DR-UC-1：自定义区间走的是「按窗取数」，这条截断提示对它不成立（条数少不代表被裁），故只在预设档出现。
@@ -558,8 +553,6 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
     // DR-UC-1：自定义区间若真被 5000 条上限截断，必须显式说——「明细缺失」与「已折进日账本」是两件事
     if (logTruncated(allLogs, win)) box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' },
       '所选区间明细超过 5000 条，仅取回最近 5000 条：更早的明细未纳入——已被裁剪的部分已折进日账本（KPI/趋势仍含），仍在保留上限内的部分两边都不在（KPI/趋势会少计）；缩小范围可看全。'));
-    if (rollPartial > 0) box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' },
-      '账本为日粒度：有 ' + rollPartial + ' 天的日账跨在本档窗口起点之前，已按整天计入（最多多算这些天落在窗前的部分）。'));
     // ==================== 日历：可用性判定 + 月历卡片（DR-UC-1）====================
     // 四态可用性（都在本地时区）：
     //   raw  = 该日有已加载的原始明细（精确计数）→ 加粗
@@ -603,8 +596,6 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
         ['本周', { from: weekMon, to: nextDay(today) }],
         ['本月', { from: new Date(new Date(today).getFullYear(), new Date(today).getMonth(), 1).getTime(), to: nextDay(today) }],
         ['上月', { from: new Date(new Date(today).getFullYear(), new Date(today).getMonth() - 1, 1).getTime(), to: new Date(new Date(today).getFullYear(), new Date(today).getMonth(), 1).getTime() }],
-        ['近 7 天（自然日）', { from: dayAdd(today, -6), to: nextDay(today) }],
-        ['近 30 天（自然日）', { from: dayAdd(today, -29), to: nextDay(today) }],
       ];
       const grid = el('div', { style: 'display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px' },
         ...['一', '二', '三', '四', '五', '六', '日'].map((w) => el('div', { class: 'muted', style: 'text-align:center;font-size:11px;padding:2px 0' }, w)),
@@ -682,7 +673,7 @@ const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start
     const nextBucket = (t) => { if (hourly) return t + 3600e3; const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(); };
     const buckets = new Map();
     // 预设档：桶铺到当前桶（含 now 所在桶）；自定义区间：桶铺 [from,to)，不含结束次日零点
-    const startT = win.custom || ovSt.hours === 'day' ? align(win.from) : align(Date.now() - (ovSt.hours * 3600e3 - step));
+    const startT = align(win.from); // 两种窗口（今天 / 日历区间）都从窗起点所在的桶开始铺
     for (let t = startT; win.toIncl ? t <= win.to : t < win.to; t = nextBucket(t)) buckets.set(t, Object.assign({ t }, newAgg()));
     let ledgerOff = 0; // 账本行（日粒度）落不进桶的数量：如上午查「今天」时它的正午桶在窗内尚不存在
     for (const l of aggLogs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); else if (l._d0 !== undefined) ledgerOff++; }
