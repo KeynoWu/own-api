@@ -2294,6 +2294,94 @@ ui-theme:
   check('P19-4 统计求和未被字符串污染（KPI 仍是数字）', !JSON.stringify(dStat).includes('__pwned'), JSON.stringify(dStat).slice(0, 120));
 }
 // ================================================================
+// §20 统计页日历钉：/api/logs 区间过滤（from 闭 / to 开）+ /api/overview 日志时间跨度。
+// 本块位于全量套件最后，注入的合成日志不再影响后续断言（其后只有结果汇总与 flushSync）。
+// ================================================================
+{
+  section('20. 统计页日历：/api/logs from/to 区间（右开边界）与 /api/overview 时间跨度');
+  const now = Date.now();
+  const DAY = 86400_000;
+  const ts3 = now - 3 * DAY; // 今天-3天
+  const ts1 = now - 1 * DAY; // 今天-1天
+  const ts0 = now; // 刚刚
+  // 形状照真实 RequestLog（必填字段齐全），带唯一标记 requestedModel:'p20-probe' 便于甄别
+  const mkP20 = (ts: number, i: number) => ({
+    id: `p20-probe-${i}`,
+    ts,
+    path: '/v1/chat/completions',
+    endpoint: '/v1/chat/completions',
+    requestedModel: 'p20-probe',
+    routedTo: 'p20-probe',
+    publicName: 'p20-probe',
+    channelName: 'p20-probe-ch',
+    wire: 'openai',
+    status: 200,
+    ok: true,
+    stream: false,
+    latencyMs: 1,
+    attempts: 1,
+    promptTokens: 1,
+    completionTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsd: 0,
+  });
+  // §18 的 clearLogs 已把原始日志窗清零、§19 最多留 1 条 → 为让下方 limit=5 断言确定成立，
+  // 另补 2 条更早的占位合成日志（标记 p20-filler，所有区间断言按 p20-probe 甄别，互不干扰）。
+  // 插入顺序即时间顺序（/api/logs 是 reverse 插入序，不是按 ts 排序），故更早的先 push。
+  const mkFiller = (ts: number, i: number) => ({ ...mkP20(ts, i), id: `p20-filler-${i}`, requestedModel: 'p20-filler', routedTo: 'p20-filler', publicName: 'p20-filler' });
+  store.db.logs.push(mkFiller(now - 5 * DAY, 5), mkFiller(now - 4 * DAY, 4), mkP20(ts3, 3), mkP20(ts1, 1), mkP20(ts0, 0));
+  const logsOf = async (q: string) => {
+    const r = await api(`/api/logs${q}`, { headers: ADMIN });
+    const b: any = r.body;
+    return { status: r.status, arr: (b.logs || b.data || b) as any[] };
+  };
+  const p20 = (arr: any[]) => arr.filter((l) => l.requestedModel === 'p20-probe').map((l) => l.ts);
+
+  // 区间 [今天-2天, now+1000)：只含「今天-1天」「刚刚」；「今天-3天」必须被排除
+  const mid = await logsOf(`?from=${now - 2 * DAY}&to=${now + 1000}`);
+  check(
+    'P20-1 区间过滤 from 闭 to 开：from=今天-2天&to=now+1000 恰含 今天-1天 与 刚刚（今天-3天被排除）',
+    mid.status === 200 && JSON.stringify(p20(mid.arr).slice().sort((a, b) => a - b)) === JSON.stringify([ts1, ts0]),
+    JSON.stringify(p20(mid.arr)),
+  );
+  check('P20-2 区间结果最新在前（ts 降序）', p20(mid.arr).length === 2 && p20(mid.arr)[0] === ts0 && p20(mid.arr)[1] === ts1, JSON.stringify(mid.arr.map((l) => l.ts).slice(0, 4)));
+
+  // 右开：to = 「今天-1天」那条的 ts → 该条被排除（若为闭区间则会含它）
+  const ro = await logsOf(`?to=${ts1}`);
+  check('P20-3 to 右开：to=今天-1天那条的 ts 时该条被排除（只剩更早的 今天-3天）', ro.status === 200 && JSON.stringify(p20(ro.arr)) === JSON.stringify([ts3]), JSON.stringify(p20(ro.arr)));
+  const bo = await logsOf(`?from=${ts1}&to=${ts1}`);
+  check('P20-4 右开协证：from=to=今天-1天那条的 ts → 空集（闭端被右开端抵消）', bo.status === 200 && p20(bo.arr).length === 0, JSON.stringify(p20(bo.arr)));
+
+  // 只给 from / 只给 to
+  const onlyFrom = await logsOf(`?from=${now - 2 * DAY}`);
+  check('P20-5 只给 from：恰含 今天-1天 与 刚刚（今天-3天被排除）', onlyFrom.status === 200 && JSON.stringify(p20(onlyFrom.arr).slice().sort((a, b) => a - b)) === JSON.stringify([ts1, ts0]), JSON.stringify(p20(onlyFrom.arr)));
+  const onlyTo = await logsOf(`?to=${now - 2 * DAY}`);
+  check('P20-6 只给 to：只剩 今天-3天（今天-1天/刚刚被排除）', onlyTo.status === 200 && JSON.stringify(p20(onlyTo.arr)) === JSON.stringify([ts3]), JSON.stringify(p20(onlyTo.arr)));
+
+  // 畸形输入绝不 500，且与不带参数完全一致
+  const base = await logsOf('');
+  const bad = await logsOf('?from=abc&to=xyz');
+  const blank = await logsOf('?from=&to=');
+  const nanInf = await logsOf('?from=NaN&to=Infinity');
+  check('P20-7 畸形 from=abc&to=xyz → 200 且条数与不带参数一致', bad.status === 200 && bad.arr.length === base.arr.length, `status=${bad.status} bad=${bad.arr.length} base=${base.arr.length}`);
+  check('P20-8 空串 from=&to= 与 NaN/Infinity 一律忽略（200 且与基线一致）', blank.status === 200 && nanInf.status === 200 && blank.arr.length === base.arr.length && nanInf.arr.length === base.arr.length, `blank=${blank.arr.length} nanInf=${nanInf.arr.length} base=${base.arr.length}`);
+  check('P20-9 无参数响应与注入前同形（数组、最新在前、含全部 3 条探针）', Array.isArray(base.arr) && base.arr[0].ts === ts0 && p20(base.arr).length === 3, `len=${base.arr.length}`);
+
+  // limit 语义未变
+  const lim = await logsOf('?limit=5');
+  const desc = lim.arr.every((l, i) => i === 0 || lim.arr[i - 1].ts >= l.ts);
+  check('P20-10 limit=5 恰 5 条且第一条最新（ts 非递增）', lim.status === 200 && lim.arr.length === 5 && lim.arr[0].ts === ts0 && desc, `len=${lim.arr.length} head=${lim.arr.map((l) => l.ts).join(',')}`);
+
+  // /api/overview 时间跨度：纯新增字段
+  const ov: any = (await api('/api/overview', { headers: ADMIN })).body;
+  const minTs = store.db.logs.reduce((m, l) => (l.ts < m ? l.ts : m), store.db.logs.length ? store.db.logs[0].ts : NaN);
+  check('P20-11 /api/overview oldestLogTs/newestLogTs 为数字', typeof ov.oldestLogTs === 'number' && Number.isFinite(ov.oldestLogTs) && typeof ov.newestLogTs === 'number' && Number.isFinite(ov.newestLogTs), `${ov.oldestLogTs} / ${ov.newestLogTs}`);
+  check('P20-12 newestLogTs 等于刚注入的「刚刚」那条 ts', ov.newestLogTs === ts0, `${ov.newestLogTs} vs ${ts0}`);
+  check('P20-13 oldestLogTs 等于 store.db.logs 实测最早 ts', ov.oldestLogTs === minTs, `${ov.oldestLogTs} vs ${minTs}`);
+  check('P20-14 overview 既有字段未被改动（logs 计数=最新窗长度，logRetention 仍在）', ov.logs === store.db.logs.length && typeof ov.logRetention === 'number' && !!ov.channels, `logs=${ov.logs} ret=${ov.logRetention}`);
+}
+// ================================================================
 console.log(`\n\x1b[1m结果\x1b[0m  \x1b[32m${pass} 通过\x1b[0m  ${failCount ? `\x1b[31m${failCount} 失败\x1b[0m` : ''}`);
 if (failures.length) {
   console.log('\n失败明细：');

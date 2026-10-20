@@ -339,7 +339,9 @@ const card = (k, v, sub) => el('div', { class: 'card' }, el('div', { class: 'k' 
 
 // ---------------- 概览 ----------------
 // ---------------- 使用统计（首页） ----------------
-const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; // hours: 'day'=自然日（本地零点起）；数字=滚动小时窗
+const ovSt = { hours: 'day', range: null, cal: { open: false, month: null, start: null }, model: '', fstat: '', tab: 'logs', refresh: 30 };
+// hours: 'day'=自然日（本地零点起）；数字=滚动小时窗。range=日历自定义区间 { from, to }（[from,to) 右开，to=结束次日零点）
+// 两者互斥：选中自定义区间时 hours 档位让位（下拉里以 'custom' 显示区间文案），切回预设会清空 range
 {
   const newAgg = () => ({ requests: 0, errors: 0, pin: 0, pout: 0, cr: 0, cw: 0, cost: 0 });
   const addAgg = (b, l) => {
@@ -437,8 +439,51 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
   };
   views.overview = async () => {
     const myGen = viewGen; // F1：本视图代际——await 之后若已被切走，禁止挂 timer（孤儿 interval 会把用户反复拽回来）
+    // ==================== 统计窗口与日历区间（DR-UC-1）====================
+    // 纯函数区：不碰 DOM，供 hardening 抽真实源码块求值（窗口解析 / 区间归一 / 月历网格 / 可用性判定）
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const dayKey = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
+    const dayStartOf = (ts) => { const d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    // 次日零点用日历进位而非 +86400e3：跨月/跨年/夏令时都不会错位
+    const nextDay = (ts) => { const d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(); };
+    // 区间归一：允许反着点（先点晚再点早），一律归一为 [较早日, 较晚日+1天)
+    const normDayRange = (aTs, bTs) => { const a = dayStartOf(aTs), b = dayStartOf(bTs); return { from: Math.min(a, b), to: nextDay(Math.max(a, b)) }; };
+    const rangeLabel = (r) => {
+      const a = new Date(r.from), b = new Date(r.to - 1); // to 右开：回退 1ms 才落在结束当天
+      const ka = dayKey(a.getTime()), kb = dayKey(b.getTime());
+      if (ka === kb) return ka.slice(5);
+      const days = Math.round((dayStartOf(b.getTime()) - dayStartOf(a.getTime())) / 86400e3) + 1;
+      // 同年两端都省年份；跨年两端都带年份——不许一侧带一侧不带
+      return (a.getFullYear() === b.getFullYear() ? ka.slice(5) + ' ~ ' + kb.slice(5) : ka + ' ~ ' + kb) + ' · ' + days + ' 天';
+    };
+    // 月历网格（ISO：周一为首列）。跨月补位 inMonth=false，用于灰显占位与点选切月
+    const monthGrid = (year, month) => { // month: 0-11
+      const lead = (new Date(year, month, 1).getDay() + 6) % 7; // 周一=0
+      const days = new Date(year, month + 1, 0).getDate();
+      const cells = [];
+      for (let i = lead; i > 0; i--) { const d = new Date(year, month, 1 - i); cells.push({ ts: d.getTime(), day: d.getDate(), inMonth: false }); }
+      for (let i = 1; i <= days; i++) { const d = new Date(year, month, i); cells.push({ ts: d.getTime(), day: i, inMonth: true }); }
+      for (let k = 1; (lead + days + k - 1) % 7 !== 0; k++) { const d = new Date(year, month, days + k); cells.push({ ts: d.getTime(), day: d.getDate(), inMonth: false }); }
+      return cells;
+    };
+    // 窗口解析：预设 4 档（to=now，含当前桶）或日历区间（[from,to) 右开，to=结束次日零点）
+    const statWin = (st, now) => {
+      if (st.range) { const span = st.range.to - st.range.from; return { from: st.range.from, to: st.range.to, toIncl: false, custom: true, hourly: span <= 2 * 86400e3, label: rangeLabel(st.range) }; }
+      if (st.hours === 'day') { const d = new Date(now); d.setHours(0, 0, 0, 0); return { from: d.getTime(), to: now, toIncl: true, custom: false, hourly: true, label: '今天' }; }
+      const d = new Date(now - st.hours * 3600e3);
+      if (st.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0);
+      return { from: d.getTime(), to: now, toIncl: true, custom: false, hourly: st.hours <= 48, label: st.hours === 24 ? '近 24 小时' : st.hours === 168 ? '近 7 天' : '近 30 天' };
+    };
+    // 明细取数上限：自定义区间取 LOG_LIMIT+1 条——多取一条才能把「恰好 5000 条、一条没少」与
+    // 「超过 5000 条、真被裁」区分开（只取 5000 时两者同形，判据必然误报）
+    const LOG_LIMIT = 5000;
+    const win = statWin(ovSt, Date.now());
+    // ====================================================================
     // 号池健康页才顺带取 auto-health/routes（饱和观测 R8）——其他页不加请求
-    const [o, allLogs, ah, allRoutes, rollRes] = await Promise.all([api('/api/overview'), api('/api/logs?limit=5000'),
+    // 自定义区间按 [from,to) 向服务端取该窗日志（retention>5000 时也不丢旧明细），多取一条用于判「真被裁」；
+    // 预设档保持取最新 LOG_LIMIT 条
+    const logUrl = win.custom ? '/api/logs?limit=' + (LOG_LIMIT + 1) + '&from=' + win.from + '&to=' + win.to : '/api/logs?limit=' + LOG_LIMIT;
+    const [o, allLogs, ah, allRoutes, rollRes] = await Promise.all([api('/api/overview'), api(logUrl),
       ovSt.tab === 'pool' ? api('/api/auto-health').catch(() => null) : Promise.resolve(null),
       ovSt.tab === 'pool' ? api('/api/routes').catch(() => null) : Promise.resolve(null),
       api('/api/rollups').catch(() => null)]);
@@ -446,29 +491,45 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
     if (updateState && updateState.updateAvailable && !updateState.error) box.append(el('div', { class: 'card', style: 'padding:8px 12px;margin-bottom:10px;font-size:12px' },
       '检测到新版本 v' + updateState.latest + '（当前 v' + updateState.current + '）——',
       el('a', { href: '#settings', style: 'color:var(--accent)' }, '到「设置」安装')));
-    const from = (() => {
-      if (ovSt.hours === 'day') { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); } // 「今天」=本地自然日，不混昨天
-      const d = new Date(Date.now() - ovSt.hours * 3600e3); if (ovSt.hours <= 48) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime();
-    })(); // L6：KPI 与图表桶同锚
-    let logs = allLogs.filter((l) => l.ts >= from);
+    // L6：KPI 与图表桶同锚；DR-UC-1：自定义区间 [from,to) 右开，预设档 to=now
+    let logs = allLogs.filter((l) => l.ts >= win.from && l.ts < win.to);
+    // 自定义区间走「按窗取数」，明细可能真被上限裁掉：判据 = 取回条数 > LOG_LIMIT（因为多取了 1 条）。
+    // 恰好 5000 条、一条没少时不会误报；预设档不适用（它取的就是最新 LOG_LIMIT 条，另有 F6 横幅口径）。
+    // 不静默少数据：命中即挂横幅（「已被裁、已折账」与「仍在保留上限内、两头都不在」是两件事，分开说）。
+    const logTruncated = (arr, w) => !!w.custom && arr.length > LOG_LIMIT;
     // 模型筛选双匹配：请求名（如 model_auto）或实际落点（routedTo）——DR-14 统计已按真实模型归因，筛选器同规
     const modelNames = [...new Set([...allLogs.map((l) => l.requestedModel), ...allLogs.map((l) => l.routedTo)].filter(Boolean))].sort();
     if (ovSt.model) logs = logs.filter((l) => l.requestedModel === ovSt.model || l.routedTo === ovSt.model);
     // DR-17 日账本合并：被裁日志已按 本地日×归因模型×渠道 折叠——伪日志（_n 请求权重）只进聚合视图
     // （KPI/趋势/Provider/模型统计），不进「请求日志」明细表；账本行与原始日志不相交，合并不双计
-    const rollAll = ((((rollRes || {}).body || {}).rows) || []).map((r) => ({
-      _n: r.requests || 0, _e: r.errors || 0, ok: (r.errors || 0) === 0, status: (r.errors || 0) ? 500 : 200,
-      ts: (() => { const p = String(r.day).split('-').map(Number); return new Date(p[0], (p[1] || 1) - 1, p[2] || 1, 12).getTime(); })(),
-      requestedModel: r.model, publicName: r.model, channelName: r.channel,
-      promptTokens: (r.pin || 0) + (r.cr || 0) + (r.cw || 0), completionTokens: r.pout || 0,
-      cacheReadTokens: r.cr || 0, cacheWriteTokens: r.cw || 0, costUsd: r.costUsd || 0,
-      // latencyMs 存「和」不存均值——groupAgg 的 latSum 累加后 ÷ 合并请求数才是精确加权平均
-      latencyMs: r.latSumMs || 0, wire: 'openai', stream: false, retries: [], chainAttempts: [],
-    }));
-    // 审查 P1-5：账本行也必须过同一个时间窗——此前只过模型，于是「今天」档把建库以来全部历史账
-    // 都算进了 KPI 与统计表（趋势图因桶外丢弃恰好正确，现象是「图对、头部数字离谱」）。
-    // 口径：账本是日粒度，ts 取该本地日正午，故窗口边界按天近似——不足一天的尾/首日可能整天计入。
-    const rollLogs = rollAll.filter((l) => l.ts >= from);
+    // _d0 = 该账本行的本地日零点（DR-UC-1 起用于窗口过滤与「是否为账本行」判定）；ts 取正午只用于落桶
+    const rollAll = ((((rollRes || {}).body || {}).rows) || []).map((r) => {
+      const p = String(r.day).split('-').map(Number);
+      const d0 = new Date(p[0], (p[1] || 1) - 1, p[2] || 1).getTime();
+      return {
+        _n: r.requests || 0, _e: r.errors || 0, ok: (r.errors || 0) === 0, status: (r.errors || 0) ? 500 : 200,
+        _d0: d0, ts: d0 + 12 * 3600e3,
+        requestedModel: r.model, publicName: r.model, channelName: r.channel,
+        promptTokens: (r.pin || 0) + (r.cr || 0) + (r.cw || 0), completionTokens: r.pout || 0,
+        cacheReadTokens: r.cr || 0, cacheWriteTokens: r.cw || 0, costUsd: r.costUsd || 0,
+        // latencyMs 存「和」不存均值——groupAgg 的 latSum 累加后 ÷ 合并请求数才是精确加权平均
+        latencyMs: r.latSumMs || 0, wire: 'openai', stream: false, retries: [], chainAttempts: [],
+      };
+    });
+    // 审查 P1-5：账本行也必须过同一个时间窗——v0.1.16 起账本完全不过窗，于是「今天」档把建库以来全部历史账
+    // 都算进了 KPI 与统计表（趋势图因桶外丢弃恰好正确，现象是「图对、头部数字离谱」）。v0.1.17 的修法只有下界
+    // （伪 ts >= from），对「今天/7 天/30 天」够用，但没有上界：自定义的过去区间会把窗后的账本日一起拖进来。
+    // DR-UC-1：账本改为按**日区间相交**过窗（rowDay ∩ [from,to) ≠ ∅，两端都判）——既补上界，也与查询时刻无关
+    // （不再依赖「正午伪 ts 碰巧落在窗内」）。doc-calendar 在 docs/usage-calendar-design.md §4.5 推演了这件事。
+    // 代价如实记账（不假装与 v0.1.17 全同）：账本只有天粒度，与窗相交的那天按**整天**计入，因此
+    // 「今天/7 天/30 天」三档与 v0.1.17 一致，而「近 24 小时」档在窗起点落于昨天时会多算昨天整天
+    // （v0.1.17 用正午比下界：午后排除昨天、上午又包含昨天，同一档位随查询时刻漂移）。多计部分由
+    // 下方 rollPartial 显式提示，不静默。
+    const rollLogs = rollAll.filter((l) => l._d0 < win.to && nextDay(l._d0) > win.from);
+    // 账本行「日起点早于窗起点」= 这天在窗前还有一部分，整天计入故最多多算这一段（预设「近 24 小时」档会撞上）。
+    // 必须按**天**去重：账本行粒度是 本地日×模型×渠道，同一天多行只算一天，否则横幅的「N 天」会被放大。
+    // （与模型筛选无关：跨不跨窗只取决于日的起点，任何筛选都不改变这个天数。）
+    const rollPartial = new Set(rollLogs.filter((l) => l._d0 < win.from).map((l) => l._d0)).size;
     const aggLogs = ovSt.model ? [...logs, ...rollLogs.filter((l) => l.requestedModel === ovSt.model)] : [...logs, ...rollLogs];
     const sel = (opts, cur, on) => { const s = el('select', { style: 'width:auto', onchange: (e) => on(e.target.value) }); for (const [v, t] of opts) s.append(el('option', { value: v, ...(v === cur ? { selected: '' } : {}) }, t)); return s; };
     box.append(el('div', { class: 'toolbar', style: 'justify-content:space-between' },
@@ -478,14 +539,123 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       el('div', { class: 'row', style: 'gap:8px' },
         sel([['', '全部模型'], ...modelNames.map((m) => [m, m])], ovSt.model, (v) => { ovSt.model = v; go('overview'); }),
         sel([['30', '30s'], ['60', '60s'], ['300', '5min'], ['0', '关闭']], String(ovSt.refresh), (v) => { ovSt.refresh = Number(v); go('overview'); }),
-        sel([['day', '今天'], ['24', '近 24 小时'], ['168', '近 7 天'], ['720', '近 30 天']], String(ovSt.hours), (v) => { ovSt.hours = v === 'day' ? 'day' : Number(v); go('overview'); }),
+        // 日历入口：开着时按钮高亮；打开时把月历定位到当前窗口起点，并清掉半选的起点
+        el('button', { class: 'btn sm' + (ovSt.cal.open ? ' primary' : ''), title: '按日历选择某一天或某个区间',
+          onclick: () => { ovSt.cal.open = !ovSt.cal.open; ovSt.cal.month = ovSt.cal.month || win.from; ovSt.cal.start = null; go('overview'); } }, '📅 日历'),
+        // 自定义区间生效时，下拉里以 'custom' 档显示区间文案（选中它本身不切档，避免误清区间）
+        sel([...(win.custom ? [['custom', win.label]] : []), ['day', '今天'], ['24', '近 24 小时'], ['168', '近 7 天'], ['720', '近 30 天']],
+          win.custom ? 'custom' : String(ovSt.hours),
+          (v) => { if (v === 'custom') return; ovSt.range = null; ovSt.cal.start = null; ovSt.hours = v === 'day' ? 'day' : Number(v); go('overview'); }),
       )));
-    // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说
-    if (allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
+    // F6：前端只取 5000 条——retention>5000 时旧条件恒假，恰是最该告警的场景永不响；两种截断分开说。
+    // DR-UC-1：自定义区间走的是「按窗取数」，这条截断提示对它不成立（条数少不代表被裁），故只在预设档出现。
+    if (!win.custom && allLogs.length >= Math.min(5000, o.logRetention || 5000)) {
       box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' }, o.logRetention && o.logRetention <= 5000
         ? '日志仅保留最近 ' + o.logRetention + ' 条且已达上限——更早记录已折进日账本（明细不可查，KPI/趋势/统计仍完整）'
         : '本页统计仅取最近 5000 条日志——更早记录未纳入（当前保留上限 ' + (o.logRetention || '未设') + ' 条）'));
     }
+    // DR-UC-1：自定义区间若真被 5000 条上限截断，必须显式说——「明细缺失」与「已折进日账本」是两件事
+    if (logTruncated(allLogs, win)) box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' },
+      '所选区间明细超过 5000 条，仅取回最近 5000 条：更早的明细未纳入——已被裁剪的部分已折进日账本（KPI/趋势仍含），仍在保留上限内的部分两边都不在（KPI/趋势会少计）；缩小范围可看全。'));
+    if (rollPartial > 0) box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' },
+      '账本为日粒度：有 ' + rollPartial + ' 天的日账跨在本档窗口起点之前，已按整天计入（最多多算这些天落在窗前的部分）。'));
+    // ==================== 日历：可用性判定 + 月历卡片（DR-UC-1）====================
+    // 四态可用性（都在本地时区）：
+    //   raw  = 该日有已加载的原始明细（精确计数）→ 加粗
+    //   roll = 该日只有日账本（原始日志已被裁）  → 斜体淡显；账本是日粒度，无明细
+    //   span = 该日在热日志窗跨度内但明细未加载（如 retention>5000 且不在当前取数窗）→ 中性，不谎称无数据
+    //   none = 与热窗/账本都不相交（更早已被裁剪）→ 灰字「无数据」
+    const rollRows = (((rollRes || {}).body || {}).rows) || [];
+    const rollDays = new Map();
+    for (const r of rollRows) { const k = String(r.day); rollDays.set(k, (rollDays.get(k) || 0) + (r.requests || 0)); }
+    const rawDays = new Map();
+    for (const l of allLogs) { const k = dayKey(l.ts); rawDays.set(k, (rawDays.get(k) || 0) + 1); }
+    const rawA = typeof o.oldestLogTs === 'number' ? o.oldestLogTs : null;
+    const rawB = typeof o.newestLogTs === 'number' ? o.newestLogTs : null;
+    const dayInfo = (ts) => {
+      const k = dayKey(ts), start = dayStartOf(ts);
+      if (rawDays.has(k)) return { kind: 'raw', n: rawDays.get(k) + (rollDays.get(k) || 0) };
+      if (rollDays.has(k)) return { kind: 'roll', n: rollDays.get(k) };
+      if (rawA != null && start <= rawB && nextDay(start) > rawA) return { kind: 'span', n: null };
+      return { kind: 'none', n: 0 };
+    };
+    const dayAdd = (ts, n) => { const d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime(); };
+    const calCard = () => {
+      const today = dayStartOf(Date.now());
+      const mD = new Date(ovSt.cal.month || win.from);
+      const y = mD.getFullYear(), mo = mD.getMonth();
+      const cells = monthGrid(y, mo);
+      const thisMon = new Date(y, mo, 1).getTime(), lastMon = new Date(y, mo - 1, 1).getTime(), nextMon = new Date(y, mo + 1, 1).getTime();
+      const shift = (n) => { ovSt.cal.month = new Date(y, mo + n, 1).getTime(); ovSt.cal.start = null; go('overview'); };
+      // 点选状态机：未选 → 单选（立刻按单日看）→ 再点一天成区间 → 第三次点击重新从单选开始
+      const pick = (ts) => {
+        const d = dayStartOf(ts);
+        if (ovSt.cal.start == null) { ovSt.cal.start = d; ovSt.range = { from: d, to: nextDay(d) }; }
+        else { ovSt.range = normDayRange(ovSt.cal.start, d); ovSt.cal.start = null; }
+        ovSt.cal.month = d; go('overview');
+      };
+      const set = (r) => { ovSt.range = r; ovSt.cal.start = null; ovSt.cal.month = r.from; go('overview'); };
+      const weekMon = dayAdd(today, -((new Date(today).getDay() + 6) % 7));
+      const quick = [
+        ['今天', { from: today, to: nextDay(today) }],
+        ['昨天', { from: dayAdd(today, -1), to: today }],
+        ['本周', { from: weekMon, to: nextDay(today) }],
+        ['本月', { from: new Date(new Date(today).getFullYear(), new Date(today).getMonth(), 1).getTime(), to: nextDay(today) }],
+        ['上月', { from: new Date(new Date(today).getFullYear(), new Date(today).getMonth() - 1, 1).getTime(), to: new Date(new Date(today).getFullYear(), new Date(today).getMonth(), 1).getTime() }],
+        ['近 7 天（自然日）', { from: dayAdd(today, -6), to: nextDay(today) }],
+        ['近 30 天（自然日）', { from: dayAdd(today, -29), to: nextDay(today) }],
+      ];
+      const grid = el('div', { style: 'display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px' },
+        ...['一', '二', '三', '四', '五', '六', '日'].map((w) => el('div', { class: 'muted', style: 'text-align:center;font-size:11px;padding:2px 0' }, w)),
+        ...cells.map((c) => {
+          const info = dayInfo(c.ts);
+          const future = c.ts > today; // 未来日不可点：否则 [from,to) 里全是空桶，图与 KPI 都是 0，白跑一趟
+          const inRange = !!ovSt.range && c.ts >= ovSt.range.from && c.ts < ovSt.range.to;
+          const pending = ovSt.cal.start != null && c.ts === ovSt.cal.start;
+          const title = future ? dayKey(c.ts) + '：未来日期（不可选）' : dayKey(c.ts) + '：' + (info.kind === 'none' ? '无数据（更早，已超出可查范围）'
+            : info.kind === 'span' ? '在热日志窗内，明细未加载'
+            : info.n + ' 次请求' + (info.kind === 'roll' ? '（仅日账本，无明细）' : ''));
+          let style = 'padding:5px 0;text-align:center;font-family:ui-monospace,SFMono-Regular,monospace;min-width:0';
+          if (!c.inMonth) style += ';opacity:.4';
+          if (future) style += ';opacity:.3;cursor:not-allowed';
+          else if (info.kind === 'none') style += ';color:var(--muted)';
+          else if (info.kind === 'roll') style += ';font-style:italic;opacity:.75';
+          else if (info.kind === 'span') style += ';opacity:.6';
+          if (!future && info.kind === 'raw' && info.n > 0) style += ';font-weight:700';
+          if (inRange) style += ';background:var(--accent);color:#fff;font-weight:700;opacity:1';
+          if (pending) style += ';outline:2px solid var(--accent);outline-offset:1px';
+          else if (c.ts === today && !inRange) style += ';border:1px solid var(--accent)';
+          return el('button', { class: 'btn sm', title, style, ...(future ? { disabled: '' } : {}), onclick: () => { if (!future) pick(c.ts); } }, String(c.day));
+        }));
+      const head = el('div', { class: 'row', style: 'justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap' },
+        el('div', { class: 'row', style: 'gap:6px;align-items:center' },
+          el('button', { class: 'btn sm', title: '上一月', onclick: () => shift(-1) }, '‹'),
+          el('b', { style: 'min-width:104px;text-align:center;display:inline-block' }, y + ' 年 ' + pad2(mo + 1) + ' 月'),
+          el('button', { class: 'btn sm', title: '下一月', onclick: () => shift(1) }, '›'),
+          el('button', { class: 'btn sm', onclick: () => { ovSt.cal.month = today; ovSt.cal.start = null; go('overview'); } }, '回到今天')),
+        el('div', { class: 'row', style: 'gap:6px;align-items:center' },
+          el('span', { class: 'muted', style: 'font-size:12px' }, ovSt.cal.start != null
+            ? '已选起点 ' + dayKey(ovSt.cal.start) + '，再点一天完成区间'
+            : ovSt.range ? '当前：' + win.label : '点一天看单日，再点一天看区间'),
+          ...(ovSt.range ? [el('button', { class: 'btn sm', onclick: () => { ovSt.range = null; ovSt.cal.start = null; go('overview'); } }, '清除')] : []),
+          el('button', { class: 'btn sm primary', onclick: () => { ovSt.cal.open = false; go('overview'); } }, '完成')));
+      return el('div', { class: 'card', style: 'margin-top:10px' },
+        head, grid,
+        el('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap;margin-top:10px' },
+          ...quick.map(([t, r]) => el('button', { class: 'btn sm', onclick: () => set(r) }, t))),
+        el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' },
+          '加粗=当天有原始明细 · 斜体=仅日账本（无明细，数字仍完整） · 灰字=已超出可查范围 · 边框=今天。日期一律按本机时区；日账本为日粒度，选单日时该日账本按整天计入。'));
+    };
+    if (ovSt.cal.open) box.append(calCard());
+    if (win.custom) {
+      let rollOnly = 0, noneDays = 0;
+      for (let t = win.from; t < win.to; t = nextDay(t)) { const k = dayInfo(t).kind; if (k === 'roll') rollOnly++; else if (k === 'none') noneDays++; }
+      if (noneDays || rollOnly) box.append(el('div', { class: 'card muted', style: 'margin-top:8px;font-size:12px' },
+        '所选区间：' + (noneDays ? '有 ' + noneDays + ' 天已超出可查范围（账本也已裁剪，该日统计缺失）' : '')
+        + (noneDays && rollOnly ? '；' : '')
+        + (rollOnly ? '有 ' + rollOnly + ' 天仅有日账本，明细不可查（KPI/趋势/统计仍完整）' : '')));
+    }
+    // ==========================================================================
     const tot = newAgg(); aggLogs.forEach((l) => addAgg(tot, l));
     const realTok = tot.pin + tot.pout + tot.cr + tot.cw;
     const hitRate = tot.pin + tot.cr + tot.cw > 0 ? Math.round((tot.cr / (tot.pin + tot.cr + tot.cw)) * 1000) / 10 : 0;
@@ -504,18 +674,25 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       sub('缓存命中', num(tot.cr)),
       el('div', { class: 'card' }, el('div', { class: 'row', style: 'justify-content:space-between' }, el('span', { class: 'k' }, '缓存命中率'), el('b', { style: hitRate >= 30 ? 'color:var(--ok)' : '' }, hitRate + '%')),
         el('div', { class: 'bar', style: 'margin-top:8px' }, el('i', { style: 'width:' + Math.min(100, hitRate) + '%' })))));
-    const hourly = ovSt.hours === 'day' || ovSt.hours <= 48;
+    const hourly = win.hourly;
     const step = hourly ? 3600e3 : 86400e3;
     const align = (t) => { const d = new Date(t); if (hourly) d.setMinutes(0, 0, 0); else d.setHours(0, 0, 0, 0); return d.getTime(); };
+    // 天桶按本地日历日推进（setDate+1）而不是 +86400e3：夏令时 23/25 小时的那天不会错桶错位
+    const nextBucket = (t) => { if (hourly) return t + 3600e3; const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(); };
     const buckets = new Map();
-    const startT = ovSt.hours === 'day' ? align(from) : align(Date.now() - (ovSt.hours * 3600e3 - step));
-    for (let t = startT; t <= Date.now(); t += step) buckets.set(t, Object.assign({ t }, newAgg()));
-    for (const l of aggLogs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); }
+    // 预设档：桶铺到当前桶（含 now 所在桶）；自定义区间：桶铺 [from,to)，不含结束次日零点
+    const startT = win.custom || ovSt.hours === 'day' ? align(win.from) : align(Date.now() - (ovSt.hours * 3600e3 - step));
+    for (let t = startT; win.toIncl ? t <= win.to : t < win.to; t = nextBucket(t)) buckets.set(t, Object.assign({ t }, newAgg()));
+    let ledgerOff = 0; // 账本行（日粒度）落不进桶的数量：如上午查「今天」时它的正午桶在窗内尚不存在
+    for (const l of aggLogs) { const b = buckets.get(align(l.ts)); if (b) addAgg(b, l); else if (l._d0 !== undefined) ledgerOff++; }
     const bArr = [...buckets.values()];
     const chartCard = el('div', { class: 'card', style: 'margin-top:12px' },
       el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { style: 'margin:0' }, '使用趋势'),
         el('span', { class: 'muted' }, hourly ? '按小时' : '按天')),
-      svgChart(bArr, hourly));
+      svgChart(bArr, hourly),
+      // 图与数的差额必须显式说出来：账本是日粒度，只有在它的正午能落到窗内某桶时才上小时图
+      ledgerOff ? el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' },
+        '另有 ' + ledgerOff + ' 天已折进日账本（日粒度，无法定位到小时桶）——已计入上方 KPI 与统计表') : null);
     box.append(chartCard);
     const TABS = [['logs', '请求日志'], ['provider', 'Provider 统计'], ['model', '模型统计'], ['speed', '速度排行'], ['pool', '号池健康']];
     box.append(el('div', { class: 'row', style: 'gap:6px;margin:16px 0 10px' },
@@ -533,7 +710,7 @@ const ovSt = { hours: 'day', model: '', fstat: '', tab: 'logs', refresh: 30 }; /
       const fbar = el('div', { class: 'card', style: 'padding:10px 12px;margin-bottom:10px' },
         el('div', { class: 'row', style: 'gap:8px' },
           sel([['', '全部'], ['ok', '仅成功'], ['err', '仅失败']], ovSt.fstat, (v) => { ovSt.fstat = v; go('overview'); }),
-          el('span', { class: 'muted' }, (ovSt.hours === 'day' ? '今天' : ovSt.hours === 24 ? '近 24 小时' : ovSt.hours === 168 ? '近 7 天' : '近 30 天') + (ovSt.model ? ' · ' + ovSt.model : ''))));
+          el('span', { class: 'muted' }, win.label + (ovSt.model ? ' · ' + ovSt.model : ''))));
       box.append(fbar);
       let rows = logs;
       if (ovSt.fstat === 'ok') rows = rows.filter((l) => l.ok);

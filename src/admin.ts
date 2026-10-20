@@ -172,6 +172,13 @@ export function createAdmin(): Hono {
   app.get('/overview', (c) => {
     const s = store.getSettings();
     const stats = buildStats(24);
+    // 统计页日历需要知道原始日志窗的时间跨度（哪些天有原始明细）——纯新增，不改既有字段
+    let oldestLogTs: number | null = null;
+    let newestLogTs: number | null = null;
+    for (const l of store.db.logs) {
+      if (oldestLogTs === null || l.ts < oldestLogTs) oldestLogTs = l.ts;
+      if (newestLogTs === null || l.ts > newestLogTs) newestLogTs = l.ts;
+    }
     return c.json({
       channels: store.listChannels().map((ch) => ({
         id: ch.id,
@@ -189,6 +196,9 @@ export function createAdmin(): Hono {
       vkeys: store.listVKeys().length,
       stats,
       logs: store.db.logs.length,
+      // 统计页日历：原始日志窗的最早/最新时间戳（无日志为 null）
+      oldestLogTs,
+      newestLogTs,
       // P5(H2)：暴露保留上限，前端在日志被裁剪时挂统计截断警示（此前是静默的）
       logRetention: s.logRetention,
     });
@@ -518,9 +528,16 @@ export function createAdmin(): Hono {
     const limit = Number(c.req.query('limit') || 100);
     const onlyErrors = c.req.query('errors') === '1';
     const model = c.req.query('model');
+    // 统计页日历选某天/某区间：from/to 为 epoch 毫秒，from 闭、to 开（右开）。
+    // 只给 from 或只给 to 都合法；空串/非数字/NaN/Infinity 一律忽略，畸形输入绝不 500。
+    const numOrNaN = (v: string | undefined) => (v == null || v.trim() === '' ? NaN : Number(v));
+    const from = numOrNaN(c.req.query('from'));
+    const to = numOrNaN(c.req.query('to'));
     let logs = store.db.logs;
     if (onlyErrors) logs = logs.filter((l) => !l.ok);
     if (model) logs = logs.filter((l) => l.requestedModel === model);
+    if (Number.isFinite(from)) logs = logs.filter((l) => l.ts >= from);
+    if (Number.isFinite(to)) logs = logs.filter((l) => l.ts < to);
     return c.json([...logs].slice(-limit).reverse());
   });
 

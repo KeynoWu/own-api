@@ -1247,37 +1247,272 @@ section('14. 信息暴露、usage 口径与主键完整性');
     good.promptTokens === 100 && good.completionTokens === 20 && good.cacheReadTokens === 40, JSON.stringify(good));
 }
 {
-  // 审查 P1-5 修复钉（前端窗口）：抽出真实源码块求值，锁「账本行必须与原始日志同过时间窗」。
-  // 只钉源码字符串（旧"空钉"）挡不住这类回归——这里跑的是真代码，改窗口口径必然红。
+  // 审查 P1-5 修复钉 + DR-UC-1 日历区间钉（前端窗口）：抽出**真实源码块**求值，锁窗口口径。
+  // 只钉源码字符串（旧"空钉"）挡不住回归——这里跑的是真代码，改窗口/区间口径必然红。
+  // 四段纯代码：① 窗口与日历纯函数区 ② 日志与账本过窗 ③ 日历可用性判定 ④ 趋势桶铺法
   const fsW = await import('node:fs');
   const htmlW = fsW.readFileSync('web/index.html', 'utf8');
-  const wStart = htmlW.indexOf('const from = (() => {');
-  const wMark = htmlW.indexOf('const aggLogs = ');
-  const wEnd = htmlW.indexOf(';', wMark);
-  check('P1-5 钉可定位：前端窗口块（from→aggLogs）仍可被抽取（重构即红，逼同步改钉）',
-    wStart >= 0 && wMark > wStart && wEnd > wMark, `start=${wStart} mark=${wMark} end=${wEnd}`);
-  const wSrc = htmlW.slice(wStart, wEnd + 1);
-  const wRun = (ovSt: any, allLogs: any[], rollRes: any) =>
-    new Function('ovSt', 'allLogs', 'rollRes', wSrc + '\nreturn { aggLogs, from, rollLogs, logs };')(ovSt, allLogs, rollRes);
-  const dayStr = (off: number) => {
-    const d = new Date();
-    d.setDate(d.getDate() - off);
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const pStart = htmlW.indexOf('const pad2 = (n) =>');
+  const pEndMark = 'const win = statWin(ovSt, Date.now());';
+  const pEnd = htmlW.indexOf(pEndMark, pStart);
+  const sPure = pStart >= 0 && pEnd > pStart ? htmlW.slice(pStart, pEnd + pEndMark.length) : '';
+  const fStart = htmlW.indexOf('let logs = allLogs.filter((l) => l.ts >= win.from');
+  const fMark = htmlW.indexOf('const aggLogs = ', fStart);
+  const fEnd = htmlW.indexOf(';', fMark);
+  const sFilter = fStart >= 0 && fEnd > fMark ? htmlW.slice(fStart, fEnd + 1) : '';
+  const aStart = htmlW.indexOf('const rollRows = ');
+  const aMark = htmlW.indexOf("return { kind: 'none', n: 0 };", aStart);
+  // 注意：不能拿 '};' 当结束锚——"return { kind: 'none', n: 0 };" 尾巴就是 '};'，
+  // 会把 dayInfo 箭头函数的闭括号截掉，拼出来的函数体不闭合（第一版就栽在这里）。
+  const aCloseMark = '\n    };';
+  const aClose = htmlW.indexOf(aCloseMark, aMark);
+  const dAddStart = htmlW.indexOf('const dayAdd = ');
+  const dAddEnd = htmlW.indexOf('\n', dAddStart); // 按行取整：块体内部还有分号，不能拿 ';' 当锚
+  const sAvail = aStart >= 0 && aClose > aMark && dAddStart > aClose && dAddEnd > dAddStart
+    ? htmlW.slice(aStart, aClose + aCloseMark.length) + '\n' + htmlW.slice(dAddStart, dAddEnd) : '';
+  const uStart = htmlW.indexOf('const logUrl = win.custom ?');
+  const uEnd = htmlW.indexOf('\n', uStart); // 按行取整：三元里含 ';'? 无，但保持与 dayAdd 同规
+  const sLogUrl = uStart >= 0 && uEnd > uStart ? htmlW.slice(uStart, uEnd) : '';
+  const bStart = htmlW.indexOf('const hourly = win.hourly;');
+  const bMark = htmlW.indexOf('const bArr = [...buckets.values()];');
+  const sBuckets = bStart >= 0 && bMark > bStart ? htmlW.slice(bStart, bMark) : '';
+  // 五段各查签名 token：只查"非空"会放过"截了一半"的抽源
+  check('DR-UC-1 钉可定位：前端五段真实源码块（纯函数区/过窗/可用性/请求 URL/桶铺法）都可被抽取且完整（重构即红，逼同步改钉）',
+    sPure.includes('const statWin') && sPure.includes('const monthGrid') && sFilter.includes('const aggLogs')
+    && sAvail.includes("return { kind: 'none'") && sAvail.includes('const dayAdd') && sBuckets.includes('buckets.set(t')
+    && sLogUrl.includes('limit='),
+    `pure=${sPure.length} filter=${sFilter.length} avail=${sAvail.length} url=${sLogUrl.length} buckets=${sBuckets.length}`);
+  const wSrc = sPure + '\n' + sFilter + '\n' + sAvail + '\n' + sLogUrl + '\n' + sBuckets +
+    '\nreturn { win, logs, rollLogs, aggLogs, logUrl, logTruncated, logTruncatedNow: () => logTruncated(allLogs, win), rollPartialNow: () => rollPartial, statWin, normDayRange, rangeLabel, monthGrid, dayKey, dayStartOf, nextDay, dayInfo,' +
+    ' bKeys: () => [...buckets.keys()], ledgerOff: () => ledgerOff };';
+  // 前端聚合纯函数（P6 块已抽过一次，但那是另一个块作用域）：这里按同样方式从 HTML 再抽一次，
+  // 桶铺法用的仍是页面里那份 newAgg/addAgg，不是测试里另写一份实现。
+  const pick = (name: string) => {
+    const i = htmlW.indexOf('const ' + name + ' = ');
+    let p = htmlW.indexOf('=>', i) + 2;
+    while (/\s/.test(htmlW[p])) p++;
+    let d = 0;
+    for (let k = p; k < htmlW.length; k++) {
+      const ch = htmlW[k];
+      if (ch === '{' || ch === '(' || ch === '[') d++;
+      else if ((ch === '}' || ch === ')' || ch === ']') && --d === 0) return htmlW.slice(i, k + 1).replace(/^const\s+\w+\s*=\s*/, '');
+    }
+    throw new Error('balanced block not found: ' + name);
   };
-  const rRows = [
-    { day: dayStr(0), model: 'm1', channel: 'c', requests: 5, errors: 0, pin: 100, pout: 10, cr: 0, cw: 0, costUsd: 1, latSumMs: 0, latN: 0 },
-    { day: dayStr(30), model: 'm1', channel: 'c', requests: 7, errors: 0, pin: 200, pout: 20, cr: 0, cw: 0, costUsd: 2, latSumMs: 0, latN: 0 },
-  ];
+  const newAgg = eval('(' + pick('newAgg') + ')');
+  const addAgg = eval('(' + pick('addAgg') + ')');
+  const wRun = (ovSt: any, allLogs: any[], rollRes: any, o: any) =>
+    new Function('ovSt', 'allLogs', 'rollRes', 'o', 'newAgg', 'addAgg', wSrc)(ovSt, allLogs, rollRes, o, newAgg, addAgg);
+  const dOff = (off: number) => { const d = new Date(); d.setDate(d.getDate() - off); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+  const nx = (ts: number) => { const d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(); };
+  const T0 = dOff(0);
+  const dayStr = (off: number) => { const d = new Date(dOff(off)); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  const rRow = (day: string, requests: number) => ({ day, model: 'm1', channel: 'c', requests, errors: 0, pin: 100, pout: 10, cr: 0, cw: 0, costUsd: 1, latSumMs: 0, latN: 0 });
+  const rRows = [rRow(dayStr(0), 5), rRow(dayStr(30), 7)];
   const rawToday = [{ ts: Date.now(), requestedModel: 'm1', ok: true, promptTokens: 1, completionTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }];
-  const today = wRun({ hours: 'day', model: '' }, rawToday, { body: { rows: rRows } });
+  const logsOf = (res: any) => res.logs;
+
+  // —— ① 窗口解析：预设 4 档的 [from,to]/粒度/文案（v0.1.17 的档位语义；账本口径差异单列在 ④）——
+  const wDay = wRun({ hours: 'day', model: '' }, rawToday, { body: { rows: rRows } }, {});
+  check('P1-5/DR-UC-1 钉：预设「今天」= 本地自然日 [零点, now]、含当前桶、按小时、文案「今天」',
+    wDay.win.from === T0 && wDay.win.toIncl === true && wDay.win.custom === false && wDay.win.hourly === true && wDay.win.label === '今天', JSON.stringify(wDay.win));
+  const w24 = wRun({ hours: 24, model: '' }, [], null, {});
+  const w168 = wRun({ hours: 168, model: '' }, [], null, {});
+  const w720 = wRun({ hours: 720, model: '' }, [], null, {});
+  check('P1-5/DR-UC-1 钉：预设 24h 滚动窗分秒归零且按小时；7/30 天按天且零点对齐（粒度切换阈值 48h 不变）',
+    w24.win.hourly === true && new Date(w24.win.from).getMinutes() === 0 && w24.win.label === '近 24 小时'
+    && w168.win.hourly === false && new Date(w168.win.from).getHours() === 0 && w168.win.label === '近 7 天'
+    && w720.win.hourly === false && w720.win.label === '近 30 天',
+    JSON.stringify([w24.win.label, w168.win.label, w720.win.label, w24.win.hourly, w168.win.hourly]));
+
+  // —— ② 自定义区间：[from,to) 右开、粒度按 span、文案 ——
+  const rSingle = { from: dOff(3), to: nx(dOff(3)) };
+  const wSingle = wRun({ hours: 'day', range: rSingle, model: '' }, [], null, {});
+  check('DR-UC-1 钉：自定义单日 = [当日零点, 次日零点) 右开、按小时、文案 MM-DD',
+    wSingle.win.from === rSingle.from && wSingle.win.to === rSingle.to && wSingle.win.toIncl === false && wSingle.win.custom === true
+    && wSingle.win.hourly === true && wSingle.win.label === dayStr(3).slice(5), JSON.stringify(wSingle.win));
+  const r3d = { from: dOff(6), to: nx(nx(nx(dOff(6)))) };
+  const w3d = wRun({ hours: 'day', range: r3d, model: '' }, [], null, {});
+  const r2d = { from: dOff(2), to: nx(nx(dOff(2))) };
+  const w2d = wRun({ hours: 'day', range: r2d, model: '' }, [], null, {});
+  check('DR-UC-1 钉：3 天区间按天并标注天数；恰好 2 天（48h）仍按小时（阈值边界含）',
+    w3d.win.hourly === false && /3 天$/.test(w3d.win.label) && w2d.win.hourly === true,
+    `${w3d.win.label} / 2天 hourly=${w2d.win.hourly}`);
+  const nr = wDay.normDayRange(dOff(1), dOff(4));
+  check('DR-UC-1 钉：反着点（先晚后早）归一为 [较早日, 较晚日+1天)——不允许出现 from>to 的空窗',
+    nr.from === dOff(4) && nr.to === nx(dOff(1)), JSON.stringify(nr));
+  const lblXy = wDay.rangeLabel({ from: new Date(2025, 11, 30).getTime(), to: new Date(2026, 0, 3).getTime() });
+  const lblXm = wDay.rangeLabel({ from: new Date(2026, 0, 30).getTime(), to: new Date(2026, 1, 3).getTime() });
+  check('DR-UC-1 钉：区间文案——同年跨月只写 MM-DD，跨年必须带年份',
+    lblXm === '01-30 ~ 02-02 · 4 天' && lblXy === '2025-12-30 ~ 2026-01-02 · 4 天', `${lblXm} | ${lblXy}`);
+  check('DR-UC-1 钉：次日零点走日历进位——闰年 2/28→2/29、2/29→3/1、跨年 12/31→1/1（不是 +86400e3）',
+    wDay.nextDay(new Date(2024, 1, 28).getTime()) === new Date(2024, 1, 29).getTime()
+    && wDay.nextDay(new Date(2024, 1, 29).getTime()) === new Date(2024, 2, 1).getTime()
+    && wDay.nextDay(new Date(2025, 11, 31).getTime()) === new Date(2026, 0, 1).getTime(), '');
+
+  // —— ③ 月历网格：ISO 首列（周一）、闰年、跨月补位 ——
+  const feb26 = wDay.monthGrid(2026, 1);
+  const feb24 = wDay.monthGrid(2024, 1);
+  check('DR-UC-1 钉：月历网格 2026-02=28 天 / 2024-02=29 天，格数均为 7 的倍数',
+    feb26.filter((c: any) => c.inMonth).length === 28 && feb24.filter((c: any) => c.inMonth).length === 29
+    && feb26.length % 7 === 0 && feb24.length % 7 === 0,
+    `feb26=${feb26.length}/${feb26.filter((c: any) => c.inMonth).length} feb24=${feb24.length}/${feb24.filter((c: any) => c.inMonth).length}`);
+  const monOfWeek = (cells: any[]) => { const d = new Date(cells.find((c: any) => c.inMonth).ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7)).getTime(); };
+  check('DR-UC-1 钉：月历首格 = 当月 1 日所在周的周一（跨月补位占位，不是空白错位）',
+    feb26[0].ts === monOfWeek(feb26) && feb24[0].ts === monOfWeek(feb24), `${new Date(feb26[0].ts).getDay()} / ${new Date(feb24[0].ts).getDay()}`);
+
+  // —— ④ 账本过窗：日区间相交（P1-5 延续 + doc-calendar §4.5 的时段依赖反例）——
+  const today = wRun({ hours: 'day', model: '' }, rawToday, { body: { rows: rRows } }, {});
   check('P1-5 钉：「今天」档只纳入今日账本行——历史账不得混进 KPI/统计表',
     today.rollLogs.length === 1 && today.aggLogs.length === 2, `roll=${today.rollLogs.length} agg=${today.aggLogs.length}`);
-  const wide = wRun({ hours: '720', model: '' }, rawToday, { body: { rows: rRows } });
+  const wide = wRun({ hours: '720', model: '' }, rawToday, { body: { rows: rRows } }, {});
   check('P1-5 钉：近 30 天档把两条账本行都纳入（是过滤而非砍掉账本）', wide.rollLogs.length === 2, `roll=${wide.rollLogs.length}`);
-  const noHit = wRun({ hours: 'day', model: 'other' }, rawToday, { body: { rows: rRows } });
+  const noHit = wRun({ hours: 'day', model: 'other' }, rawToday, { body: { rows: rRows } }, {});
   check('P1-5 钉：模型筛选在账本上同样生效（无命中即空，不残留历史）', noHit.aggLogs.length === 0, `agg=${noHit.aggLogs.length}`);
-  const empty = wRun({ hours: 'day', model: '' }, [], null);
+  const empty = wRun({ hours: 'day', model: '' }, [], null, {});
   check('P1-5 钉：无账本/无日志时零崩溃（rollRes 为 null 也安全）', empty.aggLogs.length === 0, `agg=${empty.aggLogs.length}`);
+  // 规格钉（不是"复现旧 bug"）：与窗相交的日一律纳入，不看伪 ts（正午）落没落在窗内——
+  // 半天窗（to 早于正午）也必须算上当天账本行；若退回"正午比大小"，这条在两个半天里会给出两个答案。
+  const halfWindow = wRun({ hours: 'day', range: { from: T0, to: T0 + 6 * 3600e3 }, model: '' }, [], { body: { rows: rRows } }, {});
+  check('DR-UC-1 钉：账本按「日区间相交」过窗——半天窗（to 早于正午）仍须纳入当天账本行（不依赖查询时刻）',
+    halfWindow.rollLogs.length === 1, `roll=${halfWindow.rollLogs.length}`);
+  // 判别性钉（验证者指出：旧谓词 `l.ts >= win.from` 只有下界，上面 7 条钉对"错误实现"也全绿）。
+  // 过去的自定义窗 [T0-10d, T0-7d) 只许纳入 -10/-9/-8 三天：有上界才拦得住窗后的账本日（-7、今天）。
+  const pastRows = [-10, -9, -8, -7, -6, -1, 0].map((k) => rRow(dayStr(-k), 1));
+  const pastWin = { from: dOff(10), to: dOff(7) };
+  const past = wRun({ hours: 'day', range: pastWin, model: '' }, [], { body: { rows: pastRows } }, {});
+  const pastDays = past.rollLogs.map((l: any) => dayStr(Math.round((T0 - l._d0) / 86400e3))).sort();
+  check('DR-UC-1 钉（判别性）：过去的自定义窗 [T0-10d, T0-7d) 只纳入与窗相交的 -10/-9/-8 三天——旧「仅有下界」的谓词会把 -7/-1/今天全拖进来（这条专抓该回归）',
+    past.rollLogs.length === 3 && pastDays.join(',') === [dayStr(10), dayStr(9), dayStr(8)].sort().join(','), `days=${pastDays.join(',')}`);
+  // 「近 24 小时」档的账本口径：日粒度无法按小时切分，故与窗相交的昨天整天计入（时间无关），
+  // 并把「多算的那部分」用 rollPartial 显式交代——这条钉把这个刻意取舍钉死，改口径必须同步改钉与文档。
+  // 昨天刻意放 3 行（3 个模型/渠道）——账本行粒度是 天×模型×渠道，横幅说「N 天」就必须按天去重（行数会放大）
+  const h24Rows = [rRow(dayStr(1), 1000), { ...rRow(dayStr(1), 500), model: 'm2', channel: 'c2' },
+    { ...rRow(dayStr(1), 300), model: 'm3', channel: 'c3' }, rRow(dayStr(0), 1000)];
+  const h24 = wRun({ hours: 24, model: '' }, [], { body: { rows: h24Rows } }, {});
+  check('DR-UC-1 钉：预设「近 24 小时」按日相交纳入昨天(3 行=3 模型)+今天共 4 条账本行，且 rollPartial=1——数的是「天」不是「行」（与 v0.1.17 的正午比较不同，属刻意取舍）',
+    h24.rollLogs.length === 4 && h24.rollPartialNow() === 1, `roll=${h24.rollLogs.length} partial=${h24.rollPartialNow()}`);
+  const h24m = wRun({ hours: 24, model: 'm2' }, [], { body: { rows: h24Rows } }, {});
+  check('DR-UC-1 钉：rollPartial 与模型筛选无关（跨窗前后的判定只看日的起点）——筛 m2 后仍=1',
+    h24m.rollPartialNow() === 1, `partial=${h24m.rollPartialNow()}`);
+  const hDay = wRun({ hours: 'day', model: '' }, [], { body: { rows: h24Rows } }, {});
+  const h7 = wRun({ hours: 168, model: '' }, [], { body: { rows: h24Rows } }, {});
+  check('DR-UC-1 钉：「今天」档不产生跨窗多算（rollPartial=0，只纳入今天那 1 行）；近 7 天档同理（二者与 v0.1.17 结果一致）',
+    hDay.rollPartialNow() === 0 && h7.rollPartialNow() === 0 && hDay.rollLogs.length === 1 && h7.rollLogs.length === 4,
+    `day=${hDay.rollPartialNow()}/${hDay.rollLogs.length} 7d=${h7.rollPartialNow()}/${h7.rollLogs.length}`);
+  const yestOnly = wRun({ hours: 'day', model: '' }, [], { body: { rows: [rRow(dayStr(1), 9)] } }, {});
+  const yest7d = wRun({ hours: 168, model: '' }, [], { body: { rows: [rRow(dayStr(1), 9)] } }, {});
+  check('DR-UC-1 钉：开场即「今天」时昨日账本行不进窗；同一行在近 7 天窗纳入（左边界闭合、确属按窗过滤）',
+    yestOnly.rollLogs.length === 0 && yest7d.rollLogs.length === 1, `today=${yestOnly.rollLogs.length} 7d=${yest7d.rollLogs.length}`);
+
+  // —— ⑤ 日历可用性四态：raw / roll / span / none（三档数据可用性的诚实标注）——
+  const av = wRun({ hours: 'day', model: '' }, [{ ts: dOff(1) + 7200e3, requestedModel: 'm1', ok: true, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }],
+    { body: { rows: [rRow(dayStr(5), 3)] } }, { oldestLogTs: dOff(2) + 3600e3, newestLogTs: Date.now() });
+  check('DR-UC-1 钉：可用性——该日有已加载原始明细 → raw，且计数=原始条数+该日账本请求数（不双计也不漏账本）',
+    av.dayInfo(dOff(1)).kind === 'raw' && av.dayInfo(dOff(1)).n === 1, JSON.stringify(av.dayInfo(dOff(1))));
+  check('DR-UC-1 钉：可用性——只有日账本 → roll（n=账本请求数，UI 斜体标注"无明细"）',
+    av.dayInfo(dOff(5)).kind === 'roll' && av.dayInfo(dOff(5)).n === 3, JSON.stringify(av.dayInfo(dOff(5))));
+  check('DR-UC-1 钉：可用性——在热窗跨度内但明细未加载 → span（中性态，不谎称"无数据"）',
+    av.dayInfo(dOff(2)).kind === 'span', JSON.stringify(av.dayInfo(dOff(2))));
+  check('DR-UC-1 钉：可用性——超出热窗且无账本 → none（灰显"无数据"）',
+    av.dayInfo(dOff(40)).kind === 'none' && av.dayInfo(dOff(40)).n === 0, JSON.stringify(av.dayInfo(dOff(40))));
+  check('DR-UC-1 钉：可用性——热窗最老那天仍算"在窗内"（边界日用 nextDay 比较，不是 < 老 ts 就判无数据）',
+    av.dayInfo(dOff(2)).kind !== 'none', JSON.stringify(av.dayInfo(dOff(2))));
+
+  // —— ⑥ 趋势桶：自定义区间铺 [from,to)，预设铺到当前桶；账本落不进桶时必须显式计数 ——
+  const bSingle = wRun({ hours: 'day', range: rSingle, model: '' }, [], null, {}).bKeys();
+  check('DR-UC-1 钉：自定义单日 → 24 个小时桶，首桶=当日零点、末桶=23:00（右开，不含次日零点）',
+    bSingle.length === 24 && bSingle[0] === rSingle.from && bSingle[23] === rSingle.from + 23 * 3600e3,
+    `len=${bSingle.length} first=${bSingle.length ? new Date(bSingle[0]).getHours() : '-'} last=${bSingle.length ? new Date(bSingle[23]).getHours() : '-'}`);
+  const b3k = wRun({ hours: 'day', range: r3d, model: '' }, [], null, {}).bKeys();
+  check('DR-UC-1 钉：自定义 3 天 → 恰好 3 个日桶（不是 4 个，也不是铺到 now）',
+    b3k.length === 3 && b3k[0] === r3d.from, `len=${b3k.length}`);
+  // 跨整点不 flake：页面内部自己取 Date.now()，测试只能给"调用前后"两个小时的期望区间，二者之一即对
+  const hBefore = new Date(Date.now()).getHours();
+  const bDayK = wRun({ hours: 'day', model: '' }, [], null, {}).bKeys();
+  const hAfter = new Date(Date.now()).getHours();
+  check('DR-UC-1 钉：预设「今天」桶从今日零点铺到当前小时（含 now 所在桶；跑在整点边界上也不误判）',
+    bDayK[0] === T0 && (bDayK.length === hBefore + 1 || bDayK.length === hAfter + 1), `len=${bDayK.length} h=${hBefore}->${hAfter}`);
+  const ledHalf = wRun({ hours: 'day', range: { from: T0, to: T0 + 6 * 3600e3 }, model: '' }, [], { body: { rows: rRows } }, {});
+  const ledFull = wRun({ hours: 'day', range: { from: T0, to: nx(T0) }, model: '' }, [], { body: { rows: rRows } }, {});
+  check('DR-UC-1 钉：账本行（日粒度）正午落在窗内 → 上正午桶；落在窗外 → 不计入图但被显式计数（图/数差额有交代）',
+    ledFull.ledgerOff() === 0 && ledHalf.ledgerOff() === 1, `full=${ledFull.ledgerOff()} half=${ledHalf.ledgerOff()}`);
+  check('DR-UC-1 钉：过窗结果不因展示层而变——KPI 口径(aggLogs)含半天窗的账本行，图表另计（图与数各自可解释）',
+    halfWindow.aggLogs.length === 1 && halfWindow.ledgerOff() === 1 && logsOf(halfWindow).length === 0,
+    `agg=${halfWindow.aggLogs.length} off=${halfWindow.ledgerOff()}`);
+
+  // —— ⑦ 月历卡片渲染级钉：用「记录型 el()」跑页面里**真实的 calCard**（含真实 dayInfo），
+  //     不引 DOM、也不在测试里另写一份分类逻辑——纯函数钉覆盖不到 UI 组装路径（列数/禁用/高亮/文案）。
+  const mkRec = () => {
+    const arr: any[] = [];
+    const el = (tag: string, attrs: any = {}, ...kids: any[]) => {
+      const n: any = { tag, attrs: attrs || {}, kids: kids.flat().filter((k: any) => k != null) };
+      arr.push(n);
+      return n;
+    };
+    return { arr, el };
+  };
+  const calSrc = pick('calCard');
+  const calRun = (st: any, o: any, raw: any[], roll: any, recEl: any) =>
+    new Function('ovSt', 'o', 'allLogs', 'rollRes', 'el', 'go',
+      sPure + '\n' + sAvail + '\nconst calCard = ' + calSrc + ';\nreturn calCard();')(st, o, raw, roll, recEl, () => {});
+  const recAvail = { oldestLogTs: dOff(2) + 3600e3, newestLogTs: Date.now() };
+  const avLogs = [{ ts: dOff(1) + 7200e3, requestedModel: 'm1', ok: true, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }];
+  const avRoll = { body: { rows: [rRow(dayStr(5), 3)] } };
+  const r1 = mkRec();
+  const calSt = { hours: 'day', range: { from: T0, to: nx(T0) }, cal: { open: true, month: T0, start: null }, model: '' };
+  calRun(calSt, recAvail, avLogs, avRoll, r1.el);
+  const gridNode = r1.arr.find((n: any) => typeof n.attrs.style === 'string' && n.attrs.style.includes('grid-template-columns:repeat(7,1fr)'));
+  const dayCells = gridNode ? gridNode.kids.filter((k: any) => k.tag === 'button') : [];
+  const heads = gridNode ? gridNode.kids.filter((k: any) => k.tag === 'div') : [];
+  check('DR-UC-1 钉（渲染级）：月历真的铺出 7 列周表头 + 整周天格（不是只有纯函数算得对）',
+    !!gridNode && heads.length === 7 && dayCells.length % 7 === 0 && dayCells.length >= 28, `heads=${heads.length} cells=${dayCells.length}`);
+  const bNode = r1.arr.find((n: any) => n.tag === 'b');
+  check('DR-UC-1 钉（渲染级）：卡片标题写出「YYYY 年 MM 月」',
+    !!bNode && /^\d{4} 年 \d{2} 月$/.test(String(bNode.kids[0])), bNode ? String(bNode.kids[0]) : 'none');
+  const lbls = r1.arr.filter((n: any) => n.tag === 'button').map((n: any) => n.kids.map((k: any) => (typeof k === 'string' ? k : '')).join(''));
+  check('DR-UC-1 钉（渲染级）：月份导航与预设快捷键全部在场（今天/昨天/本周/本月/上月/近 7 天（自然日）/近 30 天（自然日）/‹/›/回到今天）',
+    ['今天', '昨天', '本周', '本月', '上月', '近 7 天（自然日）', '近 30 天（自然日）', '‹', '›', '回到今天'].every((t) => lbls.includes(t)), lbls.join(','));
+  const mD0 = new Date(T0), mDays = new Date(mD0.getFullYear(), mD0.getMonth() + 1, 0).getDate();
+  const ymPrefix = wDay.dayKey(T0).slice(0, 7); // dayKey 是页面侧函数：从抽出来的那份取，别在测试里另写
+  const futureCells = dayCells.filter((c: any) => c.attrs.disabled === '');
+  const inMonthFuture = futureCells.filter((c: any) => String(c.attrs.title).startsWith(ymPrefix));
+  check('DR-UC-1 钉（渲染级）：未来日 disabled 且个数=本月今天之后的天数（不是只灰显仍可点）',
+    futureCells.every((c: any) => /未来日期/.test(String(c.attrs.title))) && inMonthFuture.length === Math.max(0, mDays - mD0.getDate()),
+    `future=${futureCells.length} inMonth=${inMonthFuture.length} expect=${Math.max(0, mDays - mD0.getDate())}`);
+  const selCells = dayCells.filter((c: any) => /background:var\(--accent\)/.test(String(c.attrs.style)));
+  check('DR-UC-1 钉（渲染级）：单日区间恰好高亮一格，且选中态来自 ovSt.range（不是组件本地状态）',
+    selCells.length === 1 && String(selCells[0].attrs.title).startsWith(wDay.dayKey(T0)), `sel=${selCells.length}`);
+  const rollCells = dayCells.filter((c: any) => String(c.attrs.title).includes('（仅日账本，无明细）'));
+  const rawCells = dayCells.filter((c: any) => /次请求/.test(String(c.attrs.title)) && !/仅日账本/.test(String(c.attrs.title)));
+  check('DR-UC-1 钉（渲染级）：可用性态真的映射到视觉——仅账本日斜体、有明细日加粗（title 与样式同源）',
+    rollCells.every((c: any) => /font-style:italic/.test(String(c.attrs.style))) && rawCells.every((c: any) => /font-weight:700/.test(String(c.attrs.style)))
+    && (rollCells.length + rawCells.length) > 0, `roll=${rollCells.length} raw=${rawCells.length}`);
+  check('DR-UC-1 钉（渲染级）：头部同时给出当前区间文案（用户知道在看哪段）',
+    r1.arr.some((n: any) => n.kids.some((k: any) => typeof k === 'string' && k.startsWith('当前：'))), '');
+  // —— ⑧ 按窗取数的截断提示：宽区间撞上 5000 条上限不许静默少数据 ——
+  const newestFirst = (n: number, from: number, stepMs: number) => Array.from({ length: n }, (_, i) => ({ ts: from + i * stepMs })).reverse();
+  const rWide = { from: dOff(3), to: nx(T0) };
+  check('DR-UC-1 钉：取回 5001 条（=多取的一条也回来了）→ 判为「明细真被裁」（必须挂横幅，不静默）',
+    wRun({ hours: 'day', range: rWide, model: '' }, newestFirst(5001, dOff(2), 60000), null, {}).logTruncatedNow() === true, '');
+  check('DR-UC-1 钉：恰好 5000 条、一条没少 → 不许误报（验证者实测旧判据在此处误报：末元素晚于 from 就报警，实际没裁）',
+    wRun({ hours: 'day', range: rWide, model: '' }, newestFirst(5000, dOff(2), 60000), null, {}).logTruncatedNow() === false
+    && wRun({ hours: 'day', range: rWide, model: '' }, newestFirst(5000, rWide.from, 60000), null, {}).logTruncatedNow() === false, '');
+  check('DR-UC-1 钉：不足上限不算截断；预设档恒不适用该判据（预设另有 F6 横幅口径，两个口径不许混）',
+    wRun({ hours: 'day', range: rWide, model: '' }, newestFirst(4999, dOff(2), 60000), null, {}).logTruncatedNow() === false
+    && wRun({ hours: 'day', model: '' }, newestFirst(5001, dOff(2), 60000), null, {}).logTruncatedNow() === false, '');
+  // 取数 URL 也是真代码：自定义区间必须多取一条（否则判据没法区分"恰好 5000"与"真被裁"），并带 from/to；预设档不带
+  const uCustom = wRun({ hours: 'day', range: rWide, model: '' }, [], null, {}).logUrl;
+  const uPreset = wRun({ hours: 'day', model: '' }, [], null, {}).logUrl;
+  check('DR-UC-1 钉：请求 URL——自定义区间带 from/to 且 limit=5001（多取一条以判定截断）',
+    uCustom.includes('limit=5001') && uCustom.includes('from=' + rWide.from) && uCustom.includes('to=' + rWide.to), String(uCustom));
+  check('DR-UC-1 钉：请求 URL——预设档仍是 limit=5000 且不带 from/to（接口缺省行为逐字不变）',
+    uPreset === '/api/logs?limit=5000', String(uPreset));
+  const r2 = mkRec();
+  calRun({ hours: 'day', range: { from: T0, to: nx(T0) }, cal: { open: true, month: T0, start: T0 }, model: '' }, recAvail, avLogs, avRoll, r2.el);
+  const pendCells = r2.arr.filter((n: any) => n.tag === 'button' && /outline:2px solid var\(--accent\)/.test(String(n.attrs.style)));
+  check('DR-UC-1 钉（渲染级）：已选起点态可见——起点格描边 + 头部提示「再点一天完成区间」',
+    pendCells.length === 1 && r2.arr.some((n: any) => n.kids.some((k: any) => typeof k === 'string' && k.includes('再点一天完成区间'))), `pend=${pendCells.length}`);
 }
 {
   // 审查 P1-1 展示层钉：tooltip 不得再用 innerHTML 拼数据（上游字符串曾可在此执行——
