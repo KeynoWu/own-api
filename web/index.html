@@ -162,7 +162,7 @@ const copy = (t) => {
   const fb = () => window.prompt('请手动复制（Ctrl+C）：', t);
   try { navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast('已复制'), fb) : fb(); } catch { fb(); }
 };
-const num = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n || 0));
+const num = (n) => Number(n || 0).toLocaleString('en-US'); // 具体数字 + 千分位分组（1,234,567）——不用 K/M 缩写，计数一眼见真值
 const money = (n) => '$' + (Number(n) || 0).toFixed(4);
 const ago = (t) => {
   if (!t) return '-';
